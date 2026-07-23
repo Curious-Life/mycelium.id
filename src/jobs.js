@@ -24,6 +24,7 @@ import { safeVaultCopy } from './db/backup.js';
 import { assertVaultDiskHeadroom } from './db/disk-guard.js';
 import { getMasterKey } from './crypto/crypto-local.js';
 import { identityEnv } from './spawn-env.js';
+import { isDeleteRunning } from './core/delete-lane.js';
 
 /**
  * Kill-switch for the destructive re-cluster. Generate (auto OR manual) rebuilds
@@ -108,6 +109,17 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   if (!measureOnly && generateLocked()) {
     console.error('[mycelium] Generate is LOCKED (.generate-disabled / MYCELIUM_DISABLE_GENERATE) — refusing to re-cluster.');
     return { jobId: null, status: 'disabled' };
+  }
+  // REVERSE WRITER-GUARD (the missing half). portal-data.js already refuses to
+  // START a delete while a Generate runs; nothing stopped a Generate from starting
+  // DURING a delete. cluster.py builds its old→new stabilization diff by reading
+  // clustering_points — read it mid-delete and it sees a TORN membership, so ids
+  // mis-stabilize and a new cluster's stats land in a half-dead profile row. Both
+  // real and measure-only runs are refused: measure-only still reads the same
+  // half-emptied tables. Fail-closed: no child, no DB writes.
+  if (isDeleteRunning()) {
+    console.error('[mycelium] a bulk delete is in flight — refusing to start a clustering run.');
+    return { jobId: null, status: 'delete_running' };
   }
   // Single-flight: block while a child is still ALIVE — `running`, or `canceled`
   // but not yet reaped (cur.child set). Prevents two clustering children racing on

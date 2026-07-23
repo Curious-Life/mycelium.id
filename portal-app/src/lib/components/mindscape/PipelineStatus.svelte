@@ -113,9 +113,15 @@
 	// The two on-box stages carry co-located controls; the derived stages (cluster/describe/measure)
 	// and import do not. Controls show when there is something to Stop (running) or to Resume/Restart
 	// (paused) — never on a down/no-model block (nothing to stop) or a settled/pending stage.
+	// ⚠️ `waiting_embed` counts as controllable (QA6). While categorize is DEFERRED behind a draining
+	// embed stage it is neither running nor paused — so without this arm its Stop/Restart controls
+	// vanished for the entire length of a large import, i.e. exactly when a user watching their fans
+	// most wants to pre-empt the labeling pass. The stage is scheduled work, not a fault: keep the
+	// controls reachable.
 	const CONTROLLED = new Set(['embed', 'categorize']);
 	const hasControls = (stage: Stage) =>
-		CONTROLLED.has(stage.key) && (stage.state === 'running' || stage.paused === true);
+		CONTROLLED.has(stage.key)
+		&& (stage.state === 'running' || stage.paused === true || stage.reason === 'waiting_embed');
 </script>
 
 <!-- ⚠️ ALWAYS MOUNTED, and it must SAY SOMETHING for every overall — the design's core fix is that

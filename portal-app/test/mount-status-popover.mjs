@@ -21,14 +21,28 @@
 //   CLICK_RESUME=1         click the Processing row's Resume button and re-observe
 import { compile } from 'svelte/compiler';
 import { build } from 'esbuild';
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 
 const ENV = (k) => process.env[k] === '1';
-const GEN = '.gen-mount-status-popover';
-rmSync(GEN, { recursive: true, force: true });
-mkdirSync(GEN, { recursive: true });
+// ⚠️ PER-PROCESS temp dir — never a FIXED path. verify:readiness runs under both the top-level
+// `verify` chain AND `verify:core`, and CI runs those groups concurrently on one checkout ⇒ two
+// of these children live in the same portal-app cwd at once. The old fixed `.gen-mount-status-
+// popover` let one child's rmSync/writeFileSync race another's esbuild read → the child crashed
+// OUTSIDE the try/catch (setup phase) with ENOENT / esbuild "Cannot read file" / ENOTEMPTY, which
+// surfaced as execFileSync "Command failed" (a nonzero-exit CHILD CRASH, not a clean {ok:false})
+// and reded G4b/G-family/ON-3 at random under load. mkdtempSync hands each process its OWN
+// collision-proof dir. It MUST stay INSIDE portal-app: the compiled Popover.js imports bare
+// specifiers ('svelte', 'svelte/internal/…') that Node resolves by walking up to
+// portal-app/node_modules — an os.tmpdir() location has no node_modules above it. `exit` cleanup
+// covers the setup-phase crash path (before the try) so no orphan dir is left in the tree.
+const GEN = mkdtempSync('.gen-mount-status-popover-');
+const cleanupGen = () => { try { rmSync(GEN, { recursive: true, force: true }); } catch {} };
+process.on('exit', cleanupGen);
+// SIGTERM/SIGINT skip the 'exit' handler — execFileSync sends SIGTERM on its timeout, so without
+// this a hard-killed child would orphan its unique dir in portal-app. Clean up, then exit.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { cleanupGen(); process.exit(1); });
 
 // ON-3 — the `pipeline` slice fixture the vault-health pill reads. PIPELINE=<done|working|error>
 // picks the collapsed-pill scenario; the shapes are byte-for-byte what readiness.js pipeline()
@@ -247,7 +261,7 @@ for (const k of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'N
 }
 
 const { mount, unmount, flushSync } = await import('svelte');
-const Popover = (await import(pathToFileURL(`${process.cwd()}/${GEN}/Popover.js`).href)).default;
+const Popover = (await import(pathToFileURL(resolve(GEN, 'Popover.js')).href)).default;
 
 // visible(): the NAMED-AND-INCOMPLETE hiding-mechanism list from mount-generate-render.mjs.
 // jsdom does no layout; a pass means "none of these mechanisms hides it", not "a human can
@@ -373,9 +387,26 @@ try {
   // read so it cannot perturb the cost assertions; PipelineStatus is a pure subscriber (no fetch).
   const pill = pillEl();
   if (pill) {
+    // ⭐ ON-3c COST measurement — count ONLY the fetches the expand itself triggers, deterministic
+    // under CI contention. Background async here (the setInterval(refresh, pollMs) poll, the
+    // activity-store poll, an in-flight refresh's continuation) all push to __fetches when they run
+    // — but a JS timer callback or promise continuation fires ONLY when we yield to the event loop.
+    // A measurement window that contains NO `await` therefore cannot admit a background poll tick,
+    // so nothing unrelated can be miscounted (the flake: the old window straddled a setTimeout, and
+    // under load a 60ms poll tick landed inside it → expandAddedFetches spuriously 1+).
+    //
+    // The api stub pushes to __fetches SYNCHRONOUSLY at fetch initiation (api-stub.js first line), so
+    // a fetch the expand genuinely fires — in the click handler or in a flushSync-driven mount effect
+    // (e.g. a regression where PipelineStatus fetches its own data in onMount instead of subscribing)
+    // — still lands in __fetches during the synchronous click+flushSync. Teeth intact: measure across
+    // the synchronous expand work ONLY, THEN yield for the detail's render assertions.
     const fetchesBefore = globalThis.__fetches.length;
     pill.click();
     flushSync();
+    // Expanding must not fire a network read — the detail rides the already-fed store. Snapshot the
+    // delta HERE, before any await, so only expand-caused fetches are in scope.
+    result.expandAddedFetches = globalThis.__fetches.length - fetchesBefore;
+    // Now it is safe to yield: a background poll tick after this point cannot perturb the count above.
     await new Promise((r) => setTimeout(r, 20));
     flushSync();
     const detail = D.querySelector('[data-testid="vault-pill-detail"]');
@@ -384,8 +415,6 @@ try {
     result.pillDetailStageKeys = detail ? [...detail.querySelectorAll('.pipe-stage')].map((li) => li.getAttribute('data-key')) : [];
     result.pillDetailText = norm(detail?.textContent);
     result.pillDetailHasRemedy = !!detail?.querySelector('button.pipe-action');
-    // Expanding must not fire a network read — the detail rides the already-fed store.
-    result.expandAddedFetches = globalThis.__fetches.length - fetchesBefore;
   }
 
   unmount(app);

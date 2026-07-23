@@ -17,6 +17,7 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { assertSafeColumns, clampLimit } from './column-guard.js';
 import { bustMindscapePoints } from '../mindscape-cache.js';
+import { purgeDerived } from '../core/delete-cascade.js';
 
 /** A fresh capability epoch for unlisted links (16 bytes hex = 128 bits). */
 function randomNonce() {
@@ -42,6 +43,11 @@ export function createDocumentsNamespace(deps) {
   // fail-closed so a future caller can't silently lose snapshot atomicity.
   if (!rawDb || typeof rawDb.prepare !== 'function') throw new TypeError('createDocumentsNamespace: rawDb (better-sqlite3 handle) required');
   if (typeof withTransaction !== 'function') throw new TypeError('createDocumentsNamespace: withTransaction required');
+
+  // Minimal db facade for the shared delete cascade (src/core/delete-cascade.js):
+  // purgeDerived only ever touches db.rawQuery, and this namespace is constructed
+  // before the assembled `db` object exists.
+  const cascadeDb = { rawQuery: (sql, params = []) => d1Query(sql, params) };
 
   // Hook lists that fire fire-and-forget after a successful upsert or
   // delete. Multiple subscribers (publishing pipeline, doc-broadcaster,
@@ -353,12 +359,36 @@ export function createDocumentsNamespace(deps) {
       return updateColumns(userId, path, 'title = ?', [typeof title === 'string' ? title : null]);
     },
 
-    async delete(userId, path) {
-      await d1Query(
-        `DELETE FROM documents WHERE user_id = ? AND path = ?`,
-        [userId, path],
-      );
+    /**
+     * Per-document HARD delete (the Library "delete" route,
+     * src/portal-compat.js:214). Until #QA6 this deleted ONE row and fired
+     * afterDeleteHooks — a list that NOTHING ever registers into — so it left the
+     * clustering point, the search-sidecar entry, the note/entity links and every
+     * document_version (which holds prior CONTENT in `diff`) behind: a silent
+     * copy-paste divergence from its two siblings in this same file. It now routes
+     * through the SAME cascade as deleteIds/redact so the three can't diverge again.
+     *
+     * @param {string} userId
+     * @param {string} path
+     * @param {{searchHelpers?:object}} [opts]
+     * @returns {Promise<{deleted:number, cascade:object|null}>}
+     */
+    async delete(userId, path, opts = {}) {
+      if (!userId) throw new Error('documents.delete: userId required (fail-closed)');
+      // Resolve the id first: clustering_points, the search key (`document:<id>`)
+      // and document_versions are all keyed by documents.id, NOT by path.
+      const cur = await d1Query(`SELECT id FROM documents WHERE user_id = ? AND path = ?`, [userId, path]);
+      const row = firstRow(cur);
+      if (!row) return { deleted: 0, cascade: null };
+      // Derived graph FIRST (fail-closed) — a throw leaves the document in place
+      // rather than reporting a delete over a half-purged graph. documentPaths purges
+      // the path-keyed share_links (bearer capability) + context_documents so a token
+      // can't resurrect against a document recreated at this path.
+      const cascade = await purgeDerived(cascadeDb, userId, { documentIds: [row.id], documentPaths: [path] }, { searchHelpers: opts.searchHelpers });
+      await d1Query(`DELETE FROM documents WHERE user_id = ? AND path = ?`, [userId, path]);
+      bustMindscapePoints(userId);
       if (afterDeleteHooks.length) fireHooks(afterDeleteHooks, { user_id: userId, path });
+      return { deleted: 1, cascade };
     },
 
     /**
@@ -374,21 +404,22 @@ export function createDocumentsNamespace(deps) {
      * @param {string} userId
      * @returns {Promise<{deleted:number}>}
      */
-    async deleteIds(ids, userId) {
+    async deleteIds(ids, userId, opts = {}) {
       const list = Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : [];
       if (!userId) throw new Error('documents.deleteIds: userId required (fail-closed, never table-wide)');
       if (!list.length) return { deleted: 0 };
       const ph = list.map(() => '?').join(',');
-      await d1Query(
-        `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'document' AND source_id IN (${ph})`,
-        [userId, ...list],
-      );
+      // Resolve paths BEFORE the delete — share_links + context_documents are keyed
+      // by document_path, and the rows are gone after the DELETE below.
+      const pathRows = await d1Query(`SELECT path FROM documents WHERE user_id = ? AND id IN (${ph})`, [userId, ...list]);
+      const documentPaths = (pathRows?.results || []).map((r) => r.path).filter(Boolean);
+      const cascade = await purgeDerived(cascadeDb, userId, { documentIds: list, documentPaths }, { searchHelpers: opts.searchHelpers });
       await d1Query(
         `DELETE FROM documents WHERE user_id = ? AND id IN (${ph})`,
         [userId, ...list],
       );
       bustMindscapePoints(userId);
-      return { deleted: list.length };
+      return { deleted: list.length, cascade };
     },
 
     /**
@@ -398,7 +429,7 @@ export function createDocumentsNamespace(deps) {
      * content hash + length for the audit ledger — never plaintext. Fires the
      * after-delete hooks so broadcasters/publishing react. Local SQLite.
      */
-    async redact(userId, path) {
+    async redact(userId, path, opts = {}) {
       const cur = await d1Query(
         `SELECT id, content, forgotten_at FROM documents WHERE user_id = ? AND path = ?`,
         [userId, path],
@@ -408,6 +439,11 @@ export function createDocumentsNamespace(deps) {
       if (row.forgotten_at) return { found: true, alreadyForgotten: true, contentHash: null, length: 0 };
       const content = row.content ?? '';
       const contentHash = createHash('sha256').update(content, 'utf8').digest('hex');
+      // FULL cascade FIRST (fail-closed). Before this, redact() nulled the columns
+      // and dropped the point but left the sidecar row (`document:<id>` in fts_docs
+      // + vec_docs_768/256 + doc_meta) AND every document_version — so a forgotten
+      // document stayed searchable by its own text and recoverable from `diff`.
+      await purgeDerived(cascadeDb, userId, { documentIds: [row.id], documentPaths: [path] }, { searchHelpers: opts.searchHelpers });
       await d1Query(
         `UPDATE documents SET
            content = NULL, summary = NULL, title = NULL, tags = NULL, entities = NULL,
@@ -417,11 +453,8 @@ export function createDocumentsNamespace(deps) {
          WHERE user_id = ? AND path = ?`,
         [userId, path],
       );
-      await d1Query(
-        `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'document' AND source_id = ?`,
-        [userId, row.id],
-      );
-      bustMindscapePoints(userId); // clustering_points deleted → drop BOTH points + full caches
+      // (clustering_points already purged by the cascade above.)
+      bustMindscapePoints(userId);
       if (afterDeleteHooks.length) fireHooks(afterDeleteHooks, { user_id: userId, path });
       return { found: true, contentHash, length: content.length };
     },

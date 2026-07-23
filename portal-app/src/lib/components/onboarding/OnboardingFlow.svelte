@@ -287,22 +287,77 @@
 	let subAck = $state(false);
 	let subConnecting = $state(false);
 	let subError = $state('');
+	// QA6-P1 #3: this used to POST the LEGACY /auth/claude/import, whose only outcome on
+	// a machine without a readable Claude Code credential is a raw ClaudeImportError
+	// string ("No Claude subscription access token found in the credentials file.") —
+	// a wall. It dead-ended even though the browser flow, which works on a box with no
+	// `claude` CLI at all, already existed. It now runs the SAME ladder as Settings:
+	// /auth/claude/connect probes every credential store and, when nothing usable is
+	// found, hands back the real reason plus a PKCE URL — which we present INLINE with
+	// the manual paste, automatically. Auto-detect failure degrades TOWARD the working
+	// path instead of terminating on it.
+	let subWebUrl = $state<string | null>(null);
+	let subWebReason = $state<string | null>(null);
+	let subCode = $state('');
+	let subOpenFailed = $state(false);
+	let subUrlCopied = $state(false);
+	// Same discipline as AISettings: a Tauri webview can swallow a _blank navigation, so
+	// the URL is always on screen and a failed open() says so out loud.
+	function openSubSignIn() {
+		if (!subWebUrl) return;
+		subOpenFailed = false;
+		try { if (!window.open(subWebUrl, '_blank', 'noopener,noreferrer')) subOpenFailed = true; }
+		catch { subOpenFailed = true; }
+	}
+	async function copySubUrl() {
+		if (!subWebUrl) return;
+		try { await navigator.clipboard.writeText(subWebUrl); subUrlCopied = true; setTimeout(() => { subUrlCopied = false; }, 1600); }
+		catch { /* the URL is selectable right there */ }
+	}
 	async function connectSub() {
 		if (!subAck) return;
 		subConnecting = true;
 		subError = '';
+		subWebUrl = null; subWebReason = null; subOpenFailed = false;
 		try {
-			const res = await api('/portal/auth/claude/import', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true }) });
+			const res = await api('/portal/auth/claude/connect', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true }) });
 			const d = await res.json().catch(() => ({}));
 			if (!res.ok || !d.ok) {
-				subError = d.error || 'Could not connect — make sure you are logged in to Claude Code, or add a key in AI settings.';
-			} else {
+				subError = d.error || 'Could not connect — open AI settings to finish.';
+			} else if (d.connected) {
 				hasProvider = true;
 				activeProviderLabel = 'Claude Pro/Max';
 				subOpen = false;
+			} else if (d.url) {
+				// Nothing usable on this device. NOT an error — the next step, shown here.
+				subWebUrl = d.url;
+				subWebReason = d.reason || null;
+			} else {
+				subError = d.detail || 'Could not start the browser sign-in — open AI settings to finish.';
 			}
 		} catch {
 			subError = 'Could not connect — open AI settings to finish.';
+		} finally {
+			subConnecting = false;
+		}
+	}
+	// Step 2 of the ladder: paste the code back. Mirrors AISettings.finishSubWeb —
+	// the server consumes the pending PKCE flow BEFORE exchanging, so any failure has
+	// burned the verifier; drop back to step 1 rather than leaving a dead link.
+	async function finishSubWeb() {
+		if (!subCode.trim()) return;
+		subConnecting = true;
+		subError = '';
+		try {
+			const res = await api('/portal/auth/claude/code', { method: 'POST', body: JSON.stringify({ acknowledgeToS: true, code: subCode.trim() }) });
+			const d = await res.json().catch(() => ({}));
+			if (!res.ok || !d.ok) throw new Error(d.error || 'Could not complete the connection');
+			hasProvider = true;
+			activeProviderLabel = 'Claude Pro/Max';
+			subOpen = false; subWebUrl = null; subCode = '';
+		} catch (e: any) {
+			subError = e?.message || 'Could not complete the connection';
+			subWebUrl = null; subCode = '';
 		} finally {
 			subConnecting = false;
 		}
@@ -394,13 +449,35 @@
 				<!-- Claude subscription — use your existing Claude login, no key to paste. -->
 				{#if !subOpen}
 					<button class="btn-primary sm sub-connect" onclick={() => { subOpen = true; subError = ''; }}>✦ Use your Claude subscription</button>
-				{:else}
+				{:else if !subWebUrl}
 					<label class="sub-ack">
 						<input type="checkbox" bind:checked={subAck} />
 						<span>Use my existing Claude login. Automated use of a Pro/Max plan may be subject to Anthropic’s Terms.</span>
 					</label>
 					<button class="btn-primary sm" disabled={!subAck || subConnecting} onclick={connectSub}>
 						{subConnecting ? 'Connecting…' : 'Connect'}
+					</button>
+				{:else}
+					<!-- Auto-detect found nothing usable → the MANUAL path, inline, with the
+					     real reason. This is what replaced the dead-end error string. -->
+					<p class="step-hint">
+						{#if subWebReason === 'declined'}macOS blocked access to your saved Claude login — you’re signed in, but we can’t read it. Sign in through your browser instead:
+						{:else if subWebReason === 'wrong_scope'}The login on this device is an admin setup-token, not a subscription sign-in. Sign in through your browser:
+						{:else if subWebReason === 'expired'}Your Claude session couldn’t be renewed. Sign in again:
+						{:else}No Claude login found on this device. Sign in through your browser:
+						{/if}
+					</p>
+					<div class="sub-web-actions">
+						<button class="btn-primary sm" onclick={openSubSignIn}>Open Claude sign-in ↗</button>
+						<button class="btn-skip" onclick={copySubUrl}>{subUrlCopied ? '✓ Link copied' : 'Copy link'}</button>
+					</div>
+					{#if subOpenFailed}<p class="step-err">Couldn’t open a browser window from here. Copy the link below and paste it into your browser.</p>{/if}
+					<div class="sub-url"><code>{subWebUrl}</code></div>
+					<p class="step-hint">Approve it, then paste the code Claude gives you:</p>
+					<input class="sub-code" placeholder="Paste the code from Claude" bind:value={subCode} autocomplete="off" spellcheck="false"
+						onkeydown={(e) => { if (e.key === 'Enter' && subCode.trim()) finishSubWeb(); }} />
+					<button class="btn-primary sm" disabled={!subCode.trim() || subConnecting} onclick={finishSubWeb}>
+						{subConnecting ? 'Connecting…' : 'Finish connecting'}
 					</button>
 				{/if}
 				{#if subError}<p class="step-err">{subError}</p>{/if}
@@ -544,6 +621,24 @@
 		color: var(--color-text-secondary, #9898a3); cursor: pointer;
 	}
 	.sub-ack input { margin-top: 0.15rem; accent-color: var(--color-accent-aurum); flex-shrink: 0; }
+
+	/* Ladder step 2 (manual paste) — the inline fallback for a failed auto-detect. */
+	.sub-web-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-left: 1.85rem; }
+	.sub-url {
+		margin: 0.35rem 0 0.4rem 1.85rem; max-width: 22rem; overflow-x: auto;
+		padding: 0.3rem 0.45rem; border-radius: 6px; background: rgba(0,0,0,0.25);
+	}
+	.sub-url code {
+		font-family: var(--font-mono, monospace); font-size: 0.6rem; white-space: nowrap;
+		color: var(--color-text-secondary, #9898a3); user-select: all;
+	}
+	.sub-code {
+		display: block; margin: 0.25rem 0 0.45rem 1.85rem; max-width: 22rem; width: 100%;
+		padding: 0.4rem 0.55rem; border-radius: 6px; font-size: 0.72rem;
+		border: 1px solid var(--color-border, rgba(255,255,255,0.12));
+		background: var(--color-elevated, rgba(255,255,255,0.05));
+		color: var(--color-text-primary, #eee); font-family: var(--font-mono, monospace);
+	}
 
 	/* ── Gated reveal ──────────────────────────────────────────────────────── */
 

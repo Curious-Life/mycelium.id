@@ -305,6 +305,17 @@ export async function categorizeProjection(db, userId) {
     const paused = (() => { try { return isCategorizePaused(); } catch { return false; } })();
     // The drainer's measured L1 throughput (banked per pass) — the rate source for the ETA below.
     const st = (() => { try { return getEnrichDrainerStatus(); } catch { return null; } })();
+    // QA6 — DEFERRED, NOT RUNNING. The drainer serializes the two on-box stages behind embedding:
+    // while the embed backlog is still draining, categorize does NOT run this cycle (drainer.js
+    // `waitOnEmbed`). Read the drainer's OWN in-memory decision (free) — never re-derived from
+    // counts here (a second derivation would drift from the first). This is the activity-feed TWIN
+    // of the pipeline slice's `waiting_embed` arm (readiness.js §waiting_embed): without it this row
+    // rendered `running` + "on device" + a live categorizeEta counting down against a loop that is
+    // NOT executing — and because l1Barren/l1Errs cannot move while the loop is idle, that ETA
+    // FREEZES at its last value and ticks a stable, plausible, WRONG countdown for the whole import
+    // (the §3.9 plausible-wrong-number class the PR fixes for the pipeline slice — applied here too,
+    // so the two surfaces stop contradicting each other). Absent flag ⇒ false (fail-soft to pre-QA6).
+    const waitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
     // null ⇒ the owner has not approved an on-box labeling model (§3.10c). NOTHING is
     // running: no model, no daemon woken, and the model may not even be on disk. Saying
     // "running" here would be the same lie the embed row told for a month.
@@ -313,27 +324,33 @@ export async function categorizeProjection(db, userId) {
     return {
       id: 'categorize',
       kind: 'categorize',
-      // Surface the blocked states in the always-on indicator so a user who stopped the
-      // churn — or never started it — sees pending work waiting, not just silence.
-      // "no local model" is a legitimate STEADY STATE, not a transient (§3.5): it stays
-      // until the owner approves one, and it must read as a choice, not a fault.
+      // Surface the blocked/deferred states in the always-on indicator so a user who stopped the
+      // churn — or never started it, or whose labeling is waiting behind embedding — sees pending
+      // work waiting, not just silence. "no local model" is a legitimate STEADY STATE, not a
+      // transient (§3.5); "waiting for embedding" is a SCHEDULING state (a choice-free deferral,
+      // never a fault). Both must read as a state, not a fault. no_model > paused > waiting_embed,
+      // matching the pipeline slice's precedence.
       stage: noModel ? `${KIND_LABELS.categorize} · no local model`
         : paused ? `${KIND_LABELS.categorize} · paused`
-          : KIND_LABELS.categorize,
+          : waitingOnEmbed ? `${KIND_LABELS.categorize} · waiting for embedding`
+            : KIND_LABELS.categorize,
       model: model || null,                              // the APPROVED on-box labeling model, or none
-      process: noModel ? null : PROCESS_LABELS.categorize, // nothing is on-device if nothing runs
+      // nothing is on-device if nothing runs: no model, OR the loop is deferred behind embedding.
+      process: (noModel || waitingOnEmbed) ? null : PROCESS_LABELS.categorize,
       done: tagged,
       total,
       remaining: pending,
       // R2-review (§3.9): a REAL L1 estimate from the drainer's measured throughput (41/min ⇒ ~31h
       // for a 76k import). Was hardcoded `null` with "per-second rate not measured in V1" — true
       // when written, but the June sweep had mislabeled L1's rate as embedding's, which is why this
-      // never-measured stage sat unpriced for a year. null on paused / no model / nothing tagged
-      // yet / no work / a stalled model (categorizeEta enforces all five).
-      etaSeconds: categorizeEta(st, pending, paused, noModel),
-      // `paused` covers both: the work is waiting on a decision, not in flight. It is NOT
-      // 'stalled' — nothing is broken; the user simply hasn't approved a model.
-      status: (paused || noModel) ? 'paused' : 'running',
+      // never-measured stage sat unpriced for a year. WITHDRAWN (paused || waitingOnEmbed): a
+      // countdown to a moment the loop is not working toward is the frozen-ETA lie above.
+      // categorizeEta also nulls on no model / nothing tagged yet / no work / a stalled model.
+      etaSeconds: categorizeEta(st, pending, paused || waitingOnEmbed, noModel),
+      // `paused` covers waiting-on-a-decision (stopped OR no model); `waiting` is the deferral —
+      // NOT the owner's pause (they chose nothing) and NOT 'stalled' (nothing is broken; embedding
+      // is progressing). Never 'running' while the loop is idle.
+      status: (paused || noModel) ? 'paused' : waitingOnEmbed ? 'waiting' : 'running',
       startedAt: null,
       finishedAt: null,
     };
@@ -358,6 +375,12 @@ export async function enrichProjection(db, userId) {
     const paused = (() => { try { return isCategorizePaused(); } catch { return false; } })();
     // The drainer's measured L2 throughput (banked per pass) — the rate source for the ETA.
     const st = (() => { try { return getEnrichDrainerStatus(); } catch { return null; } })();
+    // QA6 — DEFERRED, NOT RUNNING. `waitOnEmbed` defers BOTH on-box stages (drainer.js: the L1 AND
+    // L2 loops are gated by `!waitOnEmbed`), so this row rendered the same frozen "running · on
+    // device · ~ETA" lie as categorize while embedding drained. Same twin of the pipeline slice's
+    // `waiting_embed` arm; same fail-soft to false. (The flag is named for categorize but governs
+    // both stages — see drainer.js line ~1384.)
+    const waitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
     // null ⇒ the owner has not approved an on-box enrich model (taskModels.enrich). NOTHING runs —
     // it is a legitimate steady state (§3.5), a CHOICE, not a fault (same rule as categorize).
     const model = await defaultEnrichModel(db, userId);
@@ -367,18 +390,21 @@ export async function enrichProjection(db, userId) {
       kind: 'enrich',
       stage: noModel ? `${KIND_LABELS.enrich} · no local model`
         : paused ? `${KIND_LABELS.enrich} · paused`
-          : KIND_LABELS.enrich,
+          : waitingOnEmbed ? `${KIND_LABELS.enrich} · waiting for embedding`
+            : KIND_LABELS.enrich,
       model: model || null,                              // the APPROVED on-box enrich model, or none
-      process: noModel ? null : PROCESS_LABELS.enrich,   // nothing is on-device if nothing runs
+      // nothing is on-device if nothing runs: no model, OR the loop is deferred behind embedding.
+      process: (noModel || waitingOnEmbed) ? null : PROCESS_LABELS.enrich,
       done,
       total,
       remaining: pending,
       // A real L2 estimate from the drainer's measured throughput (8/min ⇒ ~153h for a 76k import).
-      // null on paused / no model / nothing enriched yet / no work / a stalled model.
-      etaSeconds: enrichEta(st, pending, paused, noModel),
-      // `paused` covers both waiting-on-a-decision states (stopped OR no model approved); it is NOT
-      // 'stalled' — nothing is broken. Same shape as categorizeProjection.
-      status: (paused || noModel) ? 'paused' : 'running',
+      // WITHDRAWN (paused || waitingOnEmbed); also null on no model / nothing enriched yet / no work
+      // / a stalled model.
+      etaSeconds: enrichEta(st, pending, paused || waitingOnEmbed, noModel),
+      // `paused` = stopped OR no model approved; `waiting` = deferred behind embedding (a choice-
+      // free scheduling state); never 'running' while the loop is idle. Same shape as categorize.
+      status: (paused || noModel) ? 'paused' : waitingOnEmbed ? 'waiting' : 'running',
       startedAt: null,
       finishedAt: null,
     };

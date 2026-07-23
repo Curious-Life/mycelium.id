@@ -126,6 +126,44 @@ async function main() {
     // ── S8 declared fileSize over IMPORT_LIMIT → 413 (no allocation) ──
     const s8 = await chunk('up_toobig', 0, Buffer.from('x'), 2_000_000, 50_000); // 2MB > 1MB cap
     rec('S8. declared fileSize over IMPORT_LIMIT → 413 (refused before alloc)', s8.status === 413, `status=${s8.status}`);
+
+    // ── S9 no size header — honest OR lying — can bypass the bomb guard (QA6 P7) ──
+    // Repo lesson "bomb guard: declared-size is masked": a guard that trusts the
+    // DECLARED (central-directory) uncompressed size is defeated by a lying header.
+    // The bundle path defends in THREE independent layers (zip-stream.js): ratio
+    // guard, declared-size reject (layer 1), and a counter on bytes ACTUALLY READ
+    // (layer 2). The guarantee that must hold whatever the header says: NO entry
+    // the reader YIELDS ever exceeds maxEntryBytes. We prove it across the header
+    // adversary space with the streaming (yauzl) bundle reader:
+    //   (a) an HONEST oversized entry (declared==actual==300KB, cap 50KB) → refused
+    //       (skipped:'oversize'), never yielded;
+    //   (b) a LYING-LOW header (size fields patched 300KB→40, deflate payload
+    //       intact) → the reader is bounded to the declared bytes (yauzl truncates,
+    //       a future lib that didn't would hit layer 2) — the 300KB bomb is NOT
+    //       inflated; anything yielded is ≤ the cap.
+    // Either way the observed output stays bounded — the header cannot buy the bomb.
+    const { readEntriesSequential } = await import('../src/ingest/zip-stream.js');
+    const REAL = 300_000; const CAP = 50_000;
+    const lz = new JSZip(); lz.file('big.md', 'B'.repeat(REAL));
+    const honest = await lz.generateAsync({ type: 'nodebuffer' });
+    // (a) honest oversized → refused, no bytes.
+    let honestBytes = 0, honestSkipped = false;
+    for await (const e of readEntriesSequential(honest, ['big.md'], { maxEntryBytes: CAP })) {
+      if (e.bytes) honestBytes += e.bytes.length; if (e.skipped) honestSkipped = true;
+    }
+    // (b) lie the header LOW (patch every LE occurrence of the true size), payload intact.
+    const lie = Buffer.from(honest);
+    const real4 = Buffer.alloc(4); real4.writeUInt32LE(REAL, 0);
+    const lie4 = Buffer.alloc(4); lie4.writeUInt32LE(40, 0);
+    let patched = 0;
+    for (let i = 0; i <= lie.length - 4; i++) { if (lie.subarray(i, i + 4).equals(real4)) { lie4.copy(lie, i); patched++; } }
+    let lieMax = 0;
+    for await (const e of readEntriesSequential(lie, ['big.md'], { maxEntryBytes: CAP })) {
+      if (e.bytes) lieMax = Math.max(lieMax, e.bytes.length);
+    }
+    rec('S9. no size header (honest oversized OR lying-low) yields bytes past the cap — the bomb is never inflated',
+      honestSkipped && honestBytes === 0 && patched >= 1 && lieMax <= CAP && lieMax < REAL,
+      `honest:skipped=${honestSkipped},bytes=${honestBytes} lie:patched=${patched},maxYielded=${lieMax} (cap=${CAP}, realBomb=${REAL})`);
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
   }

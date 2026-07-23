@@ -694,6 +694,57 @@ const rec = (n, ok, d = '') => { ledger.push(ok); console.log(`${ok ? 'PASS' : '
   }
 }
 
+// ── H11 — daemon.health() : the QA6 §1 honest read (a PURE probe, never a spawn) ──
+{
+  const mkSpawn = () => { const calls = []; const fn = () => { const c = { stderr: { on() {} }, on() {}, kill() {} }; calls.push({}); return c; }; fn.calls = calls; return fn; };
+
+  // H11a — up daemon → status 'ok', and health() NEVER spawns (pure read).
+  {
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({ isUp: async () => true, spawn, pollMs: 1 });
+    const h = await d.health();
+    rec('H11a. health() up → ok, no spawn (pure read)', h.status === 'ok' && h.running === true && spawn.calls.length === 0, `status=${h.status} spawns=${spawn.calls.length}`);
+  }
+
+  // H11b — installed but down → status 'down' with a reason detail, still no spawn.
+  {
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({ isUp: async () => false, findBinary: () => '/usr/local/bin/ollama', spawn, pollMs: 1 });
+    const h = await d.health();
+    rec('H11b. health() installed+down → down, no spawn', h.status === 'down' && h.installed === true && spawn.calls.length === 0, `status=${h.status} installed=${h.installed}`);
+  }
+
+  // H11c — not installed, auto-install possible → 'deps_missing' (a re-attemptable setup step,
+  // NOT a hard 'no_model'): a downloadable absence must read as recoverable.
+  {
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({ isUp: async () => false, findBinary: () => null, dataDir: '/data', autoInstall: true, spawn, pollMs: 1 });
+    const h = await d.health();
+    rec('H11c. health() absent+fetchable → deps_missing (recoverable)', h.status === 'deps_missing' && h.installed === false, `status=${h.status}`);
+  }
+
+  // H11d — not installed, auto-install OFF → 'no_model' (a genuine dead end for this surface).
+  {
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({ isUp: async () => false, findBinary: () => null, autoInstall: false, spawn, pollMs: 1 });
+    const h = await d.health();
+    rec('H11d. health() absent+no-autoinstall → no_model', h.status === 'no_model' && h.installed === false, `status=${h.status}`);
+  }
+
+  // H11e — a bring-up that FAILED leaves a reason health() surfaces; then a probe that now
+  // answers wins over the stale reason (the "never claim down when it came up" mirror).
+  {
+    let up = false;
+    const spawn = mkSpawn();
+    const d = createOllamaDaemon({ isUp: async () => up, findBinary: () => '/usr/local/bin/ollama', spawn, pollMs: 1, startTimeoutMs: 5 });
+    await d.ensureUp();            // fails (isUp false) → lastResult reason recorded
+    const hDown = await d.health();
+    up = true;                    // the daemon is now answering
+    const hUp = await d.health();  // re-probe must win
+    rec('H11e. re-probe wins over a stale failure reason', hDown.status === 'down' && hUp.status === 'ok', `down=${hDown.status} up=${hUp.status}`);
+  }
+}
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
 console.log(`VERDICT: ${allPass ? 'GO — fit math · ranking · detection · ollama client · daemon · auto-install all verified' : 'NO-GO — see FAIL rows'}`);

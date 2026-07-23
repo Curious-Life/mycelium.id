@@ -12,6 +12,11 @@
 import { readFile } from 'node:fs/promises';
 import { markdownToTelegramHtml, chunkMarkdown, normalizeThreadId, TELEGRAM_MAX_LEN } from './telegram-format.js';
 
+// Bot API upload ceiling for a file sent as multipart: 50MB. We refuse a hair
+// under it so a container/boundary overhead can't tip a "just legal" note over.
+// (NOT the 20MB inbound getFile download limit — a separate constraint.)
+export const MAX_VOICE_UPLOAD_BYTES = 48 * 1024 * 1024;
+
 /**
  * @param {object} deps
  * @param {string} deps.botToken
@@ -232,6 +237,15 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
      */
     async sendVoice({ chatId, filePath, replyToMessageId, messageThreadId }) {
       const bytes = await readFile(filePath);
+      // OUTBOUND cap — a different constraint from the 20MB inbound `getFile`
+      // download limit: the Bot API accepts at most 50MB per uploaded file. Refuse
+      // BEFORE the upload with a code the voice pipeline can report honestly,
+      // instead of burning a multi-minute POST for a guaranteed 413.
+      if (bytes.length > MAX_VOICE_UPLOAD_BYTES) {
+        const err = new Error(`telegram sendVoice payload too large (${bytes.length}B > ${MAX_VOICE_UPLOAD_BYTES}B)`);
+        err.code = 'voice-too-large';
+        throw err;
+      }
       const form = new FormData();
       form.append('chat_id', String(chatId));
       // Route the voice note into the same forum topic as the turn (R3-TGTHREAD).

@@ -47,22 +47,64 @@
 	let transcribing = $state(false);
 	let transcribeProgress = $state(0); // 0–100
 	let transcribeError = $state<string | null>(null);
+	// ⚠️ THE REASON AND THE OFFER ARE SEPARATE FACTS. `transcribeError` used to be the raw
+	// server enum ("no-text", "failed") and there was no Retry at all — a valid, in-limit
+	// recording that failed left the owner with one unexplained word and nothing to press
+	// (QA6 P1 §2). The server now sends `message` (owner copy per reason) and `retryable`;
+	// we render both, and the Retry button appears IFF the server says retrying is honest —
+	// never off the presence of an error string.
+	let transcribeRetryable = $state(false);
+	let transcribeDetail = $state<string | null>(null);
+	// Whether the transcription ENGINE (not this file) is what's blocking, so the panel can
+	// offer the engine-level "Retry connection" that pokes the supervisor.
+	let transcribeEngineFault = $state(false);
+	let engineRetrying = $state(false);
 	let copyOk = $state(false);
 	let transcribePoll: ReturnType<typeof setInterval> | undefined;
 
+	// Engine-level retry: nudge the transcriber supervisor, then render the RE-READ health
+	// it answers with. Mirrors the embedder's Retry (#318) — we never claim the retry worked;
+	// the response's own state is what we show.
+	async function retryTranscribeEngine() {
+		if (engineRetrying) return;
+		engineRetrying = true;
+		try {
+			const res = await api('/portal/transcription/retry', { method: 'POST', body: JSON.stringify({}) });
+			const d = await res.json().catch(() => ({}));
+			if (d?.state === 'ready') {
+				// Genuinely back — clear the fault and let the owner press Transcribe again.
+				transcribeError = null; transcribeDetail = null; transcribeEngineFault = false; transcribeRetryable = false;
+			} else {
+				// Still not ready: report the TRUE state, never a fake recovery.
+				transcribeError = d?.health?.message || 'The transcription engine still isn’t ready.';
+				transcribeDetail = d?.health?.detail ?? null;
+				transcribeRetryable = d?.retryable !== false;
+			}
+		} catch { transcribeError = 'Couldn’t reach the transcription service.'; }
+		finally { engineRetrying = false; }
+	}
+
+	// Reasons that are about the ENGINE rather than this particular file — these get the
+	// engine "Retry connection" affordance in addition to (or instead of) re-running the job.
+	const ENGINE_FAULTS = new Set(['no-model', 'not-ready-yet', 'not-ready', 'engine-down', 'service-error', 'transport-error']);
+
 	async function startTranscribe() {
 		if (!selectedItem || transcribing) return;
-		transcribing = true; transcribeError = null; transcribeProgress = 0;
+		transcribing = true; transcribeError = null; transcribeDetail = null;
+		transcribeRetryable = false; transcribeEngineFault = false; transcribeProgress = 0;
 		const id = selectedItem.id;
 		try {
 			const res = await api(`/portal/attachments/${id}/transcribe`, { method: 'POST' });
 			if (!res.ok) {
 				const d = await res.json().catch(() => ({}));
 				transcribeError = d?.message || d?.error || `Failed (${res.status})`;
+				transcribeDetail = d?.health?.detail ?? null;
+				transcribeRetryable = d?.retryable !== false;
+				transcribeEngineFault = ENGINE_FAULTS.has(String(d?.error || ''));
 				transcribing = false; return;
 			}
 			pollTranscribe(id);
-		} catch { transcribeError = 'Failed to start'; transcribing = false; }
+		} catch { transcribeError = 'Failed to start'; transcribeRetryable = true; transcribing = false; }
 	}
 
 	function pollTranscribe(id: string) {
@@ -79,8 +121,14 @@
 				}
 				if (s.status === 'done' || s.status === 'error') {
 					clearInterval(transcribePoll); transcribing = false;
-					if (s.status === 'error') transcribeError = s.error || 'Transcription failed';
-					else transcribeProgress = 100;
+					if (s.status === 'error') {
+						// `message` is the server's owner-facing copy for this reason; the raw enum
+						// is only the last-resort fallback (it used to be the WHOLE explanation).
+						transcribeError = s.message || s.error || 'Transcription failed';
+						transcribeDetail = s.detail ?? null;
+						transcribeRetryable = s.retryable !== false;
+						transcribeEngineFault = ENGINE_FAULTS.has(String(s.error || ''));
+					} else transcribeProgress = 100;
 				}
 			} catch { /* keep polling */ }
 		}, 2000);
@@ -92,7 +140,7 @@
 	}
 
 	// Reset transcription UI when switching files; clear the poll on destroy.
-	$effect(() => { selectedItem?.id; transcribing = false; transcribeError = null; transcribeProgress = 0; clearInterval(transcribePoll); });
+	$effect(() => { selectedItem?.id; transcribing = false; transcribeError = null; transcribeDetail = null; transcribeRetryable = false; transcribeEngineFault = false; transcribeProgress = 0; clearInterval(transcribePoll); });
 	$effect(() => () => clearInterval(transcribePoll));
 
 	const PAGE_SIZE = 50;
@@ -610,7 +658,37 @@
 									{/if}
 								</div>
 								{#if transcribeError}
-									<p class="text-xs text-red-500 mt-1">{transcribeError}</p>
+									<!-- THE REASON + THE WAY OUT. Previously this was a lone red enum with no
+									     affordance at all. The reason comes from the server's per-reason copy;
+									     `detail` (a service hint — an HTTP code, the engine's own message, never
+									     audio or vault content) rides underneath, muted. The Retry appears only
+									     when the SERVER says a retry is honest; an engine-level fault also gets
+									     "Retry connection", which nudges the transcriber supervisor and renders
+									     the re-read health — it never claims a recovery it didn't observe. -->
+									<p class="text-xs text-red-500 mt-1" data-testid="transcribe-error">{transcribeError}</p>
+									{#if transcribeDetail}
+										<p class="text-[10px] text-[var(--color-text-tertiary)] mt-0.5" title={transcribeDetail}>{transcribeDetail}</p>
+									{/if}
+									{#if transcribeRetryable || transcribeEngineFault}
+										<div class="mt-1.5 flex items-center gap-2">
+											{#if transcribeRetryable && !transcribeEngineFault}
+												<button
+													onclick={startTranscribe}
+													disabled={transcribing}
+													data-testid="transcribe-retry"
+													class="text-xs px-2.5 py-1 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-elevated)] disabled:opacity-50"
+												>Retry</button>
+											{/if}
+											{#if transcribeEngineFault}
+												<button
+													onclick={retryTranscribeEngine}
+													disabled={engineRetrying}
+													data-testid="transcribe-engine-retry"
+													class="text-xs px-2.5 py-1 rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-elevated)] disabled:opacity-50"
+												>{engineRetrying ? 'Checking…' : 'Retry connection'}</button>
+											{/if}
+										</div>
+									{/if}
 								{/if}
 							</div>
 						{:else}

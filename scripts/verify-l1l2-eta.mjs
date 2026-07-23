@@ -51,7 +51,7 @@ const MODEL = 'qwen3.5:4b';
 // filter so the drain SELECTS them, and service.js trims + marks categories_processed = 1
 // (TERMINAL) without calling the classifier — the L1 analog of the embed loop's skip. A gate that
 // never drives one cannot see the "a skip is progress" hole (verify-embed-eta's E6e lesson).
-function makeVault({ l1Ids = [], l2Ids = [], blankCatIds = [] } = {}) {
+function makeVault({ l1Ids = [], l2Ids = [], blankCatIds = [], embedInfinite = false } = {}) {
   const rows = new Map([
     ...l1Ids.map((id) => [id, { id, content: `row ${id} about minds`, categories_processed: 0, nlp_processed: 3 }]),
     ...blankCatIds.map((id) => [id, { id, content: '   \n  ', categories_processed: 0, nlp_processed: 3 }]),
@@ -72,6 +72,7 @@ function makeVault({ l1Ids = [], l2Ids = [], blankCatIds = [] } = {}) {
   // service entirely. Neither moves `failed`, so neither moves barren — only the block-level
   // errs counters can see it.
   let writesLocked = false;
+  let embedCounter = 0;   // unique-id source for the inexhaustible embed backlog (embedInfinite)
   const lockedThrow = () => { throw new Error('enrichment: master key unavailable — vault locked, refusing to write'); };
   const db = {
     users: { getSettings: async () => ({ taskModels: { categorize: { model: MODEL }, enrich: { model: MODEL } } }) },
@@ -82,9 +83,17 @@ function makeVault({ l1Ids = [], l2Ids = [], blankCatIds = [] } = {}) {
       async updateCategories(id) { if (writesLocked) lockedThrow(); const r = rows.get(id); if (r) r.categories_processed = 1; },
       async selectPendingNlp(_u, { limit = 50 } = {}) { return pendNlp().slice(0, limit).map((r) => ({ id: r.id, content: r.content, scope: null })); },
       async updateNlp(id, _u, patch) { if (writesLocked) lockedThrow(); const r = rows.get(id); if (r) r.nlp_processed = patch.nlpProcessed ?? 1; },
-      async selectPendingEnrichment() { return []; },   // embed is out of scope here
-      async updateEnrichment() {},
-      async embedBacklogCached() { return { embedded: 0, total: rows.size, pending: 0 }; },   // no embed row
+      // embed is out of scope for the ETA math (default: empty ⇒ the embed loop drains instantly and
+      // never defers). `embedInfinite` seeds an INEXHAUSTIBLE backlog — 50 fresh, unique rows every
+      // call — so the embed loop hits its 200-batch/cycle cap while STILL progressing (embedded > 0,
+      // scanned never 0, nothing stalls). That is the exact precondition for deferCategorizeForEmbed
+      // to defer L1+L2 this cycle (drainer.js waitOnEmbed) — the state the DEFER-wire block needs.
+      async selectPendingEnrichment(_u, { limit = 50 } = {}) {
+        if (!embedInfinite) return [];
+        return Array.from({ length: limit }, () => ({ id: `emb${embedCounter++}`, content: 'row about minds', scope: null, nlp_error: null }));
+      },
+      async updateEnrichment() {},   // no-op: the drain's job in the DEFER fixture is only to keep MOVING
+      async embedBacklogCached() { return embedInfinite ? { embedded: 0, total: rows.size + 100000, pending: 100000 } : { embedded: 0, total: rows.size, pending: 0 }; },
       async categoriesBacklogCached() { const total = rows.size; const p = pendCat().length; return { tagged: total - p, total, pending: p }; },
       async nlpBacklogCached() { const total = rows.size; const done = [...rows.values()].filter((r) => r.nlp_processed === 1).length; return { done, total, pending: pendNlp().length }; },
     },
@@ -211,6 +220,53 @@ let wiredRow = { cat: null, enr: null, active: null };
     r.status === 200 && kinds.includes('categorize') && kinds.includes('enrich'),
     `active kinds = [${kinds.join(', ')}] (must include both categorize AND enrich)`);
   d.stop();
+}
+
+// ─────────── DEFERRED: while embedding still drains, L1+L2 do NOT run — the rows must SAY SO ───────────
+// The drainer serializes the on-box stages (drainer.js `waitOnEmbed`): an embed backlog that hits the
+// 200-batch/cycle cap while still progressing DEFERS categorize + enrich for the cycle. Before this
+// arm the two projections read `categorizeWaitingOnEmbed` NOWHERE, so they rendered `running` + "on
+// device" + a live categorizeEta — and because l1Barren/l1Errs cannot move while the loop is idle,
+// that ETA FROZE at its last value and ticked a stable, plausible, WRONG countdown for the whole
+// import, while PipelineStatus on the SAME screen said "Waiting for embedding to finish". This is the
+// §3.9 plausible-wrong class the PR already fixes for the pipeline slice (readiness.js waiting_embed),
+// applied to the activity feed too. Drive a REAL deferral (not a status stub — the models-slice
+// lesson) and ask the REAL projections what they render.
+{
+  resumeEnrichProcessing();
+  const { db } = makeVault({
+    l1Ids: Array.from({ length: 400 }, (_, i) => `dc${i}`),
+    l2Ids: Array.from({ length: 400 }, (_, i) => `dn${i}`),
+    embedInfinite: true,   // the embed loop caps out every cycle ⇒ categorize + enrich are deferred
+  });
+  const d = startEnrichDrainer({
+    db, userId: 'u', intervalMs: 10_000_000, log: () => {},
+    classify: classifyOk, enrich: enrichOk, daemon: daemon(), ollama: ollama(),
+    embed: { async health() { return { status: 'ok', loaded: true, dim: 768 }; }, async embed() { return new Array(768).fill(0.01); } },
+  });
+  // The deferral ARMS only AFTER the embed loop completes its 200-batch cap this cycle. With a huge
+  // interval, cycle 2 never starts, so once true it stays true while we read the projections.
+  const deferred = await waitFor(() => d.status()?.categorizeWaitingOnEmbed === true, 20_000);
+  const s = d.status();
+  const cat = await categorizeProjection(db, 'u');
+  const enr = await enrichProjection(db, 'u');
+  d.stop();
+
+  // CONTROL: the deferral really armed AND the L1/L2 loops really did NOT run (l1Total/l2Total 0) —
+  // else these assertions are vacuous (a stage that actually ran would legitimately carry an ETA).
+  rec('DEFER-wire. categorize deferred behind embedding ⇒ the row WITHDRAWS its ETA, drops "on device", stops claiming "running"',
+    deferred && (s.l1Total || 0) === 0 && s.categorizeWaitingOnEmbed === true
+      && cat !== null && cat.kind === 'categorize'
+      && cat.etaSeconds === null && cat.process === null && cat.status === 'waiting' && cat.status !== 'running'
+      && / waiting for embedding$/.test(cat.stage) && typeof cat.remaining === 'number' && cat.remaining > 0,
+    `deferred=${deferred} l1Total=${s.l1Total} (0 — loop idle) waiting=${s.categorizeWaitingOnEmbed} · row: eta=${cat?.etaSeconds} (null) process=${JSON.stringify(cat?.process)} (null) status=${cat?.status} (waiting) stage="${cat?.stage}" remaining=${cat?.remaining}`);
+
+  rec('DEFER-wire-L2. enrich deferred behind embedding ⇒ same: ETA withdrawn, no "on device", not "running"',
+    deferred && (s.l2Total || 0) === 0
+      && enr !== null && enr.kind === 'enrich'
+      && enr.etaSeconds === null && enr.process === null && enr.status === 'waiting'
+      && / waiting for embedding$/.test(enr.stage) && typeof enr.remaining === 'number' && enr.remaining > 0,
+    `l2Total=${s.l2Total} (0) · row: eta=${enr?.etaSeconds} (null) process=${JSON.stringify(enr?.process)} (null) status=${enr?.status} (waiting) stage="${enr?.stage}" remaining=${enr?.remaining}`);
 }
 
 // ─────────── L1: a SKIP is progress — a blank run must not blank a KNOWN estimate (E6e analog) ───────────

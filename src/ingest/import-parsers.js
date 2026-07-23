@@ -4,8 +4,10 @@
 //
 // SECURITY (CLAUDE.md §1, and the import threat model in the complete-UX design):
 // these run on attacker-influenceable files. We therefore:
-//   • read only the known entry (conversations.json); never enumerate-and-write
-//     archive paths to disk → no zip-slip / path traversal surface here.
+//   • read only entries we RESOLVED from this archive's own listing (a
+//     conversations.json / manifest.json at any depth, or the bundle allowlist);
+//     an entry name is a lookup key, never a filesystem path, and archive bytes
+//     are never written to disk → no zip-slip / path traversal surface here.
 //   • cap the decompressed JSON size + the number of messages processed.
 //   • JSON.parse in try/catch; on any malformed input we skip, never throw raw.
 //   • never include file contents in errors (zero-leakage).
@@ -14,9 +16,16 @@
 // so all storage goes through the audited, encrypting write path — the parser
 // module itself never touches the db or crypto directly.
 
+import {
+  findEntryByBasename, findEntriesByBasename, ambiguousEntryError, isBundleEntry,
+  isVaultManifest, isRatioBomb,
+} from './archive-entries.js';
+
 const MAX_JSON_BYTES = Number(process.env.MYCELIUM_IMPORT_MAX_JSON_BYTES) || 384 * 1024 * 1024;  // cap on conversations.json (bytes)
 const MAX_MESSAGES   = Number(process.env.MYCELIUM_IMPORT_MAX_MESSAGES) || 5_000_000;            // bound the work per import
 const MAX_ENTRIES    = Number(process.env.MYCELIUM_IMPORT_MAX_ENTRIES) || 500_000;               // archive entry-count cap
+// Per-entry inflation cap for the `bundle` kind (a document/photo, not a vault).
+export const BUNDLE_MAX_ENTRY_BYTES = Number(process.env.MYCELIUM_IMPORT_BUNDLE_MAX_ENTRY_BYTES) || 100 * 1024 * 1024;
 
 /**
  * Reject an archive with a pathological number of entries BEFORE any per-entry
@@ -38,7 +47,7 @@ export function assertEntryCount(zip, max = MAX_ENTRIES) {
 }
 
 /**
- * Read a zip text entry, hard-capping inflated bytes. Two independent layers so
+ * Read a zip text entry (utf8), hard-capping inflated bytes. Two independent layers so
  * a decompression bomb can never exhaust memory:
  *   1) fast reject using the entry's DECLARED uncompressed size (central
  *      directory) before inflating — kills honest bombs for ~free; and
@@ -48,26 +57,80 @@ export function assertEntryCount(zip, max = MAX_ENTRIES) {
  *      layer 2 still holds). Returns null if the entry is absent or oversized.
  */
 function readTextEntry(zip, name) {
+  return readEntryBytes(zip, name, MAX_JSON_BYTES).then((b) => (b === null || b.length === 0 ? null : b.toString('utf8')));
+}
+
+/**
+ * Read a zip entry as BYTES under a THREE-layer bomb guard:
+ *   layer 0  decompression-RATIO reject on the declared size pair (shared with
+ *            the streaming reader — archive-entries.js `isRatioBomb`). The
+ *            buffered reader had NO ratio guard at all before QA6 P7's review:
+ *            an 8MB honest 1000:1 archive could inflate the whole 8GB budget.
+ *   layer 1  fast reject on the DECLARED uncompressed size (free, but a bomb
+ *            lies here, so it is a pre-filter — never the guarantee).
+ *   layer 2  the OBSERVED-byte counter — the load-bearing one (repo lesson:
+ *            "bomb guard: declared-size is masked").
+ * `onRead(total)` reports the bytes we ACTUALLY pulled, refused or not, so a
+ * caller can charge attempted inflation against its budget (FIX 2) and a gate
+ * can OBSERVE each layer independently (an error/`null` cannot: every layer
+ * returns the same `null`).
+ * Returns null when the entry is absent, unreadable, or exceeds `maxBytes`.
+ * @returns {Promise<Buffer|null>}
+ */
+export function readEntryBytes(zip, name, maxBytes = MAX_JSON_BYTES, { onRead } = {}) {
+  const report = (n) => { try { onRead?.(n); } catch { /* accounting must never break an import */ } };
   const entry = zip.file(name);
-  if (!entry) return Promise.resolve(null);
-  const declared = entry?._data?.uncompressedSize;
-  if (typeof declared === 'number' && declared > MAX_JSON_BYTES) return Promise.resolve(null);
+  if (!entry) { report(0); return Promise.resolve(null); }
+  let declared = entry?._data?.uncompressedSize;
+  if (typeof declared === 'number' && declared < 0) declared >>>= 0;  // signed u32 -> a >2GiB bomb reads negative
+  // layer 0 — ratio
+  if (isRatioBomb(declared, entry?._data?.compressedSize)) { report(0); return Promise.resolve(null); }
+  // layer 1 — declared size
+  if (typeof declared === 'number' && declared > maxBytes) { report(0); return Promise.resolve(null); }
   return new Promise((resolve) => {
     let total = 0;
     const chunks = [];
     let done = false;
-    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const finish = (v) => { if (!done) { done = true; report(total); resolve(v); } };
     let stream;
     try { stream = entry.nodeStream('nodebuffer'); } catch { return finish(null); }
     stream.on('data', (chunk) => {
+      // LAYER 2 — counts the bytes actually READ, so a header declaring a small
+      // size (layer 1's input) cannot buy an unbounded inflation.
       total += chunk.length;
-      if (total > MAX_JSON_BYTES) { try { stream.destroy(); } catch { /* noop */ } return finish(null); }
+      if (total > maxBytes) { try { stream.destroy(); } catch { /* noop */ } return finish(null); }
       chunks.push(chunk);
     });
-    stream.on('end', () => finish(total === 0 ? null : Buffer.concat(chunks).toString('utf8')));
+    stream.on('end', () => finish(total === 0 ? Buffer.alloc(0) : Buffer.concat(chunks)));
     stream.on('error', () => finish(null));
     stream.on('close', () => finish(null)); // aborted/destroyed without 'end'
   });
+}
+
+// How many same-basename `manifest.json` candidates we will OPEN to decide
+// whether an archive is a nested vault export. A plain bundle can legitimately
+// contain many manifest.json files (npm packages, web-app builds), so the probe
+// is bounded — bounded work, and the honest-refusal answer only needs ONE hit.
+const NESTED_MANIFEST_PROBES = Number(process.env.MYCELIUM_IMPORT_NESTED_MANIFEST_PROBES) || 25;
+
+/**
+ * Does any NON-ROOT `manifest.json` in this archive declare a Mycelium vault
+ * export? Shared by the buffered (JSZip) and streaming (yauzl) detectors so both
+ * refuse a nested vault export identically instead of importing it as a bundle
+ * (QA6 P7 review FIX 1 — silent data loss on a RESTORE path).
+ * @param {(name:string)=>Promise<string|null>} readText  capped text reader for this archive
+ * @param {string[]} names
+ */
+export async function hasNestedVaultManifest(readText, names) {
+  const candidates = findEntriesByBasename(names, 'manifest.json')
+    .filter((n) => n !== 'manifest.json')
+    .slice(0, NESTED_MANIFEST_PROBES);
+  for (const n of candidates) {
+    let text = null;
+    try { text = await readText(n); } catch { text = null; }
+    if (text && isVaultManifest(text)) return true;
+  }
+  return false;
 }
 
 /** Tolerant JSON parse — returns fallback on any malformed input (never throws). */
@@ -77,42 +140,81 @@ function safeParse(text, fallback) {
 
 /**
  * Inspect a loaded JSZip and decide which export it is.
- * @returns {Promise<{ type: 'mycelium'|'claude'|'chatgpt'|'obsidian'|'linkedin'|'unknown', conversations?: any[], manifest?: object }>}
+ *
+ * Signature files are matched by BASENAME AT ANY DEPTH (archive-entries.js), so
+ * a re-zipped or one-folder-deep export (`chatgpt-export-2026-07/conversations.json`)
+ * detects exactly like a root-level one — the "auto-detect doesn't work" bug.
+ * Several files with the same signature basename = AMBIGUOUS: we return an
+ * honest error type, never a guess.
+ *
+ * @returns {Promise<{ type: 'mycelium'|'mycelium-oversized'|'mycelium-nested'|'claude'|'chatgpt'|'bundle'|'linkedin'|'ambiguous'|'unknown',
+ *   conversations?: any[], manifest?: object, entries?: string[], ambiguity?: string }>}
  */
 export async function detectExportType(zip) {
+  const names = Object.keys(zip?.files || {});
+
   // Canonical-Mycelium vault export: one manifest.json carrying the whole vault
   // (format marker per reference/server-routes/portal-export-import.js:997).
-  // Checked first — it's the only format with a manifest.json, and the parsed
-  // manifest rides along so the importer never re-reads/re-parses the entry.
-  const manifestText = await readTextEntry(zip, 'manifest.json');
-  if (manifestText) {
-    const man = safeParse(manifestText, null);
-    if (man && man.format === 'mycelium-vault-export') return { type: 'mycelium', manifest: man };
-    // A manifest.json that isn't ours — fall through to the other detectors.
-  } else if (zip.file('manifest.json')) {
-    // The entry EXISTS but the capped reader refused it — almost certainly a
-    // big vault whose manifest outgrew MAX_JSON_BYTES. Say so, actionably,
-    // instead of the misleading generic "unrecognized export".
-    return { type: 'mycelium-oversized', limitBytes: MAX_JSON_BYTES };
-  }
-  // Both Claude and ChatGPT ship a top-level conversations.json; the element
-  // shape disambiguates: ChatGPT nodes carry a `mapping` tree, Claude carries
-  // `chat_messages`.
-  const convText = await readTextEntry(zip, 'conversations.json');
-  if (convText) {
-    const arr = safeParse(convText, null);
-    if (Array.isArray(arr) && arr.length > 0) {
-      const first = arr[0] || {};
-      if (first.mapping && typeof first.mapping === 'object') return { type: 'chatgpt', conversations: arr };
-      if (Array.isArray(first.chat_messages)) return { type: 'claude', conversations: arr };
+  //
+  // IMPORTING is DELIBERATELY ROOT-ANCHORED (exact `manifest.json`), NOT
+  // basename-at-any-depth like the other kinds: the vault importer resolves the
+  // rest of the archive by ROOT-RELATIVE paths — attachment binaries via
+  // `zip.file(att.zipPath)` (vault-import.js:339) and agent files via
+  // `name.startsWith('agents/')` (:637). Importing a NESTED vault manifest would
+  // write the tables but silently DROP every binary.
+  //
+  // DETECTING it, however, is basename-at-any-depth (see the nested probe below):
+  // a nested vault export that fell through to `bundle` returned a success-shaped
+  // {type:'bundle', imported:N} — a couple of loose media files — while the entire
+  // message/document history was dropped with no error, on a RESTORE path. An
+  // honest refusal is the only safe answer (QA6 P7 review FIX 1).
+  if (names.includes('manifest.json')) {
+    const manifestText = await readTextEntry(zip, 'manifest.json');
+    if (manifestText) {
+      const man = safeParse(manifestText, null);
+      if (man && man.format === 'mycelium-vault-export') return { type: 'mycelium', manifest: man };
+      // A manifest.json that isn't ours — fall through to the other detectors,
+      // BUT a decoy/unrelated NON-vault root manifest must NOT mask a real vault
+      // export nested alongside it. The refusal probe below therefore runs on
+      // BOTH paths (no root manifest, AND a non-vault root manifest): guarding it
+      // behind `else` let a decoy root `manifest.json` skip the probe and fall
+      // through to `bundle` — silently dropping the whole message/document
+      // history on a RESTORE path (QA6 P7 review round-2 FIX).
+    } else {
+      // The entry EXISTS but the capped reader refused it — almost certainly a
+      // big vault whose manifest outgrew MAX_JSON_BYTES. Say so, actionably,
+      // instead of the misleading generic "unrecognized export".
+      return { type: 'mycelium-oversized', limitBytes: MAX_JSON_BYTES };
     }
-    // Present but unrecognizable — treat as unknown rather than guessing.
-    return { type: 'unknown' };
   }
-  // Markdown vault → Obsidian (deferred); presence of .md files is the signal.
-  const names = Object.keys(zip.files || {});
-  if (names.some((n) => n.toLowerCase().endsWith('.md'))) return { type: 'obsidian' };
+  // A vault export re-zipped inside its folder (with or without an unrelated
+  // root manifest present). Refuse honestly — never bundle.
+  if (await hasNestedVaultManifest((n) => readTextEntry(zip, n), names)) {
+    return { type: 'mycelium-nested' };
+  }
+  // Both Claude and ChatGPT ship a conversations.json; the element shape
+  // disambiguates: ChatGPT nodes carry a `mapping` tree, Claude `chat_messages`.
+  const convHit = findEntryByBasename(names, 'conversations.json');
+  if (convHit?.ambiguous) return { type: 'ambiguous', ambiguity: ambiguousEntryError('conversations.json', convHit.count) };
+  if (convHit) {
+    const convText = await readTextEntry(zip, convHit.name);
+    if (convText) {
+      const arr = safeParse(convText, null);
+      if (Array.isArray(arr) && arr.length > 0) {
+        const first = arr[0] || {};
+        if (first.mapping && typeof first.mapping === 'object') return { type: 'chatgpt', conversations: arr };
+        if (Array.isArray(first.chat_messages)) return { type: 'claude', conversations: arr };
+      }
+      // Present but unrecognizable — treat as unknown rather than guessing.
+      return { type: 'unknown' };
+    }
+  }
   if (names.some((n) => /connections\.csv|messages\.csv/i.test(n))) return { type: 'linkedin' };
+  // No recognized export manifest → a plain BUNDLE of documents/media (a zip of
+  // PDFs, a re-zipped notes folder, a Google Takeout of exported Docs). Each
+  // allowlisted entry goes through the loose-file router.
+  const entries = names.filter(isBundleEntry);
+  if (entries.length) return { type: 'bundle', entries };
   return { type: 'unknown' };
 }
 

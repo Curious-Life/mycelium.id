@@ -119,6 +119,26 @@ try {
   rec('CS26. channel-config carries the routing block', cc2.routing.router === 'auto' && cc2.routing.ollamaModel === 'llama3.1');
   const env2 = {}; applyChannelConfigToEnv(cc2, env2);
   rec('CS27. applyChannelConfigToEnv maps routing → env', env2.MYCELIUM_CHANNEL_ROUTER === 'auto' && env2.CHANNEL_OLLAMA_MODEL === 'llama3.1' && env2.CHANNEL_COALESCE_MS === '2000' && env2.CHANNEL_SENSITIVE_PATTERNS === '\\bfoo\\b');
+
+  // ── QA6-VOICE: the voice-reply toggle round-trips settings → channel-config → env ─
+  // 'always' is the default (stored as the ABSENCE of the knob), so the meaningful
+  // round-trip is a NON-default value: PUT 'auto' → GET reflects it → channel-config
+  // carries it → hydration sets CHANNEL_VOICE_REPLIES for the daemon policy to read.
+  let rv = await send('/api/v1/portal/settings/tts', 'PUT', { voiceReplies: 'auto' });
+  rec('CS28. PUT tts voiceReplies:auto → ok', rv.status === 200);
+  rv = await get('/api/v1/portal/settings/tts');
+  rec('CS28b. GET tts reflects voiceReplies=auto', rv.json.voiceReplies === 'auto', `voiceReplies=${rv.json.voiceReplies}`);
+  const cc3 = (await get('/api/v1/internal/channel-config')).json;
+  rec('CS28c. channel-config carries tts.voiceReplies', cc3.tts.voiceReplies === 'auto', `vr=${cc3.tts.voiceReplies}`);
+  const env3 = {}; applyChannelConfigToEnv(cc3, env3);
+  rec('CS28d. hydration maps voiceReplies → CHANNEL_VOICE_REPLIES', env3.CHANNEL_VOICE_REPLIES === 'auto', `env=${env3.CHANNEL_VOICE_REPLIES}`);
+  // Invalid value is rejected (fail-closed enum).
+  const bad = await send('/api/v1/portal/settings/tts', 'PUT', { voiceReplies: 'loud' });
+  rec('CS28e. invalid voiceReplies → 400', bad.status === 400, `status=${bad.status}`);
+  // Reset to default ('always') clears the stored knob (absence == always).
+  await send('/api/v1/portal/settings/tts', 'PUT', { voiceReplies: 'always' });
+  const cc4 = (await get('/api/v1/internal/channel-config')).json;
+  rec('CS28f. voiceReplies:always stores as absence (channel-config null)', cc4.tts.voiceReplies === null, `vr=${cc4.tts.voiceReplies}`);
 } catch (err) {
   allPass = false;
   ledger.push(`FAIL  fatal: ${String(err?.stack || err?.message || err)}`);

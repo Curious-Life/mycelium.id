@@ -243,8 +243,13 @@ const mkMsg = (media) => ({ messageId: '70', chatId: OWNER, media });
   const withT = mediaContextLine({ kind: 'voice', duration: 7, fileName: null }, 'hello there');
   const noT = mediaContextLine({ kind: 'voice', duration: 7, fileName: null }, null);
   const doc = mediaContextLine({ kind: 'document', fileName: 'n.md' }, '# Notes');
-  rec('ME5. context lines: transcript quoted / unavailable honest / doc content block',
-    /transcript: "hello there"/.test(withT) && /transcription unavailable/.test(noT) && /content:\n# Notes/.test(doc), `t="${withT}"`);
+  // A missing transcript must read as PENDING, never as permanently unavailable
+  // (QA 2026-07-22): "unavailable" made the agent give up on a voice note whose
+  // transcript arrived later and IS in the vault.
+  rec('ME5. context lines: transcript quoted / missing transcript reads PENDING (never "unavailable") / doc content block',
+    /transcript: "hello there"/.test(withT)
+    && /no transcript yet/.test(noT) && /may still be running/.test(noT) && !/unavailable/i.test(noT)
+    && /content:\n# Notes/.test(doc), `t="${withT}" noT="${noT}"`);
 }
 
 const passed = ledger.filter(Boolean).length;

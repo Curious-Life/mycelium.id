@@ -51,7 +51,7 @@ const REPLY_TOOL_SCHEMA = {
       },
       voice: {
         type: 'boolean',
-        description: 'Telegram only — also synthesize a voice (TTS) message. Ignored on Discord/WhatsApp.',
+        description: "Telegram only — override the owner's voice-reply setting for THIS reply. Leave it unset normally: when the owner has switched voice on in Settings, the channel speaks every reply automatically. Pass false to suppress the voice note for one reply (e.g. a long code block); pass true to force one even when the setting is off.",
       },
       quote: {
         type: 'boolean',
@@ -75,7 +75,11 @@ function buildSendBody({ platform, channelId, text, voice, replyToMessageId, sou
     return {
       chatId: String(channelId),
       text,
-      ...(voice ? { voice: true } : {}),
+      // Tri-state: `undefined` means "the chokepoint decides from the owner's voice
+      // setting" (QA6-VOICE — the toggle is consulted at reply time). An explicit
+      // true/false is the agent overriding it for this one reply, so it must ride
+      // the wire even when false.
+      ...(typeof voice === 'boolean' ? { voice } : {}),
       ...(replyToMessageId != null ? { replyToMessageId } : {}),
       ...(sourceKind ? { sourceKind } : {}),
       ...(sourceId ? { sourceId: String(sourceId) } : {}),
@@ -134,7 +138,21 @@ export function createReplyDomain(deps) {
       // (agent saw fetch-failed, fell back to curl, message landed twice).
       signal: AbortSignal.timeout(30_000),
     });
-    if (res.ok) return { delivered: true, httpStatus: res.status };
+    if (res.ok) {
+      // Surface the VOICE outcome so a failed voice render is never invisible to the
+      // agent (the user was already told by the chokepoint's notice). Metadata only —
+      // `voiceError` is a short machine code, never provider or message text.
+      let voice = null;
+      try {
+        const j = await res.json();
+        if (j?.voiceRequested) {
+          voice = j.voiceError
+            ? { voice: 'unavailable', voiceError: String(j.voiceError).slice(0, 60), voiceNotified: !!j.voiceNotified }
+            : { voice: 'sent', voiceNotes: Number(j.voiceSent) || 0 };
+        }
+      } catch { /* no body — text delivery still stands */ }
+      return { delivered: true, httpStatus: res.status, ...(voice || {}) };
+    }
     let errorCode = `http-${res.status}`;
     try {
       const j = await res.json();

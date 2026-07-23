@@ -118,6 +118,31 @@
 	let subWebReason = $state<string | null>(null);   // absent | declined | wrong_scope | expired
 	let subWebDetail = $state<string | null>(null);
 	let subCode = $state('');
+	// QA6-P1 #2: "Open Claude sign-in" was a bare <a target="_blank">. Inside the Tauri
+	// webview a _blank navigation is swallowed — the click launched NOTHING and the user
+	// was left hand-copying the URL out of the DOM. It now goes through openSignIn(),
+	// which reports failure, and the URL is ALWAYS rendered next to it as selectable
+	// text with a Copy button. There is no state in which the user cannot reach the link.
+	let subOpenFailed = $state(false);
+	let subUrlCopied = $state(false);
+	function openSignIn() {
+		if (!subWebUrl) return;
+		subOpenFailed = false;
+		try {
+			const w = window.open(subWebUrl, '_blank', 'noopener,noreferrer');
+			// A null handle means the browser/webview refused (popup blocker, Tauri's
+			// _blank policy). Fail VISIBLY — never a silent no-op.
+			if (!w) subOpenFailed = true;
+		} catch { subOpenFailed = true; }
+	}
+	async function copySignInUrl() {
+		if (!subWebUrl) return;
+		try {
+			await navigator.clipboard.writeText(subWebUrl);
+			subUrlCopied = true;
+			setTimeout(() => { subUrlCopied = false; }, 1600);
+		} catch { /* the URL is selectable text right there — copy is a convenience */ }
+	}
 
 	// Human-readable, honest state — never a bare green tick.
 	const SUB_UI: Record<SubHealth, { cls: string; icon: string; title: string; hint: string }> = {
@@ -349,8 +374,21 @@
 			loading = false;
 		}
 	}
+	// The subscription connect panel, anchored so a sibling component can bring the
+	// user here instead of telling them to go hunting ("Connect your subscription below"
+	// is not an action — this is).
+	let subAnchor = $state<HTMLElement | null>(null);
 	onMount(() => {
 		load(); loadSub();
+		// EngineSelector's blocked-engine panel dispatches this when the missing piece
+		// is the subscription. Open the panel + scroll it into view, so the click there
+		// lands somewhere visible rather than doing nothing.
+		const onConnectSub = () => {
+			subOpen = true; subErr = null;
+			queueMicrotask(() => subAnchor?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+		};
+		window.addEventListener('mycelium:connect-claude-sub', onConnectSub);
+		return () => window.removeEventListener('mycelium:connect-claude-sub', onConnectSub);
 	});
 
 	function choose(p: Preset) {
@@ -531,7 +569,7 @@
 			{/if}
 		</div>
 
-		<div class="lane">
+		<div class="lane" bind:this={subAnchor}>
 			<div class="lane-head"><span class="lane-title">Cloud</span><span class="lane-tag">your key · encrypted in your vault</span></div>
 			{#if chosen}
 				<form onsubmit={connect} class="connect-form">
@@ -577,8 +615,16 @@
 						</p>
 						{#if subWebDetail}<p class="muted-xs sub-diag">{subWebDetail}</p>{/if}
 						<div class="cf-actions">
-							<a class="solid-btn" href={subWebUrl} target="_blank" rel="noreferrer noopener">Open Claude sign-in ↗</a>
+							<button type="button" class="solid-btn" onclick={openSignIn}>Open Claude sign-in ↗</button>
+							<button type="button" class="link-btn" onclick={copySignInUrl}>{subUrlCopied ? '✓ Link copied' : 'Copy link'}</button>
 						</div>
+						{#if subOpenFailed}
+							<p class="x-red">Couldn’t open a browser window from here. Copy the link below and paste it into your browser.</p>
+						{/if}
+						<!-- ALWAYS rendered, not only on failure: a webview can refuse a _blank
+						     navigation WITHOUT reporting it, so the copyable link is the
+						     guaranteed path — never a fallback we might fail to trigger. -->
+						<div class="signin-url"><code>{subWebUrl}</code></div>
 						<p class="muted-xs">Approve it, then paste the code Claude gives you:</p>
 						<input class="input" placeholder="Paste the code from Claude" bind:value={subCode} autocomplete="off" spellcheck="false"
 							onkeydown={(e) => { if (e.key === 'Enter' && subCode.trim()) finishSubWeb(); }} />
@@ -828,6 +874,15 @@
 	.sub-meta { font-size: 0.68rem; color: var(--color-text-tertiary); margin-top: 0.15rem; text-transform: capitalize; }
 	/* Diagnostics line (source / renewal) — lowercase, it carries identifiers not prose. */
 	.sub-diag { text-transform: none; opacity: 0.8; }
+	/* The sign-in URL, always visible + selectable, so "Open" failing is never a wall. */
+	.signin-url {
+		margin: 0.35rem 0 0.5rem; padding: 0.35rem 0.5rem; border-radius: 7px;
+		background: rgba(0,0,0,0.25); overflow-x: auto;
+	}
+	.signin-url code {
+		font-family: var(--font-mono); font-size: 0.62rem; white-space: nowrap;
+		color: var(--color-text-secondary); user-select: all;
+	}
 	.sub-model-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.55rem; }
 	.sub-model-label { font-size: 0.74rem; color: var(--color-text-secondary); }
 	.sub-model-ctl { display: flex; align-items: center; gap: 0.5rem; }

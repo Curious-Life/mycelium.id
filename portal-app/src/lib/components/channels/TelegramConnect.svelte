@@ -21,6 +21,8 @@
 	let hasToken = $state(false);
 	let ownerBound = $state(false);
 	let daemonStatus = $state('');
+	let daemonMessage = $state('');
+	let daemonDetail = $state('');
 	let loading = $state(true);
 
 	// form
@@ -44,6 +46,8 @@
 				hasToken = !!cs?.telegram?.hasToken;
 				ownerBound = !!cs?.telegram?.ownerId;
 				daemonStatus = cs?.daemon?.status || '';
+				daemonMessage = cs?.daemon?.message || '';
+				daemonDetail = cs?.daemon?.detail || '';
 			}
 		} catch { /* keep last-known */ }
 		finally { loading = false; }
@@ -61,6 +65,17 @@
 		pollTimer = setInterval(() => { void loadPending(); void loadStatus(); }, 3000);
 	}
 	function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+	// Reset back to the token input so a wrong/changed bot token can be re-entered.
+	// The next save() overwrites TELEGRAM_BOT_TOKEN through the same secure PUT
+	// /portal/channels path (encrypted setS + channelSup.reload) — no new endpoint,
+	// no plaintext path. Stops polling so the stale "waiting…" loop can't re-arm.
+	function resetToToken() {
+		stopPolling();
+		ownerBound = false;
+		hasToken = false;
+		err = '';
+	}
 
 	async function save() {
 		if (!token.trim() && !hasToken) return;
@@ -115,7 +130,7 @@
 		<p class="tg-muted">Checking…</p>
 	{:else if ownerBound}
 		<p class="tg-ok">✓ Telegram connected{#if daemonStatus === 'ok'} — bridge running{:else if daemonStatus === 'down'} — bridge stopped (check the token){/if}.</p>
-		<button type="button" class="tg-link" onclick={() => { ownerBound = false; hasToken = false; }}>Reconnect a different bot</button>
+		<button type="button" class="tg-link" onclick={resetToToken}>Reconnect a different bot</button>
 	{:else if hasToken}
 		<!-- token saved, awaiting pairing -->
 		<p class="tg-step">Bot token saved. Now open Telegram, message your bot (send <code>/start</code>), and approve the code it replies with:</p>
@@ -134,6 +149,12 @@
 		{:else}
 			<p class="tg-muted">Waiting for you to message the bot… <span class="tg-spin" aria-hidden="true"></span></p>
 		{/if}
+		{#if daemonStatus === 'down'}
+			<!-- the daemon validated the token (getMe) and refused it → surface WHY,
+			     so the user isn't stuck behind an endless "waiting…" spinner. -->
+			<p class="tg-err">{daemonMessage || 'The channel bridge stopped.'}{#if daemonDetail} {daemonDetail}{/if}</p>
+		{/if}
+		<button type="button" class="tg-link" onclick={resetToToken}>Wrong token? Re-enter it</button>
 	{:else}
 		<!-- no token yet -->
 		<div class="tg-field">

@@ -93,6 +93,21 @@ const SLICES = {
     ],
     overall: 'blocked', blockedOn: 'paused',
   },
+  // QA6: categorize DEFERRED behind a draining embed stage. A NAMED block (waiting_embed) with NO
+  // action — scheduled work, not a user-actionable fault — that still carries its counts and its
+  // Pause control (paused:false ⇒ the ⏸ Pause side). overall stays `running` (embed is healthy), so
+  // it must NOT render the "Waiting on you" copy.
+  waitingembed: {
+    stages: [
+      { key: 'import', state: 'done', count: { done: 76000 } },
+      { key: 'embed', state: 'running', count: { done: 40000, total: 76000 }, etaSeconds: 120, paused: false },
+      { key: 'categorize', state: 'blocked', count: { done: 5000, total: 76000 }, reason: 'waiting_embed', paused: false },
+      { key: 'cluster', state: 'pending', reason: 'waiting_embed' },
+      { key: 'describe', state: 'pending' },
+      { key: 'measure', state: 'pending' },
+    ],
+    overall: 'running', blockedOn: null,
+  },
   // A down embedder blocks embed with its reason + remedy.
   embedderdown: {
     stages: [

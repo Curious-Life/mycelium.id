@@ -22,6 +22,7 @@ import { uploadsRoot } from './paths.js';
 import { clampStored } from './enrich/text-limits.js';
 import { transcribeAttachment } from './enrich/transcribe-attachment.js';
 import { getTranscriberHealth } from './transcribe/supervisor.js';
+import { serviceState, isRetryable, transcribeNotReadyReason } from './system/service-state.js';
 
 const LIST_SCAN_CAP = 2000; // rows decrypted per list call — personal-scale guard
 
@@ -43,12 +44,37 @@ export function mediaTypeOf(fileType) {
   return 'file';
 }
 
+// Owner-facing copy per transcription FAULT REASON (the enum transcribe-attachment.js
+// returns). Exported so verify:transcription asserts the mapping directly and can
+// mutation-prove it. Fail-SAFE: an unmapped reason falls back to `failed` — never a
+// blank, and never the "download a model" line, which belongs to exactly one reason.
+export const TRANSCRIBE_FAULT_MESSAGE = Object.freeze({
+  'no-model': 'Download a transcription model in Settings first.',
+  'not-ready-yet': 'The transcription engine is still starting — try again in a moment.',
+  'not-ready': 'Transcription isn’t ready yet — check the Transcription model in Settings.',
+  'engine-down': 'The transcription engine isn’t running — retry, or re-select the model in Settings.',
+  'service-error': 'The transcription service refused the job — retry, or re-select the model in Settings.',
+  'engine-error': 'The transcription engine failed part-way through this recording. Any text it did produce was kept — you can retry.',
+  timeout: 'This recording took longer than the transcription time limit. Try again, or split the file.',
+  'transport-error': 'Lost contact with the transcription service part-way through — retry.',
+  canceled: 'Transcription was canceled.',
+  'no-speech': 'No speech was detected in this recording.',
+  'no-text': 'No speech was detected in this recording.',
+  'empty-audio': 'This file has no audio data.',
+  'no-blob': 'The audio file is missing from the vault.',
+  'not-audio': 'This file isn’t audio.',
+  'not-found': 'That file no longer exists.',
+  lookup: 'Couldn’t read that file just now — retry.',
+  failed: 'Transcription failed — retry, or check the Transcription model in Settings.',
+});
+
 /**
  * @param {object} deps
  * @param {object} deps.db      wired vault db (attachments namespace)
  * @param {string} deps.userId
+ * @param {() => object} [deps.getHealth] injectable transcriber-health read (tests); defaults to the live supervisor
  */
-export function portalAttachmentsRouter({ db, userId }) {
+export function portalAttachmentsRouter({ db, userId, getHealth = getTranscriberHealth }) {
   const router = express.Router();
   const json = express.json({ limit: '64kb' });
 
@@ -215,9 +241,15 @@ export function portalAttachmentsRouter({ db, userId }) {
   });
 
   // ── Transcription (owner-gated): robust LONG-audio via the streaming service ──
+  // Owner-facing copy per FAULT REASON (the enum transcribeAttachment now returns).
+  // Exported-in-spirit as a table so verify:transcription can assert the mapping is
+  // total and mutation-testable — the point of §2 is that a failed transcription can
+  // never again read as a blank "unavailable". Every message names WHAT went wrong and,
+  // where a retry is honest, says so; the client renders Retry off `retryable`, not off
+  // the string. NO reason maps to "download a model" except the one that means it.
   // In-memory per-attachment job state (progress the UI polls). Runs IN-PROCESS so
   // every transcript write stays on the app's single DB writer (no 2nd vault writer).
-  const jobs = new Map(); // attachmentId → { status, coveredSec, durationSec, segments, error }
+  const jobs = new Map(); // attachmentId → { status, coveredSec, durationSec, segments, error, message, detail, retryable }
 
   // POST /attachments/:id/transcribe — start (or restart) transcription. Non-blocking:
   // returns 202 immediately; the UI polls .../transcribe/status. Overwrites any prior
@@ -230,8 +262,32 @@ export function portalAttachmentsRouter({ db, userId }) {
       if (!row.local_path) return res.status(409).json({ error: 'no-blob' });
       const cur = jobs.get(row.id);
       if (cur && cur.status === 'running') return res.status(202).json({ ok: true, status: cur });
-      const health = (() => { try { return getTranscriberHealth(); } catch { return null; } })();
-      if (health?.status !== 'ok') return res.status(409).json({ error: 'no-model', message: 'Download a transcription model in Settings first.' });
+      const health = (() => { try { return getHealth(); } catch { return null; } })();
+      // ⚠️ ONE MESSAGE FOR SIX STATES — the lie removed here. This returned
+      // "Download a transcription model in Settings first." for EVERY non-'ok' health:
+      // loading, starting, downloading the weights, installing_deps, deps_missing, down.
+      // Four of those mean "wait, it's coming", one means "an install failed", one means
+      // "it crashed" — and none of them mean "you have no model". Now the REAL state drives
+      // the copy: the reason token is the SHARED derivation (transcribeNotReadyReason) that
+      // transcribeAttachment also uses, so the pre-flight 409 and the in-flight job can never
+      // disagree on what a given health status means; `retryable` tells the client whether a
+      // Retry is honest. Copy prefers the supervisor's own message where it has one
+      // (loading/failed), else the fixed per-reason line — never audio, never vault content.
+      if (health?.status !== 'ok') {
+        const state = serviceState(health?.status);
+        const reason = transcribeNotReadyReason(health?.status);
+        const retryable = state === 'loading' || isRetryable(health?.status);
+        const message = (state === 'loading' || state === 'failed') && health?.message
+          ? health.message
+          : (TRANSCRIBE_FAULT_MESSAGE[reason] || TRANSCRIBE_FAULT_MESSAGE.failed);
+        return res.status(409).json({
+          error: reason,
+          message,
+          retryable,
+          // Enum + supervisor hint only — never vault content, never audio (§1).
+          health: { status: String(health?.status || 'unknown'), state, detail: health?.detail ?? null, model: health?.model ?? null, progress: health?.progress ?? null },
+        });
+      }
 
       const state = { status: 'running', coveredSec: 0, durationSec: 0, segments: 0, error: null };
       jobs.set(row.id, state);
@@ -243,8 +299,19 @@ export function portalAttachmentsRouter({ db, userId }) {
         onProgress: (p) => { state.coveredSec = p.coveredSec; state.durationSec = p.durationSec; state.segments = p.segments; },
       }).then((r) => {
         state.status = r.ok ? 'done' : 'error';
-        if (!r.ok) state.error = r.reason || 'failed';
-      }).catch(() => { state.status = 'error'; state.error = 'failed'; });
+        if (!r.ok) {
+          // Carry the CAUSE, not just "error". `message` is owner-facing copy derived from a
+          // fixed reason enum (never a raw service string); `detail` is the supervisor/service
+          // hint (an HTTP code, faster-whisper's own message) — no audio, no vault content (§1).
+          state.error = r.reason || 'failed';
+          state.message = TRANSCRIBE_FAULT_MESSAGE[r.reason] || TRANSCRIBE_FAULT_MESSAGE.failed;
+          state.detail = r.detail ?? null;
+          state.retryable = r.retryable !== false;
+        }
+      }).catch(() => {
+        state.status = 'error'; state.error = 'failed';
+        state.message = TRANSCRIBE_FAULT_MESSAGE.failed; state.detail = null; state.retryable = true;
+      });
     } catch (err) {
       console.error('[portal-attachments] transcribe start failed:', err?.message);
       res.status(500).json({ error: 'transcribe-failed' });
@@ -259,7 +326,14 @@ export function portalAttachmentsRouter({ db, userId }) {
       if (!row || row.user_id !== userId) return res.status(404).json({ error: 'not-found' });
       const job = jobs.get(id);
       // transcript is the PROGRESSIVELY-saved text, so the UI can show it fill in live.
-      if (job) return res.json({ status: job.status, coveredSec: job.coveredSec, durationSec: job.durationSec, segments: job.segments, error: job.error, hasTranscript: !!row.transcript, transcript: row.transcript || null });
+      if (job) return res.json({
+        status: job.status, coveredSec: job.coveredSec, durationSec: job.durationSec, segments: job.segments,
+        error: job.error,
+        // The REASON, in words, plus whether a Retry is honest — so the Media page can stop
+        // rendering the raw enum ("no-text") as the owner's whole explanation.
+        message: job.message ?? null, detail: job.detail ?? null, retryable: job.retryable ?? null,
+        hasTranscript: !!row.transcript, transcript: row.transcript || null,
+      });
       return res.json({ status: row.transcript ? 'done' : 'idle', hasTranscript: !!row.transcript, transcript: row.transcript || null });
     } catch (err) {
       res.status(500).json({ error: 'status-failed' });

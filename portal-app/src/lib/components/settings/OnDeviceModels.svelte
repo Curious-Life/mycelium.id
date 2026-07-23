@@ -32,23 +32,35 @@
 		sizeGb?: number | null;     // download size when there is something to fetch (else null)
 		// The action the button offers for THIS row's current state:
 		//   'none'        — bundled / already running / mid-download (no button)
+		//   'retry'       — a bundled model whose download/load FAILED (the embedder's HF weights):
+		//                   not a fresh download, a re-attempt of the bundled model (→ the parent
+		//                   routes it to POST /portal/embed/retry). Distinct from 'download' so the
+		//                   copy is honest ("Retry", not "Download") and the size line stays absent.
 		//   'download'    — offer a one-tap download of the recommended model
 		//   'add-sample'  — downloaded but not usable until the user does a one-tap setup
 		//                   step ON ANOTHER PAGE (voice: record/upload a reference sample on
 		//                   the character page). A clickable button that ROUTES there — never a
 		//                   dead note (R2-VOICEBTN: the 'add a voice sample' message had no button).
+		//   'retry-runtime' — the model file is fine but its RUNTIME failed (Ollama not
+		//                   reachable for Understanding; the whisper engine crash-looping for
+		//                   Transcription). Offers "Retry connection", which pokes that
+		//                   service's OWN retry route and renders the re-read health — the
+		//                   QA6 §1 un-strand. Distinct from 'retry' (a bundled-model re-load)
+		//                   so the copy is "Retry connection", not "Retry", and it routes to
+		//                   the daemon/supervisor, not the model download.
 		//   'blocked'     — a real reason it can't be offered at all (content-free note, no route)
-		action: 'none' | 'download' | 'add-sample' | 'blocked';
+		action: 'none' | 'download' | 'retry' | 'retry-runtime' | 'add-sample' | 'blocked';
 		actionLabel?: string | null; // override the button copy — 'add-sample' ("Add a voice sample")
 		                             // or a 'download' variant ("Finish install" for needs-runtime)
 		blockedNote?: string | null; // the reason, when action === 'blocked' (content-free)
 		busy?: boolean;             // a download this pane started is in flight
 	};
 
-	let { models, ondownload, onsample, machineNoun = 'device' }: {
+	let { models, ondownload, onsample, onretryruntime, machineNoun = 'device' }: {
 		models: LocalModelRow[];
 		ondownload: (key: string) => void;
-		onsample?: (key: string) => void;   // route to the on-another-page setup step ('add-sample')
+		onsample?: (key: string) => void;         // route to the on-another-page setup step ('add-sample')
+		onretryruntime?: (key: string) => void;   // re-attempt the model's RUNTIME ('retry-runtime')
 		machineNoun?: string;
 	} = $props();
 
@@ -80,6 +92,25 @@
 							disabled={m.busy}
 							onclick={() => ondownload(m.key)}
 						>{m.busy ? 'Downloading…' : (m.actionLabel || 'Download')}</button>
+					{:else if m.action === 'retry'}
+						<!-- A bundled model whose download/load failed (the embedder's HF weights). A re-attempt,
+						     not a fresh download — the parent routes it to POST /portal/embed/retry. -->
+						<button
+							class="odm-btn"
+							data-testid="odm-retry"
+							disabled={m.busy}
+							onclick={() => ondownload(m.key)}
+						>{m.busy ? 'Retrying…' : (m.actionLabel || 'Retry')}</button>
+					{:else if m.action === 'retry-runtime'}
+						<!-- The model is fine; its RUNTIME failed (Ollama unreachable / whisper engine
+						     down). "Retry connection" pokes that service's own retry route and shows the
+						     re-read health — the QA6 §1 escape hatch. Never a fresh download; no size line. -->
+						<button
+							class="odm-btn"
+							data-testid="odm-retry-runtime"
+							disabled={m.busy}
+							onclick={() => onretryruntime?.(m.key)}
+						>{m.actionLabel || 'Retry connection'}</button>
 					{:else if m.action === 'add-sample'}
 						<!-- Downloaded, but one setup step remains ON ANOTHER PAGE. A real button that
 						     routes there (parent owns the nav) — the fix for the message that named the

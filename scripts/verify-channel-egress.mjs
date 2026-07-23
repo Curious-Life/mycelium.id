@@ -27,7 +27,7 @@ const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
 
 /** Build a fresh daemon app + capture buffers + a knob for authority/telegram. */
-function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null, voicePipeline = null, trustedToken = null } = {}) {
+function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null, voicePipeline = null, trustedToken = null, voiceReplyDefault = null, voiceNoticeThrottleMs } = {}) {
   const audits = [];
   const sends = [];
   const persists = [];
@@ -51,6 +51,8 @@ function makeApp({ authorityAllowed = true, telegram = 'ok', rateLimit = null, v
     getActiveTurn,
     agentId: 'personal-agent',
     trustedToken,
+    voiceReplyDefault,
+    ...(voiceNoticeThrottleMs != null ? { voiceNoticeThrottleMs } : {}),
   });
 
   const app = createDaemonApp({ telegramSendHandler: handler, getActiveTurn });
@@ -257,7 +259,12 @@ const HASH = crypto.createHash('sha256').update(TEXT, 'utf8').digest('hex');
   const { server, sends } = makeApp({ authorityAllowed: true, voicePipeline: { deliver: async () => { throw new Error('tts boom'); } } });
   const port = await listen(server);
   const r = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: TEXT, voice: true } });
-  rec('C18. voice failure is fail-soft (text still 200 delivered)', r.status === 200 && r.json?.delivered === true && sends.length === 1, `status=${r.status}`);
+  // Fail-soft, but NEVER silent: the text still lands, AND the owner is told voice
+  // failed (a second send through this same chokepoint) — see the V-block below.
+  rec('C18. voice failure is fail-soft (text still 200 delivered) + honestly notified',
+    r.status === 200 && r.json?.delivered === true && sends[0]?.text === TEXT
+    && r.json?.voiceError === 'render-failed' && sends.length === 2 && /voice reply unavailable/i.test(sends[1]?.text || ''),
+    `status=${r.status} sends=${sends.length} err=${r.json?.voiceError}`);
   await close(server);
 }
 
@@ -352,6 +359,224 @@ const HASH = crypto.createHash('sha256').update(TEXT, 'utf8').digest('hex');
   r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-provenance': 'agent-explicit' }, body: { chatId: OWNER, text: `${TEXT} bad`, messageThreadId: -9 } });
   rec('T4. malformed messageThreadId is dropped', sends[sends.length - 1]?.messageThreadId == null, `thread=${sends[sends.length - 1]?.messageThreadId}`);
   await close(server);
+}
+
+// ── QA6-VOICE: a VOICE-ENABLED channel actually reaches telegram sendVoice ──
+// THE regression this gate exists for: before the fix, `voice` could only come
+// from the model passing voice:true to the `reply` tool. Nothing told it voice
+// was switched on, so send-handler's `if (voice && voicePipeline)` was never
+// true and sendVoice was NEVER called — the owner turned voice ON and no voice
+// note ever arrived. These checks run the REAL voice pipeline over the REAL TTS
+// module (qwen provider → a stubbed loopback render service) into the REAL
+// telegram-api sendVoice with an injected fetch, so nothing between the
+// chokepoint and the Bot API multipart is faked away.
+{
+  process.env.TTS_PROVIDER = 'qwen';
+  process.env.QWEN_TTS_ENABLED = '1';
+  delete process.env.CHANNEL_VOICE_REPLIES;
+
+  // A real 1.5s 24kHz mono s16le WAV — what the vault's voice-render returns.
+  function makeWav(seconds = 1.5, rate = 24000) {
+    const n = Math.floor(seconds * rate);
+    const data = Buffer.alloc(n * 2);
+    for (let i = 0; i < n; i++) data.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 220 * i) / rate) * 8000), i * 2);
+    const h = Buffer.alloc(44);
+    h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVE', 8);
+    h.write('fmt ', 12); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22);
+    h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 2, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34);
+    h.write('data', 36); h.writeUInt32LE(data.length, 40);
+    return Buffer.concat([h, data]);
+  }
+
+  // Stub the vault's loopback /internal/voice-render (the confinement seam).
+  let renderMode = 'ok';
+  const renderCalls = [];
+  const renderSrv = http.createServer((rq, rs) => {
+    let body = '';
+    rq.on('data', (c) => { body += c; });
+    rq.on('end', () => {
+      renderCalls.push(1);
+      if (renderMode === 'down') { rs.writeHead(503, { 'content-type': 'application/json' }); rs.end('{"ok":false,"error":"render-service-unavailable"}'); return; }
+      if (renderMode === 'pending') { rs.writeHead(501, { 'content-type': 'application/json' }); rs.end('{"ok":false,"error":"voice-sample-pending"}'); return; }
+      const wav = makeWav();
+      rs.writeHead(200, { 'content-type': 'audio/wav' });
+      rs.end(wav);
+    });
+  });
+  const renderPort = await listen(renderSrv);
+  process.env.MYCELIUM_VOICE_RENDER_URL = `http://127.0.0.1:${renderPort}/api/v1/internal/voice-render`;
+
+  const { createVoicePipeline, createVoiceReplyPolicy, resolveVoiceReplyMode } = await import('../packages/channel-daemon/voice-pipeline.js');
+  const { createTelegramApi, MAX_VOICE_UPLOAD_BYTES } = await import('../packages/channel-daemon/telegram-api.js');
+
+  // Real telegram-api with an injected fetch: records every Bot API call.
+  const tgCalls = [];
+  const tgFetch = async (url, init) => {
+    tgCalls.push({ url: String(url), body: init?.body });
+    return { ok: true, status: 200, json: async () => ({ ok: true, result: {} }) };
+  };
+  const telegramApi = createTelegramApi({ botToken: 'test-token', fetch: tgFetch });
+  const realPipeline = () => createVoicePipeline({
+    sendVoice: ({ target, filePath, replyToMessageId, messageThreadId }) => telegramApi.sendVoice({ chatId: target, filePath, replyToMessageId, messageThreadId }),
+    agentId: 'personal-agent',
+  });
+  const voiceOf = () => tgCalls.filter((c) => /\/sendVoice$/.test(c.url));
+
+  const VTEXT = 'This is a spoken reply body long enough for the TTS chunker to accept it.';
+
+  // V1 ⭐ THE FIX: voice ON in Settings + a reply with NO explicit voice flag →
+  //     the note actually reaches Telegram sendVoice.
+  {
+    _resetForTests();
+    renderMode = 'ok'; tgCalls.length = 0;
+    const pipeline = realPipeline();
+    const { server, sends } = makeApp({
+      voicePipeline: pipeline,
+      voiceReplyDefault: createVoiceReplyPolicy({ isEnabled: () => pipeline.isEnabled(), getActiveTurn }),
+    });
+    const port = await listen(server);
+    const r = await req(port, 'POST', '/telegram/send', { headers: { 'x-egress-provenance': 'agent-explicit' }, body: { chatId: OWNER, text: VTEXT } });
+    const voiceCalls = voiceOf();
+    rec('V1. ⭐ voice-enabled channel + NO body.voice → telegram sendVoice CALLED',
+      r.status === 200 && r.json?.delivered === true && sends.length === 1 && voiceCalls.length === 1,
+      `sendVoice=${voiceCalls.length} voiceSent=${r.json?.voiceSent}`);
+    rec('V1b. sendVoice posts multipart to the Bot API /sendVoice for the right chat',
+      voiceCalls.length === 1 && typeof FormData !== 'undefined' && voiceCalls[0].body instanceof FormData
+      && String(voiceCalls[0].body.get('chat_id')) === OWNER,
+      `chat=${voiceCalls[0]?.body?.get?.('chat_id')}`);
+    rec('V1c. response reports the voice note as sent (no voiceError)',
+      r.json?.voiceSent === 1 && r.json?.voiceRequested === true && r.json?.voiceError === undefined,
+      `voiceSent=${r.json?.voiceSent} err=${r.json?.voiceError}`);
+    await close(server);
+  }
+
+  // V2: the agent can still suppress voice for ONE reply (explicit false wins).
+  {
+    _resetForTests();
+    renderMode = 'ok'; tgCalls.length = 0;
+    const pipeline = realPipeline();
+    const { server } = makeApp({ voicePipeline: pipeline, voiceReplyDefault: createVoiceReplyPolicy({ isEnabled: () => pipeline.isEnabled(), getActiveTurn }) });
+    const port = await listen(server);
+    const r = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: `${VTEXT} silent`, voice: false } });
+    rec('V2. explicit voice:false overrides the ON setting (no sendVoice)',
+      r.json?.delivered === true && voiceOf().length === 0, `sendVoice=${voiceOf().length}`);
+    await close(server);
+  }
+
+  // V3 ⭐ HONESTY: render fails → ZERO voice notes, text still delivered, and the
+  //     user is TOLD (a second chokepoint send), never a silent drop.
+  {
+    _resetForTests();
+    renderMode = 'down'; tgCalls.length = 0;
+    const pipeline = realPipeline();
+    const { server, sends, audits, persists } = makeApp({ voicePipeline: pipeline, voiceReplyDefault: () => true });
+    const port = await listen(server);
+    const r = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: `${VTEXT} render-down` } });
+    const notice = sends[1]?.text || '';
+    rec('V3. ⭐ render failure → text still delivered (200) + zero voice notes',
+      r.status === 200 && r.json?.delivered === true && voiceOf().length === 0, `sendVoice=${voiceOf().length}`);
+    rec('V3b. ⭐ the user is TOLD voice is unavailable (2nd send through the SAME chokepoint)',
+      sends.length === 2 && /voice reply unavailable/i.test(notice), `sends=${sends.length} notice=${notice.slice(0, 40)}`);
+    rec('V3c. response carries an honest machine code + notified flag',
+      r.json?.voiceError === 'render-service-unavailable' && r.json?.voiceNotified === true, `err=${r.json?.voiceError}`);
+    rec('V3d. the notice is audited + persisted (never an unlogged egress)',
+      audits.some((a) => /voice-unavailable-notice/.test(a.reason || '')) && persists.some((p) => p.metadata?.origin === 'voice-unavailable-notice'),
+      `audits=${audits.map((a) => a.reason).join('|')}`);
+    rec('V3e. ZERO-PLAINTEXT — the notice audit carries no message body',
+      !audits.some((a) => JSON.stringify(a).includes(VTEXT)));
+    await close(server);
+  }
+
+  // V4: a permanently broken renderer says it ONCE per window, but every response
+  //     still reports voiceError (throttled ≠ silent).
+  {
+    _resetForTests();
+    renderMode = 'down'; tgCalls.length = 0;
+    const pipeline = realPipeline();
+    const { server, sends } = makeApp({ voicePipeline: pipeline, voiceReplyDefault: () => true, voiceNoticeThrottleMs: 60_000 });
+    const port = await listen(server);
+    await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: `${VTEXT} one` } });
+    const r2 = await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: `${VTEXT} two` } });
+    const notices = sends.filter((s) => /voice reply unavailable/i.test(s.text || ''));
+    rec('V4. repeated failures → notice throttled to once per window…', notices.length === 1, `notices=${notices.length}`);
+    rec('V4b. …but the 2nd response STILL reports voiceError (throttled ≠ silent)',
+      r2.json?.voiceError === 'render-service-unavailable' && r2.json?.voiceNotified === false, `err=${r2.json?.voiceError}`);
+    await close(server);
+  }
+
+  // V5: the policy itself — off / auto / always.
+  {
+    _resetForTests();
+    renderMode = 'ok'; tgCalls.length = 0;
+    const pipeline = realPipeline();
+    const policy = createVoiceReplyPolicy({ isEnabled: () => pipeline.isEnabled(), getActiveTurn });
+    const { server } = makeApp({ voicePipeline: pipeline, voiceReplyDefault: policy });
+    const port = await listen(server);
+
+    process.env.CHANNEL_VOICE_REPLIES = 'off';
+    await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: `${VTEXT} off` } });
+    rec('V5. CHANNEL_VOICE_REPLIES=off → no voice note', voiceOf().length === 0, `sendVoice=${voiceOf().length}`);
+
+    process.env.CHANNEL_VOICE_REPLIES = 'auto';
+    setActiveTurn({ source: 'telegram', channelKind: 'telegram', channelId: OWNER, voiceMode: false });
+    await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: `${VTEXT} auto-text` } });
+    rec('V5b. auto + text inbound → no voice note', voiceOf().length === 0, `sendVoice=${voiceOf().length}`);
+
+    setActiveTurn({ source: 'telegram', channelKind: 'telegram', channelId: OWNER, voiceMode: true });
+    await req(port, 'POST', '/telegram/send', { body: { chatId: OWNER, text: `${VTEXT} auto-voice` } });
+    rec('V5c. auto + VOICE inbound → voice note sent', voiceOf().length === 1, `sendVoice=${voiceOf().length}`);
+
+    delete process.env.CHANNEL_VOICE_REPLIES;
+    rec('V5d. unset mode defaults to always', resolveVoiceReplyMode() === 'always');
+
+    // Fail-closed: TTS switched off ⇒ the policy says no, whatever the mode.
+    const offPolicy = createVoiceReplyPolicy({ isEnabled: () => false, getActiveTurn });
+    rec('V5e. TTS off ⇒ policy false (fail-closed)', offPolicy() === false);
+    await close(server);
+  }
+
+  // V5f: a TRUSTED system-template send (command ack / pairing code) is NEVER
+  //      auto-voiced by the policy — it would speak a pairing code aloud.
+  {
+    _resetForTests();
+    renderMode = 'ok'; tgCalls.length = 0;
+    const TOKEN = 'a'.repeat(64);
+    const pipeline = realPipeline();
+    const { server } = makeApp({
+      authorityAllowed: false, trustedToken: TOKEN,
+      voicePipeline: pipeline, voiceReplyDefault: () => true,   // policy says "always"
+    });
+    const port = await listen(server);
+    const r = await req(port, 'POST', '/telegram/send', {
+      headers: { 'x-egress-trusted': TOKEN },
+      body: { chatId: OWNER, text: `${VTEXT} pairing-code-0000`, trusted: true },
+    });
+    rec('V5f. trusted command-ack is NOT auto-voiced (policy ignored for system-template)',
+      r.json?.delivered === true && voiceOf().length === 0, `sendVoice=${voiceOf().length}`);
+    await close(server);
+  }
+
+  // V6: OUTBOUND Telegram limit — a too-large note is refused BEFORE the upload,
+  //     with a code the pipeline reports honestly (not a burned multi-minute POST).
+  {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const dir = await mkdtemp(path.join(tmpdir(), 'voicecap-'));
+    const big = path.join(dir, 'big.ogg');
+    await writeFile(big, Buffer.alloc(MAX_VOICE_UPLOAD_BYTES + 1));
+    tgCalls.length = 0;
+    let code = null;
+    try { await telegramApi.sendVoice({ chatId: OWNER, filePath: big }); } catch (e) { code = e?.code || null; }
+    rec('V6. voice note over the Bot API upload cap → refused with voice-too-large, no upload',
+      code === 'voice-too-large' && voiceOf().length === 0, `code=${code} calls=${voiceOf().length}`);
+    await rm(dir, { recursive: true, force: true });
+  }
+
+  await close(renderSrv);
+  delete process.env.MYCELIUM_VOICE_RENDER_URL;
+  delete process.env.TTS_PROVIDER;
+  delete process.env.QWEN_TTS_ENABLED;
 }
 
 const passed = ledger.filter(Boolean).length;

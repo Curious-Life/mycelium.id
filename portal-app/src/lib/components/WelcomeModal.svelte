@@ -45,9 +45,13 @@
 	const isHandleStep = $derived(step === totalSteps - 1);
 
 	// \u2500\u2500 Optional handle claim (last step) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-	const HANDLE_RE = /^[a-z0-9][a-z0-9_]{2,29}$/;
+	// Mirrors the DNS-safe rule (identity.js isValidHandle) — the SERVER is the
+	// authority. It used to permit underscores, which can never be a hostname label,
+	// so the field went green on names the setter then rejected.
+	const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
 	let handleInput = $state('');
-	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid'>('idle');
+	// `unreachable` is DISTINCT from `taken` — see HandleStep.svelte.
+	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid' | 'unreachable'>('idle');
 	let handleReason = $state('');
 	let handleCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -56,15 +60,21 @@
 		handleReason = '';
 		if (handleCheckTimer) clearTimeout(handleCheckTimer);
 		if (!h) { handleState = 'idle'; return; }
-		if (!HANDLE_RE.test(h)) { handleState = 'invalid'; handleReason = '3\u201330 chars: a\u2013z, 0\u20139, _ (start alphanumeric)'; return; }
+		if (!HANDLE_RE.test(h)) { handleState = 'invalid'; handleReason = '2\u201332 chars: a\u2013z, 0\u20139, dashes (no leading/trailing dash)'; return; }
 		handleState = 'checking';
 		handleCheckTimer = setTimeout(async () => {
 			try {
 				const res = await api(`/portal/profile/handle/check?handle=${encodeURIComponent(h)}`);
 				const d = await res.json().catch(() => ({}));
 				if (d.available) { handleState = 'available'; }
-				else { handleState = 'taken'; handleReason = d.reason || 'that handle is taken'; }
-			} catch { handleState = 'idle'; }
+				else if (d.unreachable || !res.ok) {
+					handleState = 'unreachable';
+					handleReason = "couldn't check right now — you may be offline. You can set this later.";
+				} else { handleState = 'taken'; handleReason = d.reason || 'that handle is taken'; }
+			} catch {
+				handleState = 'unreachable';
+				handleReason = "couldn't check right now — you may be offline. You can set this later.";
+			}
 		}, 400);
 	}
 
@@ -169,7 +179,7 @@
 					<p class="handle-status" class:ok={handleState === 'available'} class:bad={handleState === 'taken' || handleState === 'invalid'}>
 						{#if handleState === 'checking'}Checking…
 						{:else if handleState === 'available'}&#10003; available
-						{:else if handleState === 'taken' || handleState === 'invalid'}{handleReason}
+						{:else if handleState === 'taken' || handleState === 'invalid' || handleState === 'unreachable'}{handleReason}
 						{:else}&nbsp;{/if}
 					</p>
 				{/if}

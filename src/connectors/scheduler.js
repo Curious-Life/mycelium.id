@@ -39,6 +39,19 @@ export function connectorDueAt(state, baseMs) {
   return last + baseMs * (2 ** shift);
 }
 
+/**
+ * The revoke outcome for "we could not even LOOK at the connectors" — the vault
+ * never opened, so its encrypted tokens are unreadable and NOTHING was revoked
+ * upstream (review F3). This must NOT be reported as the clean `{attempted:0,
+ * revoked:[], failed:[]}` it superficially resembles: destroying an unbooted or
+ * broken vault is a real, common path, and live OAuth grants may be sitting in
+ * the rows about to be wiped. One source of truth so the server wiring and the
+ * gate cannot drift.
+ */
+export function connectorsUnavailable(reason = 'vault-not-open') {
+  return { attempted: 0, revoked: [], failed: [{ id: '*', reason }] };
+}
+
 export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
   const store = createConnectorStore({ db, userId });
   const running = new Set(); // single-flight per connector id
@@ -125,6 +138,50 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
     return { ok: true, status: 'disconnected' };
   }
 
+  /**
+   * FACTORY-RESET hook (QA P0.9): best-effort revoke the UPSTREAM OAuth grant of
+   * every connector that still holds tokens, so a destroyed vault does not leave
+   * Google/Notion/… holding a live grant against the user's account.
+   *
+   * Contract, mirroring the destroy engine's honesty rule:
+   *   - NEVER throws and never blocks: each revoke is bounded by `timeoutMs`, and
+   *     the whole sweep by `totalTimeoutMs`, so an offline box cannot stall the wipe.
+   *   - The OUTCOME is REPORTED, never assumed. A provider we could not reach lands
+   *     in `failed[]` with a reason — the grant is still live and the user is told.
+   *   - Adapters with no `revoke` are reported as `no-revoke-endpoint` failures, not
+   *     as successes: nothing was revoked upstream.
+   *   - Local state is NOT touched here (the wipe deletes the whole vault anyway);
+   *     this is purely the network side.
+   * @returns {Promise<{attempted:number, revoked:string[], failed:Array<{id:string,reason:string}>}>}
+   */
+  async function revokeAll({ timeoutMs = 5000, totalTimeoutMs = 20000 } = {}) {
+    const out = { attempted: 0, revoked: [], failed: [] };
+    const deadline = Date.now() + totalTimeoutMs;
+    let ids = [];
+    try { ids = await store.listIds(); }
+    catch (e) { out.failed.push({ id: '*', reason: String(e?.message || e).slice(0, 80) }); return out; }
+    for (const id of ids) {
+      let tokens = null;
+      try { tokens = await store.getTokens(id); } catch { tokens = null; }
+      if (!tokens) continue;                       // nothing stored ⇒ no upstream grant
+      out.attempted += 1;
+      if (Date.now() >= deadline) { out.failed.push({ id, reason: 'sweep-timeout' }); continue; }
+      const adapter = getAdapter(id);
+      if (!adapter?.revoke) { out.failed.push({ id, reason: 'no-revoke-endpoint' }); continue; }
+      try {
+        await Promise.race([
+          adapter.revoke(tokens),
+          new Promise((_, rej) => { const t = setTimeout(() => rej(new Error('revoke-timeout')), timeoutMs); t.unref?.(); }),
+        ]);
+        out.revoked.push(id);
+      } catch (e) {
+        // Reason only — never the token, the URL, or the provider response body.
+        out.failed.push({ id, reason: String(e?.code || e?.message || e).slice(0, 80) });
+      }
+    }
+    return out;
+  }
+
   /** One sync pass for a connector: refresh → pull → captureMessage → cursor. */
   async function runSync(id, { force = false } = {}) {
     const adapter = getAdapter(id);
@@ -205,7 +262,7 @@ export function createConnectorRunner({ db, userId, enqueueEnrichment }) {
     }
   }
 
-  return { status, connect, handleCallback, disconnect, runSync, store };
+  return { status, connect, handleCallback, disconnect, revokeAll, runSync, store };
 }
 
 /**

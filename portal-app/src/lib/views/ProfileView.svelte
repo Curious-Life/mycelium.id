@@ -4,6 +4,8 @@
 
 	interface Profile {
 		handle: string | null;
+		handle_claimed?: number;
+		pending_handle?: string | null;
 		display_name: string | null;
 		avatar_url: string | null;
 		signature: string | null;
@@ -88,26 +90,31 @@
 
 	let editingHandle = $state(false);
 	let handleInput = $state('');
-	let handleAvailable = $state<boolean | null>(null);
-	let handleChecking = $state(false);
+	// A state machine, NOT a boolean: an offline control plane must read as its OWN
+	// distinct 'unreachable' state, never fold into 'taken'. checkAvailability now always
+	// answers 200 with { available:false, unreachable:true } on a failed check, so a
+	// boolean `available` would render every name an offline user tries as "Not available"
+	// — the exact "offline shows taken" bug fixed on the Connections/onboarding screens.
+	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'unreachable'>('idle');
 	let handleCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function onHandleInput() {
-		handleAvailable = null;
+		handleState = 'idle';
 		if (handleCheckTimer) clearTimeout(handleCheckTimer);
 		const val = handleInput.trim().toLowerCase();
 		if (!val || val.length < 2) return;
-		if (val === profile?.handle) { handleAvailable = true; return; }
-		handleChecking = true;
+		if (val === profile?.handle) { handleState = 'available'; return; }
+		handleState = 'checking';
 		handleCheckTimer = setTimeout(async () => {
 			try {
 				const res = await api(`/portal/profile/handle/check?handle=${encodeURIComponent(val)}`);
-				if (res.ok) {
-					const data = await res.json();
-					handleAvailable = data.available;
-				}
-			} catch {}
-			handleChecking = false;
+				const data = await res.json().catch(() => ({}));
+				// `data.unreachable` is the AUTHORITATIVE signal — distinguish a genuine
+				// "taken" (the plane answered) from the plane being unreachable.
+				if (res.ok && data?.available) handleState = 'available';
+				else if (data?.unreachable) handleState = 'unreachable';
+				else handleState = 'taken';
+			} catch { handleState = 'unreachable'; }
 		}, 400);
 	}
 	let copied = $state(false);
@@ -165,10 +172,20 @@
 		saving = true;
 		error = null;
 		try {
-			const data = await apiPut<{ profile: Profile }>('/portal/profile', { handle: handleInput.trim().toLowerCase() });
+			// The server delegates to the ONE handle setter (claim + publicHost). Its
+			// `handle` echo tells us the HONEST outcome: a live claim needs a restart
+			// for the signing identity; otherwise the name is recorded but not yet live.
+			const data = await apiPut<{ profile: Profile; handle?: { claimed: boolean; restartRequired: boolean; reason?: string } }>(
+				'/portal/profile', { handle: handleInput.trim().toLowerCase() });
 			profile = data.profile;
 			editingHandle = false;
-			showSuccess('Handle saved');
+			if (data.handle?.claimed && data.handle?.restartRequired) {
+				showSuccess('Address claimed — restart Mycelium to bring it online');
+			} else if (data.handle && !data.handle.claimed) {
+				showSuccess('Handle saved — claim it as your public address in Settings → Connections');
+			} else {
+				showSuccess('Handle saved');
+			}
 		} catch (e: any) {
 			error = e.message || 'Failed to save handle';
 		} finally {
@@ -248,20 +265,31 @@
 				</div>
 
 				<div class="handle-row">
-					{#if editingHandle}
+					{#if profile.handle_claimed}
+						<!-- SET-ONCE: a claimed handle is your live did:web / WebFinger identity;
+						     peers who connected stored it. Renaming needs a DID-rotation
+						     migration (deferred), so we show it read-only, not as an editable
+						     field the server would 409. -->
+						<div class="handle-display" title="Your public address — set once, points to where you connect from">
+							<span class="handle-text">@{profile.handle}</span>
+							<span class="handle-pending">your address</span>
+						</div>
+					{:else if editingHandle}
 						<div class="handle-edit">
 							<span class="handle-at">@</span>
 							<input type="text" bind:value={handleInput} oninput={onHandleInput} placeholder="yourhandle" class="handle-input" maxlength="32" pattern="[a-z0-9][a-z0-9-]*" />
-							<button onclick={saveHandle} disabled={saving || handleAvailable === false} class="btn-sm btn-primary">Save</button>
-							<button onclick={() => { editingHandle = false; handleAvailable = null; }} class="btn-sm btn-ghost">Cancel</button>
+							<button onclick={saveHandle} disabled={saving || handleState === 'taken'} class="btn-sm btn-primary">Save</button>
+							<button onclick={() => { editingHandle = false; handleState = 'idle'; }} class="btn-sm btn-ghost">Cancel</button>
 						</div>
 						{#if handleInput.trim().length >= 2}
 							<div style="font-size: 0.7rem; margin-top: 0.25rem; margin-left: 1.5rem;">
-								{#if handleChecking}
+								{#if handleState === 'checking'}
 									<span style="color: var(--color-text-tertiary);">Checking...</span>
-								{:else if handleAvailable === true}
+								{:else if handleState === 'available'}
 									<span style="color: #4ade80;">Available</span>
-								{:else if handleAvailable === false}
+								{:else if handleState === 'unreachable'}
+									<span style="color: #fbbf24;">address service unreachable — can't check right now</span>
+								{:else if handleState === 'taken'}
 									<span style="color: #f87171;">Not available</span>
 								{/if}
 							</div>
@@ -269,9 +297,12 @@
 					{:else}
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
-						<div class="handle-display" onclick={() => { editingHandle = true; handleInput = profile?.handle || ''; }}>
+						<div class="handle-display" onclick={() => { editingHandle = true; handleInput = profile?.handle || profile?.pending_handle || ''; }}>
 							{#if profile.handle}
 								<span class="handle-text">@{profile.handle}</span>
+							{:else if profile.pending_handle}
+								<span class="handle-text">@{profile.pending_handle}</span>
+								<span class="handle-pending">not live yet</span>
 							{:else}
 								<span class="handle-placeholder">Set your handle</span>
 							{/if}
@@ -458,6 +489,7 @@
 		letter-spacing: -0.02em;
 	}
 	.handle-placeholder { font-size: 1rem; color: var(--color-text-tertiary); }
+	.handle-pending { font-size: 0.68rem; color: var(--color-text-tertiary); margin-left: 0.4rem; padding: 0.05rem 0.35rem; border: 1px solid var(--color-border, rgba(255,255,255,0.14)); border-radius: 6px; }
 	.edit-icon {
 		font-size: 0.75rem;
 		color: var(--color-text-tertiary);

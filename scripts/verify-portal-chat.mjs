@@ -257,6 +257,37 @@ const readSSE = async (res) => { const t = await res.text(); return t.split('\n'
   rec('C10 a different conversation has NO history bleed', Array.isArray(hOther.messages) && hOther.messages.length === 0);
 }
 
+// ── C10b transcript visibility (QA 2026-07-22): a prior turn's AUDIO ATTACHMENT
+//    whose transcription COMPLETED must reach the model's context. The upload path
+//    captures the message as "File: memo.ogg" and transcribes fire-and-forget
+//    afterwards, so the transcript only ever lives on attachments.transcript —
+//    without the join in src/agent/attachment-context.js the agent is blind to it
+//    (and told the user it "could not see" a voice note that WAS transcribed).
+{
+  mode = 'ok';
+  const conv = `verify-transcript-${crypto.randomUUID()}`;
+  const TRANSCRIPT = 'ZORBLAX pick up the dry cleaning on Thursday';
+  // Attachment row (local_path null = legacy/no-blob; the join reads the ROW, not bytes).
+  const att = await db.attachments.insert({ user_id: U, file_name: 'memo.ogg', file_type: 'audio/ogg', file_size: 8 });
+  await db.attachments.update(att.id, { transcript: TRANSCRIPT });
+  await captureMessage(db, {
+    userId: U, role: 'user', content: 'File: memo.ogg', source: 'portal-chat',
+    conversationId: `chat:${conv}`, attachmentId: att.id,
+  }, () => {});
+  lastSystem = '';
+  await readSSE(await fetch(`${base}/chat/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'what did I say in that voice note?', conversationId: conv }) }));
+  // Assert against the HISTORY BLOCK specifically, not the whole preamble: the
+  // getContext briefing ALSO joins transcripts now, so a whole-string match would
+  // stay green with the history join deleted (two guards masking each other —
+  // the classic gate trap: deleting one guard stays GREEN because the other
+  // short-circuits, so each guard must be mutated separately). The history block is
+  // appended LAST by portal-chat, so slicing from its header isolates it.
+  const hIdx = Math.max(lastSystem.lastIndexOf('## Conversation so far'), lastSystem.lastIndexOf('Earlier conversation'));
+  const historyBlock = hIdx === -1 ? '' : lastSystem.slice(hIdx);
+  rec('C10b a completed transcript on a prior turn reaches the chat model HISTORY block',
+    hIdx !== -1 && historyBlock.includes(TRANSCRIPT), JSON.stringify(historyBlock.slice(0, 300)));
+}
+
 // ── C11 RT3 isolation: a chat read can NEVER address a CHANNEL conversation ──
 {
   // Seed a channel-style message under a bare chatId conversation (as the daemon persists).

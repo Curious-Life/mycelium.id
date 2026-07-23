@@ -65,7 +65,7 @@ const SUBV = {
   'sub-ok': { native: 'ok', cli: 'unknown' },
   'sub-unknown': { native: 'unknown', cli: 'unknown' },
 }[PROBE] || null;
-const RETURNING = PROBE === 'returning' || PROBE === 'fault' || PROBE === 'voice-sample' || PROBE === 'voice-error' || PROBE === 'voice-needs-runtime' || PROBE === 'embedder-absent' || Boolean(SUBV);
+const RETURNING = PROBE === 'returning' || PROBE === 'fault' || PROBE === 'voice-sample' || PROBE === 'voice-error' || PROBE === 'voice-needs-runtime' || PROBE === 'embedder-absent' || PROBE === 'embedder-down' || PROBE === 'runtime-down' || PROBE === 'ollama-strand' || Boolean(SUBV);
 // The returning vault: Understanding + Conversation set; transcription + descriptions NOT —
 // the exact ≥2-gap shape W6's gap-fill exists for.
 const SETTINGS = RETURNING
@@ -110,6 +110,20 @@ globalThis.__apiStub = async (path, options = {}) => {
     let i = 0;
     return { ok: true, body: { getReader: () => ({ read: async () => (i < chunks.length ? { value: enc.encode(chunks[i++]), done: false } : { value: undefined, done: true }) }) } };
   }
+  if (path.startsWith('/portal/embed/retry')) return { ok: true, json: async () => ({ ok: true, health: { status: 'starting', message: 'Restarting the embedding engine…', detail: null } }) };
+  // QA6 §1: the Ollama daemon retry the Understanding "Retry connection" button pokes. Count hits
+  // via a global so a test can prove the click actually reached the route.
+  if (path.startsWith('/portal/hardware/retry')) { globalThis.__ollamaRetryHits = (globalThis.__ollamaRetryHits || 0) + 1; return { ok: true, json: async () => ({ ok: false, ollama: { status: 'starting', state: 'loading', retryable: false, message: 'Starting the local model runtime…', detail: null } }) }; }
+  // LOW-5: the daemon's TRUE health, a pure read the Understanding row now merges in. In the
+  // 'ollama-strand' probe the readiness slice reports a STALE labeler 'ok' while the daemon is
+  // genuinely down — only the merge (withOllama) makes the row read the fault, so this is what a
+  // reverted merge would miss.
+  if (path.startsWith('/portal/hardware/ollama')) {
+    return PROBE === 'ollama-strand'
+      ? { ok: true, json: async () => ({ ok: true, ollama: { status: 'down', state: 'failed', retryable: true, message: 'The local model runtime isn’t running.', detail: null, installed: true, running: false } }) }
+      : { ok: true, json: async () => ({}) };
+  }
+  if (path.startsWith('/portal/transcription/retry')) { globalThis.__transRetryHits = (globalThis.__transRetryHits || 0) + 1; return { ok: true, json: async () => ({ ok: false, state: 'loading', retryable: false, health: { status: 'starting' } }) }; }
   if (path.startsWith('/portal/transcription/download')) return { ok: true, json: async () => ({ ok: true }) };
   if (path.startsWith('/portal/transcription/status')) {
     return { ok: true, json: async () => ({ ok: true, health: { status: 'no_model', message: null, progress: null }, model: null, catalog: [
@@ -163,6 +177,19 @@ globalThis.__apiStub = async (path, options = {}) => {
       // The panel must NOT fabricate a green "Included" — it renders the honest idle absence.
       : PROBE === 'embedder-absent'
       ? { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } }
+      // embedder-down: the bundled Nomic weights failed to download/load. The panel must read this as
+      // a genuine fault (red) AND offer a Retry that pokes POST /portal/embed/retry — never a fake ✓.
+      : PROBE === 'embedder-down'
+      ? { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, embedder: { status: 'down', message: 'The embedding engine keeps stopping.', detail: 'exited code 1', model: null, progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } }
+      // QA6 §1: the Understanding model runs on Ollama; a down runtime reads 'down' with the
+      // runtime-unreachable line. The panel must offer "Retry connection" (odm-retry-runtime),
+      // NOT a Download (the model is fine, the daemon isn't). transcriber down likewise.
+      : PROBE === 'runtime-down'
+      ? { labeler: { status: 'down', message: 'The local model runtime (Ollama) isn’t reachable — is it running?', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null }, transcriber: { status: 'down', message: 'The transcription engine keeps stopping.', model: 'large-v3-turbo', progress: null } }
+      // LOW-5: the readiness slice reports a STALE labeler 'ok' — but the daemon (GET /hardware/ollama)
+      // is down. The Understanding row must read the DAEMON's fault (via withOllama), not the stale slice.
+      : PROBE === 'ollama-strand'
+      ? { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } }
       : RETURNING
         ? { labeler: { status: 'ok', message: 'Labeling with qwen3.5:4b.', model: 'qwen3.5:4b', progress: null }, enricher: { status: 'ok', message: 'Ready.', model: 'qwen3.5:4b', progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } }
         : { labeler: { status: 'no_model', message: null, model: null, progress: null }, enricher: { status: 'no_model', message: null, model: null, progress: null }, embedder: { status: 'ok', message: 'Ready.', model: null, progress: null }, transcriber: { status: 'no_model', message: null, model: null, progress: null } };
@@ -269,6 +296,10 @@ try {
       size: r.querySelector('.odm-size')?.textContent?.trim() ?? null,
       hasDownload: !!r.querySelector('[data-testid="odm-download"]'),
       downloadText: r.querySelector('[data-testid="odm-download"]')?.textContent?.trim() ?? null,
+      hasRetry: !!r.querySelector('[data-testid="odm-retry"]'),
+      retryText: r.querySelector('[data-testid="odm-retry"]')?.textContent?.trim() ?? null,
+      hasRetryRuntime: !!r.querySelector('[data-testid="odm-retry-runtime"]'),
+      retryRuntimeText: r.querySelector('[data-testid="odm-retry-runtime"]')?.textContent?.trim() ?? null,
       hasAddSample: !!r.querySelector('[data-testid="odm-add-sample"]'),
       addSampleText: r.querySelector('[data-testid="odm-add-sample"]')?.textContent?.trim() ?? null,
       blocked: r.querySelector('[data-testid="odm-blocked"]')?.textContent?.trim() ?? null,
@@ -352,6 +383,23 @@ try {
     }
   }
 
+  // embedder-down: the Search row must offer a Retry that pokes POST /portal/embed/retry (the
+  // bundled Nomic download failed). Drive the button and capture the recorded POST — never a fresh
+  // /hardware/pull or /transcription/download (Search is bundled; it re-attempts, not re-downloads).
+  let odmRetry = null;
+  if (PROBE === 'embedder-down') {
+    const searchRow = [...D.querySelectorAll('[data-testid="odm-row"]')].find((r) => r.getAttribute('data-key') === 'search');
+    const btn = searchRow?.querySelector('[data-testid="odm-retry"]');
+    const beforeLen = sent.length;
+    if (btn) {
+      btn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+      flushSync();
+      await wait(80);
+      flushSync();
+    }
+    odmRetry = { hadButton: !!btn, sent: sent.slice(beforeLen).map((s) => ({ path: s.path, method: s.method })) };
+  }
+
   // R2-VOICEBTN: on the voice-sample probe (downloaded-but-mute), the voice row must offer a
   // CLICKABLE 'Add a voice sample' button that ROUTES to the character page — not a dead note.
   // Drive it and capture the recorded openFromRoute call.
@@ -389,6 +437,29 @@ try {
       hadDownload: !!dlBtn, hadAddSample: !!sampleBtn,
       sent: sent.slice(beforeLen).map((s) => ({ path: s.path, method: s.method })),
       routes: (globalThis.__wsRoutes || []).slice(),
+    };
+  }
+
+  // QA6 §1: a RUNTIME-down Understanding (Ollama unreachable) must offer "Retry connection"
+  // (odm-retry-runtime), NOT a Download — the model file is fine, the daemon is not. Clicking it
+  // must POST /portal/hardware/retry (proven via the global hit counter), never /hardware/pull.
+  // The Transcription row (whisper engine down) must likewise offer it → /transcription/retry.
+  let odmRetryRuntime = null;
+  if (PROBE === 'runtime-down') {
+    globalThis.__ollamaRetryHits = 0; globalThis.__transRetryHits = 0;
+    const uRow = [...D.querySelectorAll('[data-testid="odm-row"]')].find((r) => r.getAttribute('data-key') === 'understanding');
+    const tRow = [...D.querySelectorAll('[data-testid="odm-row"]')].find((r) => r.getAttribute('data-key') === 'transcription');
+    const uBtn = uRow?.querySelector('[data-testid="odm-retry-runtime"]');
+    const tBtn = tRow?.querySelector('[data-testid="odm-retry-runtime"]');
+    const uHasDownload = !!uRow?.querySelector('[data-testid="odm-download"]');
+    if (uBtn) { uBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); flushSync(); await wait(80); flushSync(); }
+    if (tBtn) { tBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); flushSync(); await wait(80); flushSync(); }
+    odmRetryRuntime = {
+      understandingHasRetryRuntime: !!uBtn,
+      understandingHasDownload: uHasDownload,
+      transcriptionHasRetryRuntime: !!tBtn,
+      ollamaRetryHits: globalThis.__ollamaRetryHits || 0,
+      transRetryHits: globalThis.__transRetryHits || 0,
     };
   }
 
@@ -430,7 +501,7 @@ try {
     };
   }
 
-  emit({ ok: true, probe: PROBE || 'cold', before, afterConfirm, gapClick, customize, subProbe, odmDownload, odmSample, odmRuntime, windowOpens });
+  emit({ ok: true, probe: PROBE || 'cold', before, afterConfirm, gapClick, customize, subProbe, odmDownload, odmSample, odmRuntime, odmRetry, odmRetryRuntime, windowOpens });
   process.exit(0);   // the flow's 4s models poll would otherwise keep node alive forever
 } catch (e) {
   emit({ ok: false, probe: PROBE || 'cold', error: String(e?.stack || e) });

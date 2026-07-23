@@ -77,7 +77,12 @@ const SOURCES = [
   // in JS via textFrom. Latent because pre-migration vault rows are still plaintext
   // (the SQL concat happens to work there); newly-encrypted profiles are the ones
   // that lose essence. Mirrors PR #229's documents fix.
-  { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name, essence, created_at FROM territory_profiles WHERE user_id = ?", kind: 'territory', prefix: ID_PREFIX.territory, textFrom: (r) => [r.name, r.essence].filter(Boolean).join(' ') },
+  // dissolved_at IS NULL: a dissolved territory is a territory that no longer holds
+  // a single live point (cluster.py prune_dead_territories) — its name + essence
+  // describe content that is GONE, so indexing it leaks deleted material back into
+  // search as a ghost hit. The dissolved row itself is kept on purpose (lineage +
+  // id reservation), it just must not be part of the corpus.
+  { table: 'territory_profiles', sql: "SELECT CAST(territory_id AS TEXT) AS id, name, essence, created_at FROM territory_profiles WHERE user_id = ? AND dissolved_at IS NULL", kind: 'territory', prefix: ID_PREFIX.territory, textFrom: (r) => [r.name, r.essence].filter(Boolean).join(' ') },
   { table: 'realms', sql: "SELECT CAST(realm_id AS TEXT) AS id, name, essence, created_at FROM realms WHERE user_id = ?", kind: 'realm', prefix: ID_PREFIX.realm, textFrom: (r) => [r.name, r.essence].filter(Boolean).join(' ') },
   { table: 'semantic_themes', sql: "SELECT CAST(semantic_theme_id AS TEXT) AS id, name, essence, created_at FROM semantic_themes WHERE user_id = ?", kind: 'theme', prefix: ID_PREFIX.theme, textFrom: (r) => [r.name, r.essence].filter(Boolean).join(' ') },
   // Documents have no stored embedding_768 (enrichment embeds messages only),

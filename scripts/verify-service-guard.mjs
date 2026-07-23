@@ -208,6 +208,24 @@ const { startTranscribeSupervisor, getTranscriberHealth, _resetTranscribeSupervi
   check('T1d. nudge() resumes', spawn.services.length === 2, `spawns=${spawn.services.length}`);
   _resetTranscribeSupervisor();
 }
+{
+  // T2 — THE IN-FLIGHT LATCH (HIGH-1). An unreachable :8093 forces tryStart; two extra nudges land
+  // during the (async) checkDeps window that precedes the `child` assignment. Without startInFlight the
+  // `child`-null guard alone lets all three ticks spawn a transcribe-service.py on :8093 (the Retry
+  // button is on TWO surfaces, built to be mashed); with the latch exactly ONE service spawns. Mirrors
+  // embed S9. mkFakeSpawn counts only --serve spawns (the `-c` deps probe is filtered), so the count is
+  // resident services, not probes.
+  _resetTranscribeSupervisor();
+  const spawn = mkFakeSpawn();
+  const reap = mkReapStub({ reaped: false, reason: 'no-holder' });
+  const failFetch = async () => { throw new Error('ECONNREFUSED'); };
+  const sup = startTranscribeSupervisor({ home: process.cwd(), pythonBin: 'python3', port: 18093, model: 'small', fetch: failFetch, spawn, reapOrphan: reap, log: () => {} });
+  sup.nudge(); sup.nudge(); // mash Retry across both rows while the first tryStart is mid-checkDeps
+  await sleep(300);
+  check('T2. concurrent ticks/retries spawn the transcribe service AT MOST once (the in-flight latch — no double :8093)',
+    spawn.services.length === 1, `services=${spawn.services.length}`);
+  _resetTranscribeSupervisor();
+}
 
 // ── Q: qwen3-tts supervisor wiring (fast ticks) ──────────────────────────────
 process.env.MYCELIUM_QWEN_TTS_PORT = '18094'; // read at module load — before import

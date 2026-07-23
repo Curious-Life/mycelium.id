@@ -139,6 +139,38 @@ export function getEnricherHealth() {
 export function nudgeEnrichDrainer() { try { _current?.nudge(); } catch { /* best-effort */ } return Boolean(_current); }
 
 /**
+ * QA6 — EMBED BEFORE CATEGORIZE. Given ONE cycle's embed-loop observations, decide whether the
+ * categorize + enrich stages should be DEFERRED to a later cycle so the two on-box stages never burn
+ * the box at the same time (the operator's 24GB-crash report: "the embedding model still runs at the
+ * same time as categorization"). Pure + exported so every clause is falsifiable directly, with no
+ * 10,000-row integration drive — the same discipline as deriveEmbedLiveness.
+ *
+ * Defer IFF embed is BOTH (a) making progress and (b) not finished:
+ *   progressing   = ran on a healthy, unpaused service, did not throw, and rows LEFT the pending set
+ *   backlogRemains= the loop neither drained the queue (`scanned === 0`) nor broke on no-progress
+ *
+ * ⚠️ THE STARVATION GUARD IS THE `progressing` HALF. "Backlog remains" alone is TRUE for every way
+ * embed can be broken — service down, vault locked, an un-embeddable head of queue, the owner's own
+ * Stop, a throwing drain — and deferring on it would deadlock L1+L2 permanently behind a stage that
+ * will never finish. So a backlog that is NOT being drained releases categorize immediately; only a
+ * backlog that IS shrinking holds it. Distinguishing "remains and progressing" from "cannot progress"
+ * is the difference between a scheduler and a deadlock.
+ *
+ * Self-correcting: on a caught-up vault `embedDrained` is true on the first pass (scans 0) ⇒ false,
+ * no extra read; in the rare case the final pass drained the last rows AT the 200-cap, the next 15s
+ * tick scans 0 and releases. The decision is recomputed from scratch every cycle — no latch to wedge.
+ *
+ * @param {{embedOk:boolean, embedPaused:boolean, embedThrew:boolean, embedMoved:number,
+ *          embedDrained:boolean, embedStalledOut:boolean}} o
+ * @returns {boolean} true ⇒ defer categorize + enrich this cycle
+ */
+export function deferCategorizeForEmbed(o) {
+  const progressing = Boolean(o?.embedOk) && !o?.embedPaused && !o?.embedThrew && Number(o?.embedMoved || 0) > 0;
+  const backlogRemains = !o?.embedDrained && !o?.embedStalledOut;
+  return progressing && backlogRemains;
+}
+
+/**
  * Clear the live service's in-memory L1 label-attempt counters — the companion to
  * db.messages.resetEnrichmentGiveUps() (the retry-failed route calls both). Without
  * this, a row the route just reset to pending would still carry its old counter and
@@ -518,6 +550,20 @@ export function startEnrichDrainer({
   // and after any non-throwing block run.
   let _l1Errs = 0;
   let _l2Errs = 0;
+  // ── QA6: EMBED BEFORE CATEGORIZE (stage serialization) ──────────────────────────────────────
+  // TRUE while THIS cycle deferred the L1+L2 block because the embed stage still had a backlog it
+  // was actively draining. The three stages are already sequential WITHIN a cycle, but the embed
+  // loop is CAPPED at 200 passes × 50 rows = 10,000 messages — so on a large import it exhausts the
+  // cap and FALLS THROUGH to categorize with the backlog still full. From the box's point of view
+  // that is embedding and labeling alternating every 15s against the same RAM and the same CPU
+  // (the operator watched a 24GB machine die doing exactly this). The deferral makes the ordering
+  // the copy already promises: embed drains FIRST, categorize starts after.
+  // ⚠️ It is a SCHEDULING state, never a pause and never a fault — the owner chose nothing here, so
+  // it must not touch the pause flags or the model healths. It is reported (status() below →
+  // readiness `pipeline`, categorize stage `blocked`/`waiting_embed`) so a stopped-looking stage is
+  // never silent — the whole point of the pipeline-transparency design.
+  let _catWaitingOnEmbed = false;
+  let _catDeferrals = 0;   // consecutive cycles deferred (log throttle only)
   let _health = 'unknown'; // last observed embed-service health: ok | loading | error | unreachable
   const embedBaseUrl = () => `http://127.0.0.1:${Number(process.env.MYCELIUM_EMBED_PORT) || 8091}`;
   let timer = null;
@@ -1071,6 +1117,20 @@ export function startEnrichDrainer({
         try { await reclaimGaveUpRows(db, userId); } catch { /* non-fatal */ }
       }
 
+      // ── PER-CYCLE EMBED OBSERVATIONS — the ONLY inputs to the categorize deferral (see below) ──
+      // ⚠️ ZERO NEW QUERIES, BY CONSTRUCTION. Every one of these is a byproduct of work the embed
+      // loop was already doing: the loop's own `scanned === 0` break IS "the backlog is drained",
+      // its no-progress break IS "embed cannot move the head of the queue", and the per-batch
+      // counters are already summed for the ETA. Deriving the gate from a COUNT instead —
+      // even the SWR-cached one — would have made the drainer a second poller of a multi-second
+      // SQLCipher full-table scan every 15s with the UI closed, which is precisely
+      // [[gates-assert-shape-never-cost]] ("if it's POLLED, gate the cost") re-shipped inside the
+      // fix for a resource complaint. The cached backlog stays where it belongs: on the READ
+      // surfaces (readiness/pipeline), which already pay for it.
+      let embedDrained = false;   // the loop saw an EMPTY pending set ⇒ nothing left to embed
+      let embedStalledOut = false;// the loop broke on no-progress ⇒ embed CANNOT advance right now
+      let embedThrew = false;     // the drain threw ⇒ same conclusion: it is not going to progress
+      let embedMoved = 0;         // rows that LEFT the pending set this cycle (embedded|skipped|capped)
       if (embedOk && !isEmbedPaused()) {
       try {
 
@@ -1116,6 +1176,13 @@ export function startEnrichDrainer({
         const e = await svc.drainOnce({ userId, attemptedThisCycle });
         const batchEmbedded = e?.embedded ?? 0;
         capped += e?.capped ?? 0;
+        // ROWS THAT LEFT THE PENDING SET — the deferral's "is embed progressing?" evidence, and it
+        // is NOT `batchEmbedded`. The three ways a row leaves `nlp_processed = 0` are embedded (→2),
+        // skipped as blank (→1, terminal) and capped (→-1, terminal); a FAILED row stays pending by
+        // design and the self-heal resurrects it, so it is not progress. Same question the barren
+        // signal asks ("is `pending` shrinking?") — asked once, here, so a vault draining a run of
+        // blanks is not mistaken for a stalled one and does not release categorize early.
+        embedMoved += batchEmbedded + (e?.skipped ?? 0) + (e?.capped ?? 0);
         // Same rule, per batch: bank the work and its cost TOGETHER, and only when work happened —
         // a pass that embeds nothing prices nothing.
         if (batchEmbedded > 0) {
@@ -1164,7 +1231,7 @@ export function startEnrichDrainer({
           _barrenPasses++;
         }
         embedded += batchEmbedded;
-        if ((e?.scanned ?? 0) === 0) break;      // backlog drained
+        if ((e?.scanned ?? 0) === 0) { embedDrained = true; break; }      // backlog drained
         // NO-PROGRESS BREAK. drainOnce leaves a transiently-failed row PENDING (by design —
         // never poison it), so a batch that embeds nothing re-selects the SAME rows next
         // pass: `scanned` stays 50 and this loop spins all 200 times, re-embedding the same
@@ -1174,6 +1241,11 @@ export function startEnrichDrainer({
         const moved = (e?.embedded ?? 0) + (e?.failed ?? 0) + (e?.skipped ?? 0);
         if (moved === 0) {
           if (++stalledPasses >= 1) {
+            // THE STARVATION GUARD'S TRIGGER. A head-of-queue row that cannot embed right now must
+            // never hold categorize hostage: this break says "embed is not progressing", and the
+            // deferral below reads it as permission for the other stages to run. Without it, one
+            // un-embeddable row would deadlock L1+L2 for the life of the process.
+            embedStalledOut = true;
             _noProgress++;
             if (_noProgress === 1 || _noProgress % 20 === 0) log(`[enrich] no progress on ${e?.scanned ?? 0} pending message(s) after ${stalledPasses} pass(es) `
               + `— pausing this cycle (retry in ${Math.round(intervalMs / 1000)}s). The head of the queue is not embeddable right now.`);
@@ -1246,6 +1318,11 @@ export function startEnrichDrainer({
         // logged; bounded anyway, on the principle that this is not the place to bet on an
         // upstream error staying content-free. It names the STAGE that failed, never a cause:
         // a null-row TypeError surfaces here just as a locked vault does.
+        // A THROW IS ALSO "EMBED CANNOT PROGRESS" (the starvation guard's second arm). A locked
+        // vault throws EVERY cycle; if a throw could still leave the deferral armed, L1+L2 would be
+        // starved forever by a stage that is not embedding anything at all — the same coupling the
+        // catch itself exists to break, re-created by the scheduler.
+        embedThrew = true;
         _embedErrs++;
         if (_embedErrs <= 3 || _embedErrs % 20 === 0) {
           log(`[enrich] embedding FAILED this cycle (#${_embedErrs}): ${String(err?.message || err).slice(0, 120)} `
@@ -1253,6 +1330,32 @@ export function startEnrichDrainer({
         }
       }
       } // ← end `if (embedOk)`. Everything BELOW runs even when the embed sidecar is down.
+
+      // ── EMBED FIRST, THEN CATEGORIZE (QA6) — the deferral decision ──────────────────────────────
+      // The decision itself is the PURE function above (deferCategorizeForEmbed); this is only the
+      // wiring — what the cycle OBSERVED, handed to the rule. Split that way for the same reason
+      // deriveEmbedLiveness is split out of portal-activity: a scheduling rule that can only be
+      // exercised by driving a 10,000-row drain is a rule whose individual clauses no gate can red
+      // (proved: mutating the `embedMoved > 0` clause left every integration case green, because the
+      // stall break masks it — [[two-guards-can-mask-each-other]]).
+      const waitOnEmbed = deferCategorizeForEmbed({
+        embedOk, embedPaused: isEmbedPaused(), embedThrew, embedMoved, embedDrained, embedStalledOut,
+      });
+      _catWaitingOnEmbed = waitOnEmbed;
+      if (waitOnEmbed) {
+        // NEVER SILENT (the skip-log rule this file already lives by): a stage that stops running
+        // for a reason the user did not choose must SAY SO, or this is the month-long dormancy with
+        // a new cause. Throttled — a big import defers every cycle for hours by design.
+        _catDeferrals++;
+        if (_catDeferrals === 1 || _catDeferrals % 20 === 0) {
+          log(`[enrich] deferring categorize + enrich this cycle (#${_catDeferrals}): embedding is still draining its backlog `
+            + `(${embedMoved} row(s) moved this cycle, cap reached) — one stage at a time, on purpose. `
+            + 'Labeling resumes as soon as embedding is caught up or cannot progress.');
+        }
+      } else if (_catDeferrals) {
+        log(`[enrich] embedding caught up (or cannot progress) after ${_catDeferrals} deferred cycle(s) — resuming categorize + enrich`);
+        _catDeferrals = 0;
+      }
 
       // Context Engine L1: tag new + backfill messages with domain/register. Separate from
       // the embed gate so the historical backfill proceeds on cycles with no new embeds.
@@ -1269,7 +1372,16 @@ export function startEnrichDrainer({
       // were each a real bug: inside the pause block, a paused vault never stamped and reported
       // 'unknown' forever; below the embed gate, a throwing drain did the same. Do not move them
       // back down for tidiness.
-      if (!isCategorizePaused()) {
+      // ⚠️ `!waitOnEmbed` GATES THE WAKE TOO, NOT JUST THE LOOPS — and that is deliberate. The block
+      // below calls daemon.ensureUp() (which auto-INSTALLS the Ollama runtime) and pulls the label +
+      // enrich models: the single largest RAM commitment in the process, next to the resident
+      // embedding model. Gating only the tagging loops would still have spun up a second model
+      // alongside the embedder on every cycle of a long import — the memory concurrency the
+      // operator's 24GB crash was made of. The healths do NOT read this flag (a deferral is not a
+      // pause and not a fault): _approvedModel/_approvedEnrichModel are stamped at the top of every
+      // cycle and probeModelReady() still runs, so labelerHealth()/enricherHealth() keep answering
+      // exactly what they answered before. The deferral is reported through status() instead.
+      if (!isCategorizePaused() && !waitOnEmbed) {
         // WAKE THE ON-BOX MODEL FIRST. The Ollama daemon is lazy and the enrich path is the one
         // consumer that nothing else starts it for — so without this, a vault whose owner never
         // opened local chat would leave EVERY message untagged forever (the live-vault dormancy
@@ -1425,7 +1537,11 @@ export function startEnrichDrainer({
     labelerHealth,        // → getLabelerHealth(), the readiness `models.labeler` slice
     enricherHealth,       // → getEnricherHealth(), the readiness `models.enricher` slice
     nudge: () => cycle(), // returns the cycle promise (callers may ignore it; the gate awaits it)
-    stop: () => { if (timer) clearInterval(timer); timer = null; if (_current === handle) _current = null; },
+    // ⚠️ CLEAR THE DEFERRAL ON STOP. It is a statement about a cycle that is ABOUT TO RUN; a stopped
+    // drainer has none, so leaving it latched would let a handle nobody drives keep reporting
+    // "categorize is waiting on embedding" — a block with no clock behind it, which is the frozen
+    // half-truth this whole surface exists to delete.
+    stop: () => { if (timer) clearInterval(timer); timer = null; _catWaitingOnEmbed = false; if (_current === handle) _current = null; },
     // LIVENESS, for the activity feed. The UI used to render "Embedding messages" purely
     // from `pending > 0` — so a drainer that had been dead for a MONTH still looked busy
     // (it skipped silently every 15s because a single-threaded embed service blocked
@@ -1464,6 +1580,11 @@ export function startEnrichDrainer({
       // updateNlp). Either ≥ 2 withdraws the stage's ETA — the embedErrs clause, per stage.
       l1Errs: _l1Errs,
       l2Errs: _l2Errs,
+      // QA6: the categorize/enrich stages are DEFERRED this cycle because embedding is still
+      // draining. Reported so the pipeline slice can render categorize as `blocked`/`waiting_embed`
+      // instead of a silent `pending` or a lying `running` with an ETA nothing is working towards.
+      // A SCHEDULING state — never a pause (the owner chose nothing) and never a fault.
+      categorizeWaitingOnEmbed: _catWaitingOnEmbed,
       health: _health,                 // ok | loading | error | unreachable
       // A model still LOADING is not a fault — it's a download. Only a real outage is.
       // ⚠️ `stalled` keys on _skips ALONE, deliberately unchanged: it drives the activity feed's

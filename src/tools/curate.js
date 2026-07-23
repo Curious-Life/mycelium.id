@@ -183,23 +183,26 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
       if (!type || !id) throw new Error('forget: type and id are required');
 
       if (type === 'message') {
-        const res = await db.messages.redact(id, userId);
+        // redact() now owns the FULL cascade (src/core/delete-cascade.js), including
+        // search-sidecar eviction — fail-closed, so a throw here means "not forgotten"
+        // and the user is told so rather than being told it worked.
+        const res = await db.messages.redact(id, userId, { searchHelpers });
         if (!res.found) return `Nothing to forget: no message with id ${id}.`;
         if (res.alreadyForgotten) return `Already forgotten: message ${id}.`;
-        // Evict from the process-cached in-RAM index (no auto-refresh on delete).
-        try { await searchHelpers?.backend?.delete?.({ ids: [id] }); } catch { /* best-effort */ }
         await auditForget('message', id, res);
         return `Forgotten: message ${id}. Content and embeddings destroyed, removed from search and clustering, tombstoned for audit. This cannot be undone.`;
       }
 
       if (type === 'document') {
-        const res = await db.documents.redact(userId, id);
+        const res = await db.documents.redact(userId, id, { searchHelpers });
         if (!res.found) return `Nothing to forget: no document at path ${id}.`;
         if (res.alreadyForgotten) return `Already forgotten: document ${id}.`;
-        // Documents aren't in the in-RAM index; the nulled embedding removes them
-        // from the document scan-matcher, so no explicit index eviction is needed.
+        // The old comment here ("Documents aren't in the in-RAM index … no explicit
+        // index eviction is needed") was FALSE: d1-loader indexes documents under the
+        // `document:<id>` key (src/search/d1-loader.js:41), so a forgotten document
+        // stayed BM25- and vector-searchable by its own text. redact() now evicts it.
         await auditForget('document', id, res);
-        return `Forgotten: document ${id}. Content and embedding destroyed, removed from clustering, tombstoned for audit. This cannot be undone.`;
+        return `Forgotten: document ${id}. Content and embedding destroyed, removed from search and clustering, tombstoned for audit. This cannot be undone.`;
       }
 
       if (type === 'fact') {

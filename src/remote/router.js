@@ -6,12 +6,15 @@
 import express from 'express';
 import net from 'node:net';
 import path from 'node:path';
-import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists, passkeyEnrolled, setRemoteSecret, isSafeHostname } from './config.js';
+import { readRemoteConfig, writeRemoteConfig, setOperatorPassword, operatorUserExists, passkeyEnrolled } from './config.js';
 import { buildClaim } from './managed-claim.js';
 import { materializeRemoteConfigs } from './runtime.js';
 import { dataDir } from '../paths.js';
 import { keychainNames } from '../account/keychain-names.js';
 import { isTrustedLoopback } from '../http/loopback.js';
+// The ONE handle writer — see src/identity/handle-service.js. `connect-managed`
+// and PUT /portal/profile are both thin callers of setHandle().
+import { setHandle, checkAvailability, mirrorProfileHandle, firstLabel } from '../identity/handle-service.js';
 
 // Untrusted-input guards for the managed-connect flow: both the control-plane URL
 // and its response flow into config files / env, so validate hard.
@@ -19,8 +22,6 @@ function isHttpsOrLocal(u) {
   try { const x = new URL(u); return x.protocol === 'https:' || x.hostname === 'localhost' || x.hostname === '127.0.0.1'; }
   catch { return false; }
 }
-const isSafeCred = (v) => typeof v === 'string' && /^[\x21-\x7e]{1,512}$/.test(v) && !/["'`{}\\]/.test(v);
-const SAFE_RELAY = /^[a-z0-9.-]{1,253}(:\d{1,5})?$/i;
 
 /** Is the remote OAuth server actually listening (so the UI shows live state vs
  *  "enabled — restart to apply")? Best-effort TCP probe; never throws. */
@@ -35,8 +36,17 @@ function probeListening(port, host = '127.0.0.1', timeoutMs = 400) {
   });
 }
 
-export function remoteRouter() {
+/**
+ * @param {object} [deps]
+ * @param {() => any} [deps.getDb]      lazy vault handle (this router mounts BEFORE the
+ *                                      vault guard, so the db may not exist yet)
+ * @param {() => string} [deps.getUserId]
+ */
+export function remoteRouter({ getDb = () => null, getUserId = () => null } = {}) {
   const router = express.Router();
+  // The DERIVED user_profiles.handle mirror. Best-effort + late-bound: the mirror
+  // is a cache of publicHost, never the authority.
+  const mirrorHandle = (h) => mirrorProfileHandle(getDb(), getUserId(), h);
   router.use(express.json({ limit: '16kb' }));
 
   // Loopback-only (mirrors account/router.js). isTrustedLoopback also rejects
@@ -82,16 +92,43 @@ export function remoteRouter() {
   });
 
   // Patch the non-secret config (publicBaseUrl / operatorEmail / remoteEnabled).
+  //
+  // WHITELIST the keys accepted from this untrusted body (default-deny). This door
+  // is loopback-only but loopback is NOT a trust boundary here: any same-uid process
+  // (a foreign-lineage MCP, any local script) can POST it with ZERO password /
+  // master-key / control-plane proof. The keys that grant a FEDERATION IDENTITY —
+  // `publicHost` (the DID/WebFinger host), `desiredHandle`, and `remoteMode:'managed'`
+  // (the managed-claim marker) — are NOT accepted here; identity is written solely by
+  // identity/handle-service.setHandle() behind the managed-claim ceremony (which signs
+  // with the in-process master key). Without this whitelist a TWO-STEP poke
+  // (`publicHost:''` then `publicHost:'attacker'`) walks around writeRemoteConfig's
+  // set-once guard — step 1 clears to '' (allowed, fail-closed), step 2 then sees an
+  // empty currentHost and claims the attacker host — silently re-pointing did:web /
+  // WebFinger and orphaning every pinned peer. So gate the DOOR, not just the store.
+  // Legit callers (RemoteAccessSection.svelte saveConfig) only ever send these:
+  const ALLOWED_CONFIG_KEYS = new Set([
+    'publicBaseUrl', 'remoteEnabled', 'requirePasskeyForWeb',
+    'remoteMode', 'controlPlaneUrl', 'relayAddr',
+  ]);
   router.post('/config', (req, res) => {
     try {
+      const body = (req.body && typeof req.body === 'object') ? req.body : {};
+      const patch = {};
+      for (const k of Object.keys(body)) {
+        if (ALLOWED_CONFIG_KEYS.has(k)) patch[k] = body[k];
+      }
+      // `managed` is the identity-bearing mode (it pairs with a publicHost claim); it
+      // must only be set by the managed-claim ceremony (handle-service), never from a
+      // raw config poke. own-relay/off/direct are transport-only and stay allowed.
+      if (patch.remoteMode === 'managed') delete patch.remoteMode;
       // Guard: don't let the policy be enabled before a passkey exists (would be a
       // no-op anyway — enforcement also gates on passkeyEnrolled — but reject clearly
       // so the UI can't show a misleading "on" with nothing protecting it).
-      if (req.body?.requirePasskeyForWeb === true && !passkeyEnrolled()) {
+      if (patch.requirePasskeyForWeb === true && !passkeyEnrolled()) {
         res.status(400).json({ ok: false, error: 'enroll a passkey before requiring one for web sign-in' });
         return;
       }
-      const next = writeRemoteConfig(req.body || {});
+      const next = writeRemoteConfig(patch);
       res.json({
         ok: true,
         config: {
@@ -140,17 +177,11 @@ export function remoteRouter() {
     finally { clearTimeout(t); }
   }
 
+  // Availability — delegates to the ONE check (identity/handle-service), the same
+  // one the portal's /profile/handle/check now uses, so the two surfaces can never
+  // disagree about whether a name is free.
   router.get('/managed/available', async (req, res) => {
-    const handle = String(req.query.handle || '').trim().toLowerCase();
-    const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
-    if (!isHttpsOrLocal(base)) { res.status(400).json({ ok: false, error: 'control plane URL must be https' }); return; }
-    try {
-      const r = await cpFetch(`${base}/v1/handle/${encodeURIComponent(handle)}`);
-      const data = await r.json().catch(() => ({}));
-      res.status(r.ok ? 200 : r.status).json(data);
-    } catch {
-      res.status(502).json({ ok: false, error: 'control plane unreachable' });
-    }
+    res.json(await checkAvailability(req.query.handle));
   });
 
   // Public Turnstile SITEKEY for the connect widget — proxied from the control
@@ -177,75 +208,27 @@ export function remoteRouter() {
     }
   });
 
+  // Claim <handle>.mycelium.id — a THIN WRAPPER over the ONE setter
+  // (src/identity/handle-service.js). The provisioning body (challenge → signed
+  // claim → provision → validate → persist → materialize) moved there verbatim so
+  // this surface and PUT /portal/profile can never diverge again.
+  // `requireProvision: true` — this surface INSISTS on a live claim; it must never
+  // degrade to "recorded your intent".
   router.post('/connect-managed', async (req, res) => {
-    const handle = String(req.body?.handle || '').trim().toLowerCase();
-    // Optional Cloudflare Turnstile token from the app's widget — forwarded to
-    // the control-plane's bot-gated /v1/challenge. Omitted when the control-plane
-    // runs with Turnstile off (self-hosted / dev). Never persisted here.
-    const turnstileToken = typeof req.body?.turnstileToken === 'string' ? req.body.turnstileToken : '';
-    // The operator password is the ONLY auth gate on the public URL — refuse to
-    // go live without it.
-    if (!operatorUserExists()) { res.status(400).json({ ok: false, error: 'set an operator password first' }); return; }
-    const masterHex = process.env.ENCRYPTION_MASTER_KEY;
-    if (!masterHex) { res.status(503).json({ ok: false, error: 'vault is locked — finish setup first' }); return; }
-    // Use the CONFIGURED control plane only (never a caller-supplied URL) and
-    // require https — the provision response carries the relay token + acme creds.
-    const base = readRemoteConfig().controlPlaneUrl.replace(/\/$/, '');
-    if (!isHttpsOrLocal(base)) { res.status(400).json({ ok: false, error: 'control plane URL must be https' }); return; }
-
-    let data;
     try {
-      const chUrl = turnstileToken ? `${base}/v1/challenge?cf_turnstile=${encodeURIComponent(turnstileToken)}` : `${base}/v1/challenge`;
-      const chRes = await cpFetch(chUrl);
-      if (!chRes.ok) throw new Error(chRes.status === 403 ? 'bot check failed' : 'challenge failed');
-      const { nonce } = await chRes.json();
-      const claim = buildClaim({ action: 'provision', handle, nonce, masterHex }); // throws on invalid handle
-      const pvRes = await cpFetch(`${base}/v1/provision`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(claim),
+      const r = await setHandle({
+        handle: req.body?.handle,
+        turnstileToken: typeof req.body?.turnstileToken === 'string' ? req.body.turnstileToken : '',
+        requireProvision: true,
+        mirror: (h) => mirrorHandle(h),
       });
-      data = await pvRes.json().catch(() => ({}));
-      // Reserve-then-pay (O5): the control plane held the handle and wants payment.
-      // Surface the Stripe Checkout URL so the UI can open the browser; after paying,
-      // the app re-calls connect-managed (now entitled). Validate it's https (the
-      // response is untrusted — never open a non-https URL we were handed).
-      if (pvRes.status === 402) {
-        const checkoutUrl = typeof data?.checkoutUrl === 'string' ? data.checkoutUrl : '';
-        if (!/^https:\/\//i.test(checkoutUrl)) { res.status(502).json({ ok: false, error: 'control plane returned an invalid checkout URL' }); return; }
-        res.status(402).json({ ok: false, error: 'subscription required', checkoutUrl }); return;
-      }
-      if (!pvRes.ok) { res.status(pvRes.status === 409 ? 409 : 400).json({ ok: false, error: data.error || 'provision failed' }); return; }
-    } catch (err) {
-      const caller = /invalid handle|nonce/i.test(String(err?.message || ''));
-      res.status(caller ? 400 : 502).json({ ok: false, error: caller ? err.message : 'could not reach the control plane' });
-      return;
+      res.json({ ok: true, host: r.host, connectorUrl: r.connectorUrl, restartRequired: r.restartRequired });
+    } catch (e) {
+      const status = Number.isInteger(e?.status) ? e.status : 400;
+      const body = { ok: false, error: e?.message || 'could not connect' };
+      if (e?.code === 'payment_required' && e.checkoutUrl) body.checkoutUrl = e.checkoutUrl;
+      res.status(status).json(body);
     }
-
-    // VALIDATE the untrusted control-plane response before it touches config/env:
-    // the host must be THIS handle's own subdomain; creds must be injection-safe.
-    const { host, relayAddr, relayToken, acmeDns } = data || {};
-    const acmeServer = acmeDns && (acmeDns.serverUrl || acmeDns.server_url);
-    if (!isSafeHostname(host) || !host.startsWith(`${handle}.`)
-      || !SAFE_RELAY.test(String(relayAddr || ''))
-      || !isSafeCred(relayToken)
-      || !acmeDns || !isSafeCred(acmeDns.username) || !isSafeCred(acmeDns.password) || !isSafeCred(acmeDns.subdomain)
-      || !isHttpsOrLocal(acmeServer)) {
-      res.status(502).json({ ok: false, error: 'control plane returned an invalid response' });
-      return;
-    }
-
-    // Persist locally. If THIS fails the handle is already provisioned (nonce
-    // consumed) — report distinctly so the user retries, not "unreachable".
-    try {
-      const creds = { username: acmeDns.username, password: acmeDns.password, subdomain: acmeDns.subdomain, serverUrl: acmeServer };
-      setRemoteSecret('relayToken', relayToken);
-      setRemoteSecret('acmeDns', JSON.stringify(creds));
-      writeRemoteConfig({ remoteMode: 'managed', publicHost: host, relayAddr });
-      materializeRemoteConfigs({ dataDir: dataDir(), config: readRemoteConfig(), relayToken, acmeDns: creds });
-    } catch {
-      res.status(500).json({ ok: false, error: 'address provisioned, but saving locally failed — restart the app and try again' });
-      return;
-    }
-    res.json({ ok: true, host, connectorUrl: `https://${host}/mcp`, restartRequired: true });
   });
 
   // Manage billing (O7): sign a 'billing' claim with the master key and exchange
@@ -259,7 +242,7 @@ export function remoteRouter() {
     if (!masterHex) { res.status(503).json({ ok: false, error: 'vault is locked — finish setup first' }); return; }
     const base = rc.controlPlaneUrl.replace(/\/$/, '');
     if (!isHttpsOrLocal(base)) { res.status(400).json({ ok: false, error: 'control plane URL must be https' }); return; }
-    const handle = rc.publicHost.split('.')[0];
+    const handle = firstLabel(rc.publicHost);
     try {
       const nRes = await cpFetch(`${base}/v1/billing/nonce`);
       if (!nRes.ok) throw new Error('nonce failed');
@@ -289,7 +272,7 @@ export function remoteRouter() {
       const masterHex = process.env.ENCRYPTION_MASTER_KEY;
       const base = rc.controlPlaneUrl.replace(/\/$/, '');
       if (rc.remoteMode === 'managed' && rc.publicHost && masterHex && isHttpsOrLocal(base)) {
-        const handle = rc.publicHost.split('.')[0];
+        const handle = firstLabel(rc.publicHost);
         try {
           const chRes = await cpFetch(`${base}/v1/challenge`);
           if (chRes.ok) {

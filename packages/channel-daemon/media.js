@@ -42,8 +42,14 @@ export function mediaContextLine(media, contextText, { fetched = true, tooLarge 
   if (tooLarge) return `[${head} — ${fmtSize(media.fileSize) || 'too large'} exceeds the import limit; not stored]`;
   if (!fetched) return `[${head} — could not be fetched]`;
   if (!contextText) {
+    // HONESTY (QA 2026-07-22): the old wording was "transcription unavailable",
+    // which reads as PERMANENT — the agent concludes there is nothing to hear and
+    // moves on. In reality extraction can fail on a cold model and the transcript
+    // can land minutes later (or when the owner hits Transcribe in Media). Say
+    // PENDING, and note that the vault re-joins the transcript on later turns
+    // (src/agent/attachment-context.js joins attachments.transcript by message).
     return media.kind === 'voice' || media.kind === 'audio'
-      ? `[${head} attached — transcription unavailable]`
+      ? `[${head} attached — no transcript yet; transcription may still be running (it will be attached to this message once it finishes)]`
       : `[${head} attached]`;
   }
   if (media.kind === 'voice' || media.kind === 'audio') return `[${head} — transcript: "${contextText}"]`;

@@ -56,7 +56,9 @@ function preview(text) {
  * @param {(a:{kind:string,id:any})=>Promise<{allowed:boolean,reason?:string}>} deps.checkAuthority
  * @param {{isDuplicate:Function, mark:Function}} deps.dedup
  * @param {{take:(t:any)=>{allowed:boolean,retryAfterMs:number}}} [deps.rateLimit]
- * @param {{deliver:(a:object)=>Promise<{voiceSent:number,voiceTotal:number}>}} [deps.voicePipeline]
+ * @param {{deliver:(a:object)=>Promise<{voiceSent:number,voiceTotal:number,ok?:boolean,code?:string|null}>}} [deps.voicePipeline]
+ * @param {()=>boolean} [deps.voiceReplyDefault]  is voice ON for this channel? (the Settings toggle)
+ * @param {number} [deps.voiceNoticeThrottleMs]   min gap between "voice unavailable" notices per target
  * @param {()=>object|null} deps.getActiveTurn
  * @param {string} [deps.agentId]
  * @param {string} [deps.logPrefix]
@@ -66,6 +68,8 @@ export function createSendHandler(deps) {
     adapter, recordEgress, persistOutbound, checkAuthority, dedup,
     rateLimit, voicePipeline, getActiveTurn, agentId = 'personal-agent', logPrefix = 'channel-daemon',
     trustedToken = null,
+    voiceReplyDefault = null,
+    voiceNoticeThrottleMs = 30 * 60_000,
   } = deps || {};
   if (!adapter || typeof adapter.send !== 'function') throw new TypeError('send-handler: adapter.send required');
   if (!adapter.contentField || !adapter.targetField) throw new TypeError('send-handler: adapter content/target fields required');
@@ -76,6 +80,41 @@ export function createSendHandler(deps) {
   const { platform, contentField, targetField, sourceModule, inferKind } = adapter;
   const audit = typeof recordEgress === 'function' ? recordEgress : () => {};
   const persist = typeof persistOutbound === 'function' ? persistOutbound : () => {};
+
+  // Last time we told THIS target that voice was unavailable. A permanently broken
+  // renderer (e.g. the MLX 500 on some Apple-Silicon boxes) must be said ONCE, not
+  // bolted onto every single reply — but it must never be silent (recoverability bar).
+  const lastVoiceNoticeAt = new Map();
+  function shouldNotifyVoiceFailure(target) {
+    const key = String(target);
+    const now = Date.now();
+    const prev = lastVoiceNoticeAt.get(key) || 0;
+    if (now - prev < voiceNoticeThrottleMs) return false;
+    lastVoiceNoticeAt.set(key, now);
+    return true;
+  }
+  // User-facing, content-free: a short machine reason, never provider text.
+  const VOICE_REASON_TEXT = {
+    'voice-sample-pending': 'no voice sample has been recorded for this agent yet',
+    'render-service-unavailable': 'the on-device voice service is not running',
+    'render-service-unreachable': 'the on-device voice service could not be reached',
+    'voice-provider-auth': 'the voice provider rejected the API key',
+    'voice-provider-rate-limited': 'the voice provider is rate-limiting',
+    'render-produced-no-audio': 'the voice render produced no usable audio',
+    'voice-too-large': 'the voice note exceeded the upload limit',
+    'upload-failed': 'the voice note could not be uploaded',
+    'voice-disabled': 'voice replies are switched off',
+  };
+  // Fail-closed: a policy that throws (or is absent) means NO voice — never an
+  // accidental spoken reply on a channel that never asked for one.
+  function safeVoiceDefault() {
+    if (typeof voiceReplyDefault !== 'function') return false;
+    try { return !!voiceReplyDefault(); } catch { return false; }
+  }
+  function voiceNoticeText(code) {
+    const why = VOICE_REASON_TEXT[code] || 'the voice render failed';
+    return `🔇 Voice reply unavailable — ${why}. The message above was sent as text.`;
+  }
 
   return async function sendHandler(req, res) {
     const body = req.body || {};
@@ -189,15 +228,69 @@ export function createSendHandler(deps) {
         metadata: { channelId: String(target), origin: 'explicit-send', provenanceKind, ...(replyToMessageId != null ? { inReplyTo: String(replyToMessageId) } : {}) },
       });
 
+      // ── voice ────────────────────────────────────────────────────────────
+      // The TOGGLE is consulted HERE, at reply time (QA6-VOICE). Before this the
+      // only producer of `voice` was the model passing voice:true — nothing told
+      // it voice was switched on, so a voice-enabled channel never reached
+      // sendVoice. Precedence: an EXPLICIT body flag (the agent's own choice)
+      // always wins; otherwise the channel's voice-reply policy decides.
+      // System-template sends (command acks, pairing codes — trustedReq) are NEVER
+      // auto-voiced: they'd speak a pairing code aloud and add noise. They still
+      // honor an EXPLICIT voice:true if a caller ever sets one. Only genuine agent
+      // replies fall through to the owner's voice-reply policy.
+      const explicitVoice = (voice === true || voice === 'true') ? true
+        : ((voice === false || voice === 'false') ? false : null);
+      const wantVoice = explicitVoice != null ? explicitVoice
+        : (trustedReq ? false : safeVoiceDefault());
+
       let voiceResult = null;
-      if (voice && voicePipeline) {
+      if (wantVoice && voicePipeline) {
         try { voiceResult = await voicePipeline.deliver({ target, text: content, replyToMessageId, messageThreadId }); }
-        catch (e) { console.error(`[${logPrefix}] voice pipeline threw (text delivered): ${e.message}`); }
+        catch (e) {
+          // Codes only (§1) — a TTS error message can quote the synthesized line.
+          console.error(`[${logPrefix}] voice pipeline threw (text delivered): ${e?.code || e?.name || 'error'}`);
+          voiceResult = { enabled: true, ok: false, voiceSent: 0, voiceTotal: 0, code: 'render-failed' };
+        }
       }
+
+      // HONESTY: a requested voice reply that delivered ZERO notes must be SAID,
+      // never silently dropped. The text already landed; add one short, throttled
+      // notice through this SAME chokepoint (adapter.send) — no new egress path.
+      let voiceNotified = false;
+      const voiceFailed = !!voiceResult && voiceResult.voiceSent === 0 && !!voiceResult.code;
+      if (voiceFailed && shouldNotifyVoiceFailure(target) && !dedup.isDuplicate(target, voiceNoticeText(voiceResult.code))) {
+        const notice = voiceNoticeText(voiceResult.code);
+        try {
+          const n = await adapter.send({ target, content: notice, messageThreadId });
+          dedup.mark(target, notice);
+          voiceNotified = true;
+          audit({
+            ...baseAudit,
+            contentHash: crypto.createHash('sha256').update(notice, 'utf8').digest('hex'),
+            contentLength: notice.length,
+            decision: 'allowed', reason: `voice-unavailable-notice:${voiceResult.code}`,
+            delivered: true, httpStatus: n?.httpStatus ?? 200,
+          });
+          persist({
+            content: notice, role: 'assistant', source: kind, model: null,
+            conversationId: String(target),
+            metadata: { channelId: String(target), origin: 'voice-unavailable-notice', provenanceKind, voiceError: voiceResult.code },
+          });
+        } catch {
+          // Even the notice failed to send — the text reply still stands; the
+          // response body below still carries voiceError for the caller/turn log.
+          console.error(`[${logPrefix}] voice-unavailable notice failed to send (text delivered)`);
+        }
+      }
+      if (voiceFailed) console.warn(`[${logPrefix}] voice reply unavailable (${voiceResult.code}) — text delivered${voiceNotified ? ' + user notified' : ''}`);
 
       return res.json({
         ok: true, delivered: true, sent: result.sent, total: result.total,
-        ...(voiceResult ? { voiceSent: voiceResult.voiceSent, voiceTotal: voiceResult.voiceTotal } : {}),
+        ...(voiceResult ? {
+          voiceSent: voiceResult.voiceSent, voiceTotal: voiceResult.voiceTotal,
+          voiceRequested: true,
+          ...(voiceFailed ? { voiceError: voiceResult.code, voiceNotified } : {}),
+        } : {}),
       });
     } catch (err) {
       const httpStatus = err?.httpStatus ?? 502;

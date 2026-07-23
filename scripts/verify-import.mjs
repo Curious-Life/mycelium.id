@@ -127,15 +127,16 @@ async function main() {
       rcomplete.status === 200 && bc.importResult?.type === 'chatgpt' && bc.importResult?.imported === 2 && (await countBySource('chatgpt-import')) === 2,
       `status=${rcomplete.status} type=${bc.importResult?.type} imported=${bc.importResult?.imported}`);
 
-    // ── I5 unsupported format (obsidian zip) → ERROR, not success-shaped ──
-    // A `{imported:0}` result reads to the UI as "import worked, file empty".
-    // The obsidian zip path returns an error pointing at the folder importer.
+    // ── I5 a plain zip of markdown now IMPORTS as a `bundle` (QA6 P7 §3) ──
+    // It used to dead-end with "use the folder importer" — a wall, not an import.
+    // A zip of .md is a legitimate bundle; each note routes through the loose-file
+    // path to a Library document, so imported≥1 (NOT the old success-shaped-0).
     const oz = await obsidianZip();
     const r5 = await postFile('/upload', oz);
     const b5 = await r5.json().catch(() => ({}));
-    rec('I5. obsidian zip → 4xx error (not success-shaped {imported:0})',
-      r5.status >= 400 && typeof b5.error === 'string' && /obsidian|folder/i.test(b5.error) && b5.importResult === undefined,
-      `status=${r5.status} error=${JSON.stringify(b5.error || '').slice(0, 80)}`);
+    rec('I5. markdown zip → 200 bundle import (imported≥1, no folder-importer dead-end)',
+      r5.status === 200 && b5.importResult?.type === 'bundle' && b5.importResult?.imported >= 1 && b5.error === undefined,
+      `status=${r5.status} type=${b5.importResult?.type} imported=${b5.importResult?.imported}`);
 
     // ── I6 unrecognized (non-zip) → 400, safe error ──
     const r6 = await postFile('/upload', Buffer.from('this is not a zip archive'));

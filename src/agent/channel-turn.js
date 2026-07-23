@@ -25,6 +25,7 @@ import { describeProvider } from './harness.js';
 import { classifyProviderError } from './provider-errors.js';
 import { resolveInferenceConfigForTask } from '../inference/resolve.js';
 import { wrapUntrusted } from './untrusted.js';
+import { withAttachmentContext, TRANSCRIPT_BUDGET_HISTORY } from './attachment-context.js';
 import { createTriage } from './triage.js';
 import { OWNER_CHANNEL_TOOLS, UNTRUSTED_CHANNEL_TOOLS, isOwnerTrustedTurn } from './resolve-grant.js';
 import { webSearchEnabled } from './web-search.js';
@@ -145,7 +146,13 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
       let history = [];
       if (conversationId) {
         const rows = await db.messages.selectByConversation(userId, conversationId, { limit: HISTORY_LIMIT });
-        history = rows.reverse().map((r) => ({ role: r.role, content: r.content }));
+        // Join each prior message's attachment-derived text (voice-note transcript,
+        // image caption, extracted file text). Without this a voice note whose
+        // transcript arrived AFTER capture (cold model at inbound, or a later
+        // Media→Transcribe) is invisible to the agent even though the vault holds it.
+        // Same user scope as the rows themselves; fail-soft + honest.
+        const withAtt = await withAttachmentContext(rows, { db, userId, budget: TRANSCRIPT_BUDGET_HISTORY });
+        history = withAtt.reverse().map((r) => ({ role: r.role, content: r.content }));
       }
 
       // Owner DM: pass the message verbatim (trusted). Otherwise wrap as untrusted data.

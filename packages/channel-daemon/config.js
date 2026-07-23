@@ -133,6 +133,9 @@ export function applyChannelConfigToEnv(cc, env = process.env) {
   put('CHANNEL_RATELIMIT_MAX', cc.routing?.rateLimitMax);
   put('CHANNEL_RATELIMIT_WINDOW_MS', cc.routing?.rateLimitWindowMs);
   put('CHANNEL_SENSITIVE_PATTERNS', cc.routing?.sensitivePatterns);
+  // Voice-reply policy ('always' | 'auto' | 'off') — refines the Settings → Voice
+  // toggle without unconfiguring TTS. Unset ⇒ 'always' (voice on = replies spoken).
+  put('CHANNEL_VOICE_REPLIES', cc.tts?.voiceReplies);
   // MED-4 inbound media throughput (optional vault overrides).
   put('CHANNEL_MEDIA_QUEUE_MAX', cc.routing?.mediaQueueMax);
   put('CHANNEL_MEDIA_SENDER_MAX', cc.routing?.mediaSenderMax);
@@ -151,6 +154,7 @@ export function reconcileTtsEnv(cc, env = process.env) {
   const t = cc.tts || {};
   const setOrClear = (k, v) => { if (v != null && v !== '') env[k] = String(v); else delete env[k]; };
   setOrClear('TTS_PROVIDER', t.provider);
+  setOrClear('CHANNEL_VOICE_REPLIES', t.voiceReplies);
   setOrClear('QWEN_TTS_ENABLED', t.qwenEnabled);
   setOrClear('QWEN_TTS_VARIANT', t.qwenVariant);
   setOrClear('OPENAI_TTS_VOICE', t.openaiVoice);

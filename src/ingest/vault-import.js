@@ -22,6 +22,18 @@
 // WHAT'S SKIPPED (reported, never silent): passkeys (WebAuthn credentials are
 // origin-bound — meaningless on a new substrate) and secrets (the exporter
 // excludes the values; key-only stubs would shadow real secret reads).
+//
+// WHAT'S REFUSED (round-3, reported in `refusedFamilies`): this archive is
+// ATTACKER-SUPPLYABLE INPUT on THIS route too — it arrives through
+// POST /api/v1/portal/upload → run-import.js → here — so the same deny-by-default
+// import policy applies (src/ingest/import-credential-policy.js). Seven families
+// this importer used to land verbatim are now refused: share_links (raw bearer
+// capability tokens over a document path), access_grants + canvas_collaborators
+// (latent ACLs), agent_tasks (the executed work queue), scheduled_events (a dormant
+// executor), agent_events (this box's own runtime stream) and user_identities (the
+// provider_id → owner mapping). restoreTable enforces the policy itself, so this is
+// belt AND braces.
+//
 // Everything else crosses: user identity meta (display name / timezone /
 // settings → the V1 users row), internal_model_items (the agent's model of the
 // user), connections (canonical-uid remapped to the V1 user), ai_providers
@@ -37,6 +49,7 @@ import { encryptVector } from '../search/ann/decode.js';
 import { assertSafeBaseUrl } from '../inference/base-url.js';
 import { KNOWN_PROVIDERS } from '../inference/known-providers.js';
 import { credentialsCarrySubscriptionMaterial } from '../inference/subscription-token.js';
+import { isImportAllowed, filterImportSettings } from './import-credential-policy.js';
 
 const MAX_ROWS_PER_TABLE = Number(process.env.MYCELIUM_IMPORT_MAX_MESSAGES) || 1_000_000;
 const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_IMPORT_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
@@ -51,9 +64,13 @@ const asArray = (v) => (Array.isArray(v) ? v : Array.isArray(v?.data) ? v.data :
  * is SHARED: full-export-import derives the table name from a bundle-controlled FILENAME.
  * The untrue comment is plausibly why nobody normalized it — and SQLite resolves
  * identifiers CASE-INSENSITIVELY, so an exact-match DENY let a bundle's "Secrets.ndjson"
- * write the field-encrypted `secrets` table. That caller now lowercases + shape-checks the
- * name before it reaches here (full-export-import.js). better-sqlite3's prepare() rejects
- * multi-statement SQL, so "; DROP" was never the risk — the DENY BYPASS was. */
+ * write the field-encrypted `secrets` table. better-sqlite3's prepare() rejects
+ * multi-statement SQL, so "; DROP" was never the risk — the DENY BYPASS was.
+ *
+ * ROUND-3: restoreTable no longer depends on its callers for this. It normalizes +
+ * shape-checks the name itself before the policy match and before any SQL, so the
+ * identifier reaching here is already `^[a-z_][a-z0-9_]*$`. full-export-import still
+ * does its own check — defence in depth, not delegation. */
 async function tableColumns(db, table) {
   try {
     const res = await db.rawQuery(`PRAGMA table_info(${table})`);
@@ -86,6 +103,43 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
   // report can say "we refused 1 provider row" instead of burying it in a generic
   // failure — a silently-vanishing credential row is indistinguishable from a bug.
   const out = { attempted: 0, inserted: 0, deduped: 0, failed: 0, capped: 0, skippedEmpty: 0, inferredNow: 0, refused: 0 };
+
+  // ══ THE IMPORT POLICY GATE — at the CHOKEPOINT, not at one caller ══════════
+  //
+  // ROUND-3 FIX (2026-07-22). This check used to live in full-export-import.js
+  // ONLY. restoreTable is SHARED by both shipped import routes, and the other one —
+  // importMyceliumVault(), the route a user takes when they drag a vault export into
+  // the app (run-import.js ARCHIVE_ADAPTERS.mycelium ← POST /api/v1/portal/upload) —
+  // called it with SEVEN hardcoded literals this policy classifies `deny`:
+  // share_links, access_grants, canvas_collaborators, agent_tasks, scheduled_events,
+  // agent_events, user_identities. A reviewer reproduced it live: an attacker bearer
+  // token landed in share_links (re-owned to the importing owner, expiring 2099) and
+  // a status='pending' row landed in agent_tasks (agent-tasks.js:32 selects exactly
+  // that for execution). The policy was right; its COVERAGE was one caller wide.
+  //
+  // Putting it here makes every present AND FUTURE call site fail closed by
+  // construction — a new import route cannot forget a check it never has to write.
+  // verify:import-credential-deny additionally ENUMERATES every restoreTable call
+  // site in src/ at the source level, so a new literal naming a denied table also
+  // fails the BUILD instead of quietly landing zero rows.
+  //
+  // The name is normalized + shape-checked HERE too, rather than trusted from the
+  // caller. The old comment above tableColumns explained that full-export-import
+  // lowercases the bundle-derived name before calling in; a shared function whose
+  // safety depends on what its callers remember to do is the exact shape of the bug
+  // this fix exists to close. `table` is interpolated into SQL, so the same check
+  // that makes the policy match meaningful also makes the identifier safe.
+  const t = String(table || '').trim().toLowerCase();
+  if (t !== String(table || '') || !/^[a-z_][a-z0-9_]*$/.test(t)) {
+    return { ...out, attempted: Array.isArray(rows) ? rows.length : 0, refused: Array.isArray(rows) ? rows.length : 0, skipped: 'invalid_table_name', policyDenied: true };
+  }
+  if (!isImportAllowed(t)) {
+    // FAIL-LOUD, like `refused`: the count is reported so the reconciliation report
+    // can say WHY rows did not land, instead of showing an unexplained `missing`.
+    const n = Array.isArray(rows) ? rows.length : 0;
+    return { ...out, attempted: n, refused: n, skipped: 'denied', policyDenied: true };
+  }
+
   if (!Array.isArray(rows) || rows.length === 0) return out;
   const cols = await tableColumns(db, table);
   if (cols.size === 0) { out.failed = rows.length; out.attempted = rows.length; out.tableMissing = true; return out; }
@@ -190,6 +244,140 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
         r.is_active = 0;
         r.status = 'pending';
       }
+      // Connections: the row is user data (the federation graph) and must import,
+      // but three of its columns are a PEER-KEY CACHE — remote_key_agreement is the
+      // X25519 public key every outbound envelope is SEALED to, and remote_relay_inbox
+      // is where it is posted (connections.js:284-306). A bundle-supplied pair would
+      // silently redirect every sealed send for that peer to an attacker inbox, under
+      // an attacker key, until the TTL expired. They are a CACHE by construction —
+      // nulling them costs one did.json re-resolve on the next send — so scrub, and
+      // let the live path re-derive them from the peer's own document.
+      // (Not a DENY: connections themselves are exactly what a restore must bring back.)
+      //
+      // ⚠️ SCOPE of "a bundle cannot redirect sealed sends": that holds for a
+      // PRE-EXISTING peer, where INSERT OR IGNORE + UNIQUE(user_a,user_b) mean the
+      // bundle cannot overwrite the real row at all. For a bundle-INJECTED
+      // connection the scrub only delays the redirect by one resolve —
+      // federationDeliver computes peerDid = remote_did || did:web:<remoteDomain>
+      // (connections.js:279) and re-resolves, after which the ATTACKER'S OWN
+      // did.json legitimately caches the attacker's key + inbox (:296-300).
+      // remote_did / remote_instance / remote_user_handle are attacker-chosen and
+      // are NOT scrubbed — a connection's peer identity is what makes it that
+      // connection. So the control for the INJECTED case is the status force below.
+      if (table === 'connections') {
+        r.remote_key_agreement = null; r.remote_relay_inbox = null; r.remote_keys_cached_at = null;
+        // Never born accepted. Same shape as ai_providers' status='pending': an
+        // imported connection is inert until a human re-establishes it, so an
+        // injected peer cannot become a live sealed-send target by import alone.
+        // accepted_at is cleared too so the row is not self-contradictory.
+        r.status = 'pending'; r.accepted_at = null;
+      }
+      // Documents: the content must restore, but the PUBLICATION STATE must not.
+      // published=1 is exactly what public-server.js:120-126 serves on `/p/:slug`,
+      // and publish_nonce is the capability epoch an unlisted `/s/:slug?t=` link is
+      // bound to (publish/links.js:49, verified at public-server.js:143). Without
+      // this reset a bundle lands an attacker-authored page ALREADY PUBLIC under the
+      // user's own handle, or a pre-minted unlisted link that works the moment the
+      // import finishes. Re-publishing mints a fresh nonce (documents.js
+      // setPublicSlug/publish), so nothing legitimate is lost.
+      // ROUND-3 ADDITION: public_slug too. It is the PUBLIC NAMESPACE of the user's
+      // own handle. An injected doc carrying an attacker-chosen slug SQUATS it —
+      // tools/documents.js:132-135 then refuses the user's own publish with
+      // "already in use by another doc", and :138-139 re-uses the planted slug for
+      // the planted doc. Re-publishing re-derives a slug from the title.
+      if (table === 'documents') { r.published = 0; r.publish_nonce = null; r.public_slug = null; }
+      // peer_messages is a LIVE FEDERATION EGRESS QUEUE, not just history:
+      // federationOutbox (db/connections.js:930-956) selects
+      //   direction='out' AND status='failed' AND send_attempts < N
+      // and calls federationDeliver with the row's own `content`, on an automatic
+      // loop (server-rest.js:696 → createFederationPullLoop). An imported row in
+      // that shape, hung off a real ACCEPTED connection (every real connection id
+      // is in the user's own export), is attacker-authored text DELIVERED to a real
+      // peer under the victim's federation identity with no explicit send — a
+      // CLAUDE.md §11 violation. So force every imported row to a TERMINAL status
+      // and zero its attempts: history restores, the queue predicate can never
+      // match. (Not a DENY — the peer conversation is user data.)
+      // The connections status='pending' force is a SECOND, weaker control here
+      // (federationOutbox's loadConnection requires 'accepted'): it covers an
+      // INJECTED peer but not a PRE-EXISTING accepted one. This force is the
+      // control that carries the case. Recorded as `depends:` in the policy so it
+      // cannot be removed silently one table away.
+      if (table === 'peer_messages') {
+        const dir = String(r.direction || '').toLowerCase() === 'out' ? 'out' : 'in';
+        r.direction = dir;
+        r.status = dir === 'out' ? 'delivered' : 'received';
+        if (cols.has('send_attempts')) r.send_attempts = 0;
+      }
+      // harness_runs.prompt_hash is the key of a LIVE SUPPRESSION DECISION:
+      // harness.wasRecentlyCompleted (db/harness.js:155-163) → agent/scheduler.js:162
+      // skips a scheduled task when a run with the same prompt_hash is 'done' and
+      // finished_at >= cutoff — and a bundle-chosen FUTURE finished_at satisfies that
+      // cutoff forever. The hash includes the task's uuid, but in this threat model
+      // the attacker holds the user's own export, so the uuid is not a secret. That
+      // SELECT is the column's only reader (`prompt_hash = ?` never matches NULL), so
+      // nulling it removes the suppression surface and keeps the run accounting.
+      if (table === 'harness_runs') r.prompt_hash = null;
+      // user_profiles: `handle` is a DERIVED MIRROR owned by identity/handle-service.js
+      // (:169-181) and resolved as an identity at connections.js:446 — `users` was
+      // DENIED for exactly this column. `did` belongs to federation identity, and
+      // `public_space_enabled` is an opt-in PUBLIC exposure flag (migration 0016):
+      // consent must never transfer through a file. Prose fields (signature,
+      // public_bio, public_realms_json) are the user's own content and stay.
+      // Only reachable on a FRESH vault anyway — user_id is the PK and the insert is
+      // INSERT OR IGNORE — but dormancy is not a defence in this policy.
+      // conversation_summaries — the round-4 review's third finding, and the one
+      // place its proposed remedy was WRONG in the direction it claimed.
+      //
+      // harness.getSummary (db/harness.js:213-219) takes `ORDER BY created_at DESC
+      // LIMIT 1` for (user_id, conversation_id), and INSERT OR IGNORE dedups on the
+      // PK `id` — NOT on (user_id, conversation_id). So a bundle row naming a REAL
+      // conversation with a future created_at WINS the ordering and is fed to
+      // agent/history.js:66-72 as `prevSummary`: it REPLACES the agent's compacted
+      // memory of a real thread. (`allow` still stands — a summary is analysis
+      // output over the user's own corpus, not an authority decision — so this is a
+      // neutralisation, not a denial.)
+      //
+      // ⚠️ The review said "force created_at to import-time closes it cheaply". It
+      // does NOT: import-time is NEWER than every pre-existing real summary, so the
+      // planted row would still sort first — the remedy would have made the attack
+      // MORE reliable, not less. TWO controls, and the second is the one that carries:
+      //   1. CLAMP a future stamp to import-time (a summary cannot predate its
+      //      import into the future; a genuine restore's past stamps are untouched,
+      //      which matters because created_at is also the ordering of real history).
+      //   2. NEVER DISPLACE: if this vault already holds a summary for that
+      //      conversation, the bundle's row is dropped as a duplicate.
+      //
+      // ⚠️ ROUND-5 CORRECTION OF THE COMMENT ABOVE. Round 4 called control 2 what
+      // "makes the ordering unwinnable". It does NOT, and the residual is stated
+      // rather than implied: never-displace only protects a conversation that
+      // ALREADY HAS a summary. A real conversation with NONE yet — the COMMON case,
+      // since summaries are written only after compaction — has no competitor to
+      // out-order, so a bundle row for it still lands and still becomes `prevSummary`.
+      // What the two controls actually buy: an EXISTING agent memory can never be
+      // replaced, and no planted row can sort ahead of genuine history by claiming
+      // the future. The remainder is bundle-authored recalled text entering a real
+      // thread's context — bounded by, and no worse than, the PROMPT-INJECTION
+      // RESIDUAL that `messages` already accepts wholesale (import-credential-policy.js,
+      // foot of file). Accepted, documented, not closed here.
+      //
+      // On a FRESH vault (the normal restore) neither fires and the whole summary
+      // history lands as-is.
+      if (table === 'conversation_summaries') {
+        const ts = Date.parse(r.created_at);
+        if (!Number.isFinite(ts) || ts > Date.now()) r.created_at = new Date().toISOString();
+        if (r.conversation_id != null && r.conversation_id !== '') {
+          let held = false;
+          try {
+            const ex = await db.rawQuery(
+              'SELECT id FROM conversation_summaries WHERE user_id = ? AND conversation_id = ? LIMIT 1',
+              [userId, r.conversation_id],
+            );
+            held = Boolean((ex?.results || ex || []).length);
+          } catch { held = false; }   // fail-soft read; the clamp above still stands
+          if (held) { out.deduped++; continue; }
+        }
+      }
+      if (table === 'user_profiles') { r.handle = null; r.did = null; r.public_space_enabled = 0; }
       const keys = Object.keys(r).filter((k) => cols.has(k) && r[k] !== undefined);
       if (keys.length === 0) { out.failed++; continue; }
       // Will this insert fall back to the schema-default created_at?
@@ -263,7 +451,36 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   // array parked there becomes a junk pseudo-table ({declared:0,landed:0…}) AND still
   // never reaches the durable report. It belongs in the report, by name.
   let settingsRefused = [];
+  // Round-4: unknown (un-classified) bundle settings keys, parked in the quarantine
+  // rather than deleted, and the reason if the quarantine itself had to be dropped.
+  // Same reporting rule as settingsRefused — a silent loss is indistinguishable from a bug.
+  let settingsQuarantined = [];
+  let settingsQuarantineDropped = null;
+  // Round-5: allow-classified keys that were reverted to the LOCAL value because the
+  // resulting blob blew the total cap (IMPORT_SETTINGS_MAX_BYTES). Reported for the
+  // same reason as the two above — a silent loss is indistinguishable from a bug.
+  let settingsOversizeDropped = [];
   const run = async (table, rows, overrides) => { stats[table] = await restoreTable(db, table, asArray(rows), { userId, overrides }); };
+
+  /**
+   * ROUND-3: a manifest family this policy REFUSES. Reported, never silent — the
+   * user must be able to see in the durable report that e.g. their share links did
+   * not come back, and why.
+   *
+   * Why a separate helper rather than deleting the lines: the manifest still
+   * DECLARES these families, and a family that vanishes from the code is a family
+   * whose absence nobody can audit. Why not just call restoreTable and let its gate
+   * refuse: so the SOURCE-LEVEL call-site scan (verify:import-credential-deny) can
+   * keep the simple, checkable rule "every literal restoreTable call site names an
+   * allow table" — a denied literal there is now always a bug.
+   *
+   * Asserted, not asserted-in-a-comment: it refuses to be used on an allow table.
+   */
+  const refuseFamily = (table, rows) => {
+    const n = asArray(rows).length;
+    if (isImportAllowed(table)) throw new Error(`refuseFamily called on an importable table: ${table}`);
+    stats[table] = { attempted: n, inserted: 0, deduped: 0, failed: 0, refused: n, skipped: 'denied' };
+  };
 
   // Dependency-ordered (folders before documents, people before links, points
   // after hierarchy) — mirrors the reference import's order (reference:1012-1135).
@@ -301,8 +518,14 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   }
   await run('document_versions', m.documents_meta?.versions);
   await run('note_links', m.documents_meta?.noteLinks);
-  await run('share_links', m.documents_meta?.shareLinks);
-  await run('access_grants', m.documents_meta?.accessGrants);
+  // ⚠️ REFUSED (round-3 P0). These two were `run(...)` — hardcoded literals for
+  // tables the policy denies, on the route a user actually uses. share_links rows
+  // are RAW BEARER CAPABILITY TOKENS over a document path (documents.js:385): the
+  // reviewer landed a 64-char attacker token re-owned to the vault owner, pointing
+  // at `private/notes.md`, expiring 2099. access_grants is a latent entity ACL.
+  // Re-share instead; a share link is one click.
+  refuseFamily('share_links', m.documents_meta?.shareLinks);
+  refuseFamily('access_grants', m.documents_meta?.accessGrants);
 
   // Attachments (images/media): binary → encrypted blob → row (id preserved so
   // messages link). DEDUP SEMANTICS differ from documents: rows must ALWAYS
@@ -428,14 +651,18 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   await run('canvas_workspaces', m.canvases?.workspaces);
   await run('canvas_nodes', m.canvases?.nodes);
   await run('canvas_edges', m.canvases?.edges);
-  await run('canvas_collaborators', m.canvases?.collaborators);
+  refuseFamily('canvas_collaborators', m.canvases?.collaborators); // canvas ACL (access_level)
 
-  await run('agent_tasks', m.tasks?.agentTasks);
-  await run('tasks', m.tasks?.personalTasks);
+  // agent_tasks is the AGENT WORK QUEUE — agent-tasks.js:32 selects status='pending'
+  // for execution, with a bundle-authored description/context and channel_id, and it
+  // has no user_id so the forced re-own never fires. The reviewer landed
+  // {"status":"pending","description":"EXFIL EVERYTHING"} through this exact call.
+  refuseFamily('agent_tasks', m.tasks?.agentTasks);
+  await run('tasks', m.tasks?.personalTasks); // the user's TODO list — nothing executes it
   await run('reflections', m.reflections);
   await run('cycle_metrics', m.cycleMetrics);
-  await run('scheduled_events', m.scheduledEvents);
-  await run('agent_events', m.agentEvents);
+  refuseFamily('scheduled_events', m.scheduledEvents); // dormant executor table (event_type + schedule + enabled)
+  refuseFamily('agent_events', m.agentEvents);         // this box's own append-only runtime stream
 
   // The agent's internal model of the user — "model internals" are continuity-
   // critical even though new writes go to persona-claims; preserve the history.
@@ -466,7 +693,9 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
   }
 
   await run('user_profiles', m.user?.profile ? [m.user.profile] : []);
-  await run('user_identities', m.user?.identities);
+  // user_identities maps a discord provider_id → owner user_id (db/user-identities.js:23):
+  // a bundle row makes an attacker's Discord account resolve as the vault owner.
+  refuseFamily('user_identities', m.user?.identities);
 
   // User identity meta → the V1 users row (UPDATE, never a second row keyed by
   // the canonical id): display name, timezone, settings carry the person over.
@@ -474,67 +703,55 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     const u = m.user || {};
     const sets = [];
     const params = [];
-    if (typeof u.displayName === 'string' && u.displayName) { sets.push('display_name = ?'); params.push(u.displayName); }
-    if (typeof u.timezone === 'string' && u.timezone) { sets.push('timezone = ?'); params.push(u.timezone); }
-    // `settings` is replaced WHOLESALE from the manifest, and it is not inert preference
-    // data — several keys are EXECUTABLE POLICY a bundle must not get to choose:
-    //   taskModels[task]={providerId} picks which ai_providers row serves chat/harness/
-    //     channel turns (resolveInferenceConfigForTask takes the id directly ⇒ bypasses
-    //     is_active); allowSubscriptionSensitive flips the §4g sensitive→US guard;
-    //   agentCapture{enabled,redactSecrets} is a FAIL-CLOSED, default-OFF consent gate
-    //     for capture that "can contain secrets (keys, file contents, command output)"
-    //     (ingest/capture.js:104) — a bundle could switch capture on and redaction off;
-    //   reflection{enabled} starts autonomous cycles at next boot (cost governance §10);
-    //   transcribeModel is fed unvalidated into ensureTranscribeSupervisor ⇒ spawns a
-    //     python service (server-rest.js:613; the portal PUT validates, this path won't);
-    //   webSearch / inferCascade / harnessMode / agent steer egress and routing.
+    // ROUND-5: both are bundle-chosen strings on the SAME write as the settings blob,
+    // and both were uncapped here while the portal's own PUT caps display_name at 200
+    // (portal-compat.js:473). display_name is rendered in the portal and joined into
+    // member listings; timezone is read on scheduling paths. An import must not be a
+    // wider door than the UI — clamp to the UI's own bound rather than reject, so a
+    // legitimately long name still restores (truncated) instead of vanishing.
+    if (typeof u.displayName === 'string' && u.displayName) { sets.push('display_name = ?'); params.push(u.displayName.slice(0, 200)); }
+    if (typeof u.timezone === 'string' && u.timezone) { sets.push('timezone = ?'); params.push(u.timezone.slice(0, 64)); }
+    // ── users.settings — the THIRD write path, ALLOWLISTED (round-4) ─────────
     //
-    // DENYLIST — deliberately, but NOT for the reason first written here.
+    // This block is the ONE write in this file that does not go through
+    // `restoreTable`, so the chokepoint's table policy does not cover it. `users`
+    // is classified `deny` there; the exception is deliberate and narrow (carry the
+    // PERSON over: display name, timezone, settings) and it carries its own gate.
     //
-    // ⚠️ CORRECTED (round-4 review): the original justification claimed `settings` is
-    // shared with the SvelteKit portal, which owns keys like `theme` that no src/ grep
-    // finds. That is FALSE — `theme` is client-side localStorage
-    // (portal-app/src/app.html:23; portal-compat.js:1085 says so outright), and both keys
-    // the gates used to "prove" it (`theme`, `voice`) were invented by their own fixtures.
-    // V1's own users.settings vocabulary IS enumerable — nine keys, every writer in
-    // portal-*.js: reflection · keepAwake · agent · transcribeModel · taskModels ·
-    // allowSubscriptionSensitive · webSearch · harnessMode · agentCapture. Eight are
-    // denied below; only `keepAwake` is carried, and it is genuinely inert (macOS
-    // caffeinate on/off, default ON ⇒ a bundle can only turn it OFF — portal-system.js:36).
+    // WHAT CHANGED IN ROUND 4, and why the old shape was not salvageable:
+    //   • It was a second, hand-maintained DENYLIST (`IMPORT_REFUSED_SETTINGS`) with
+    //     ZERO verify: coverage — the third such list to rot in three rounds.
+    //   • Its own comment claimed the vocabulary "IS enumerable — nine keys". It was
+    //     FOURTEEN when that sentence was written. The five it never saw were the two
+    //     P1s: `enrich*Paused*` (a bundle durably stops the user's own embedding +
+    //     categorization, re-read on EVERY boot by enrich/drainer.js) and
+    //     `recovery_key_backed_up` (a bundle defeats the U1.3 backup gate, so the user
+    //     is never shown their recovery key — durable, silent, unrecoverable loss).
+    //   • It REPLACED the blob wholesale, so a bundle that merely OMITS
+    //     `recovery_key_backed_up` deletes the explicit `false` the server wrote at
+    //     setup and defeats the same gate with no forgery at all.
     //
-    // THE REAL REASON: this blob comes from the CANONICAL production vault, a different
-    // codebase whose settings may carry keys THIS backend has no reader for. An allowlist
-    // would silently delete the user's data on the one path whose whole job is to bring
-    // their vault home — and would delete it again for any key V1 adds a reader for later.
-    // A denylist keeps the unknown-but-inert and refuses the known-and-dangerous.
+    // Now: the vocabulary is CLASSIFIED in import-credential-policy.js (one place to
+    // look, next to the table policy), the surviving set is the ALLOW set, the write
+    // MERGES over the local blob instead of replacing it, and
+    // `verify:import-credential-deny` enumerates every settings key written or read
+    // anywhere in src/ and REDs on any that is not classified — so a settings key
+    // added tomorrow is safe by default rather than dangerous by default.
     //
-    // The failure mode is a maintenance duty, and every writer lives in portal-*.js, so it
-    // is a checkable one: IF YOU ADD A SETTINGS KEY THAT ENABLES EGRESS, SPAWNS A PROCESS,
-    // SELECTS A MODEL/PROVIDER, OR RECORDS CONSENT — ADD IT HERE. Consent must not transfer
-    // through a file.
-    const IMPORT_REFUSED_SETTINGS = [
-      'taskModels',                 // {providerId} picks the provider per task ⇒ bypasses is_active
-      'allowSubscriptionSensitive', // flips the §4g sensitive→US guard (resolve.js)
-      'agentCapture',               // fail-closed consent gate for capture that can hold secrets (capture.js:104)
-      'reflection',                 // starts autonomous cycles at next boot (cost governance §10)
-      'transcribeModel',            // fed unvalidated into ensureTranscribeSupervisor ⇒ spawns python
-      'webSearch',                  // enables agent web egress
-      'inferCascade',               // multi-provider routing policy
-      'agent',                      // agent.name is INTERPOLATED into the chat system prompt
-                                    // ("Your name is ${ident.name}." — portal-chat.js:408) and
-                                    // the READ path applies no cap (portal-chat.js:122), unlike
-                                    // the PUT (:155, .slice(0,40)) ⇒ a bundle would own the first
-                                    // sentence of the agent's system prompt on every turn.
-      'harnessMode',                // picks the agent engine (CLI vs native). Fails safe today
-                                    // (resolve-harness.js:26 needs a subscription row, which the
-                                    // ai_providers branch refuses) — but latent: it would activate
-                                    // silently the day the user connects a subscription.
-    ];
+    // Sovereignty is preserved, not traded away: keys this backend does not know
+    // (a CANONICAL vault carries some) are not deleted, they are parked in
+    // `importedSettingsQuarantine`, which by gate-enforced assertion nothing in src/
+    // reads. Classified-dangerous keys ARE dropped — consent and policy must not
+    // transfer through a file — and both lists are reported.
     if (u.settings && typeof u.settings === 'object' && Object.keys(u.settings).length) {
-      const safe = { ...u.settings };
-      settingsRefused = IMPORT_REFUSED_SETTINGS.filter((k) => k in safe);
-      for (const k of settingsRefused) delete safe[k];
-      if (Object.keys(safe).length) { sets.push('settings = ?'); params.push(JSON.stringify(safe)); }
+      let local = {};
+      try { local = (await db.users?.getSettings?.(userId)) || {}; } catch { local = {}; }
+      const f = filterImportSettings(u.settings, local);
+      settingsRefused = f.refused;
+      settingsQuarantined = f.quarantined;
+      settingsQuarantineDropped = f.quarantineDropped;
+      settingsOversizeDropped = f.oversizeDropped;
+      if (f.changed) { sets.push('settings = ?'); params.push(JSON.stringify(f.next)); }
     }
     let updated = 0;
     if (sets.length) {
@@ -773,6 +990,17 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     // V8). Named here because the report is the only artifact the user keeps — this is the
     // same lesson as `refused`, which is why it isn't parked in `stats` either.
     settingsRefused,
+    settingsQuarantined,
+    settingsQuarantineDropped,
+    settingsOversizeDropped,
+    // ROUND-3: the families the import POLICY refuses (src/ingest/import-credential-policy.js).
+    // Named in the durable report for the same reason as `settingsRefused`: these are
+    // rows the user HAD and no longer has, and a silent security drop is
+    // indistinguishable from a bug. Its own field, not an extra `skippedFamilies`
+    // entry — that is a fixed 2-element contract (verify:vault-import V8).
+    refusedFamilies: Object.entries(stats)
+      .filter(([, s]) => s?.skipped === 'denied')
+      .map(([t, s]) => `${t} (${s.refused || 0} rows refused — denied by the import policy)`),
     skippedFamilies: [
       'passkeys (WebAuthn is origin-bound — re-enroll on this device)',
       'secrets (values excluded by the exporter — re-add in Settings)',
@@ -796,6 +1024,10 @@ export async function importMyceliumVault(zip, manifest, { db, userId, enqueueEn
     exportSide,
     reportPath,
     settingsRefused,
+    settingsQuarantined,
+    settingsQuarantineDropped,
+    settingsOversizeDropped,
+    refusedFamilies: report.refusedFamilies,
     skippedFamilies: report.skippedFamilies,
     exportVersion: m.version ?? null,
     exportedAt: m.exportedAt ?? null,

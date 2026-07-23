@@ -352,6 +352,10 @@ export function internalRouter({ db, userId, enrich = {}, voiceRenderer } = {}) 
         },
         tts: {
           provider: (await g('TTS_PROVIDER')) || null,
+          // Voice-reply policy for channel replies ('always' | 'auto' | 'off').
+          // Absent ⇒ the daemon defaults to 'always': voice ON in Settings means
+          // channel replies are spoken (QA6-VOICE).
+          voiceReplies: (await g('CHANNEL_VOICE_REPLIES')) || null,
           qwenEnabled: (await g('QWEN_TTS_ENABLED')) || null,
           qwenVariant: (await g('QWEN_TTS_VARIANT')) || null,
           openaiApiKey: (await g('OPENAI_API_KEY')) || null,

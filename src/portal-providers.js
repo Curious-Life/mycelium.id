@@ -32,6 +32,7 @@ import { importFromClaudeCli, ClaudeImportError, readClaudeAccount } from './inf
 import { probeClaudeCredential } from './inference/claude-sources.js';
 import { startPkceFlow, exchangeCode, refreshAccessToken, createPkceFlowStore, ClaudePkceError } from './inference/claude-pkce.js';
 import { resolveClaudeBin } from './inference/claude-bin.js';
+import { probeClaudeCli } from './inference/claude-cli-status.js';
 import { seedClaudeConfigDir, refreshClaudeConfigDirToken } from './inference/claude-config-dir.js';
 import { getSubscriptionAuthValidity, recordSubscriptionRefreshOutcome } from './inference/subscription-auth-signal.js';
 import { isCliEngineReady } from './agent/harnesses/index.js';
@@ -402,10 +403,21 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     try {
       const s = await db.users.getSettings(userId);
       const subscriptionConnected = (await db.providers.list(userId)).some(isSubscriptionRow);
+      // QA6-P1: the CLI is not a boolean — it is installed?/which version?/is it current?.
+      // The old `claudeAvailable` alone could only produce a disabled card with no next
+      // step (the reported dead click). probeClaudeCli never throws and never blocks on
+      // the network: offline degrades to latestVersion:null, not to an error.
+      // SECURITY: `claude` carries booleans + a dotted version + fixed copy ONLY — never
+      // the resolved binary path (it embeds the user's home dir → §1/§8).
+      const claude = await probeClaudeCli().catch(() => null);
       ok(res, {
         harnessMode: s?.harnessMode === 'cli' ? 'cli' : 'native',
         subscriptionConnected,
-        claudeAvailable: resolveClaudeBin() != null,
+        // Back-compat field, now VERSION-AWARE: an installed-but-too-old CLI is not
+        // "available" (its confinement flags are unproven — see claude-cli-status.js).
+        // A probe failure falls back to the bare existence check, fail-soft.
+        claudeAvailable: claude ? claude.usable : (resolveClaudeBin() != null),
+        claude,
         // Is the cli engine actually wired (C2 shipped)? false in C1 ⇒ the UI shows
         // Claude Code as "coming soon" rather than a selectable engine that would only
         // fall back to native — the switch never lies. Matches the resolver's gate.

@@ -16,13 +16,27 @@
 // — the one path that can clear the flag is GATED ON the flag. So "Show setup guidance again"
 // wrote the DB, said it worked, and changed nothing until the app was RESTARTED.
 import { compile, compileModule } from 'svelte/compiler';
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
 
 const S_WAIT = process.env.FLIP_GENERATED === '1' || process.env.UNKNOWN_AFTER_FIRST_READ === '1';
-const GEN = '.gen-mount-onbflow';
-rmSync(GEN, { recursive: true, force: true });
-mkdirSync(GEN, { recursive: true });
+// ⚠️ PER-PROCESS temp dir — never a FIXED path. verify:readiness spawns this child once per
+// assertion, and CI runs the `verify` chain + `verify:core` (both include verify:readiness)
+// concurrently on one checkout ⇒ two of these children live in the same portal-app cwd at once.
+// A shared `.gen-mount-onbflow` dir let concurrent children BOTH crash (one's rmSync/write races
+// another's read → ENOENT/ENOTEMPTY outside the try/catch → execFileSync "Command failed") AND
+// silently corrupt results (child A writes api-stub.js for scenario A, child B overwrites it for
+// scenario B, then A imports B's fixture → X1/X2 red on the wrong-scenario observation). Each
+// process gets its OWN dir. It MUST stay INSIDE portal-app so the compiled Flow.js can resolve
+// bare 'svelte' specifiers up-tree to portal-app/node_modules. `exit` cleanup covers the
+// setup-phase crash path (before the try) so no orphan dir is left behind.
+const GEN = mkdtempSync('.gen-mount-onbflow-');
+const cleanupGen = () => { try { rmSync(GEN, { recursive: true, force: true }); } catch {} };
+process.on('exit', cleanupGen);
+// SIGTERM/SIGINT skip the 'exit' handler — execFileSync sends SIGTERM on its timeout, so without
+// this a hard-killed child would orphan its unique dir in portal-app. Clean up, then exit.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { cleanupGen(); process.exit(1); });
 
 // The REAL store, compiled — not a double. If it stops being a singleton, this notices.
 // The store is a RUNE MODULE (.svelte.ts) — it MUST go through compileModule or its $state is
@@ -106,8 +120,8 @@ for (const k of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'N
 globalThis.__statusReads = [];
 
 const { mount, flushSync } = await import('svelte');
-const Flow = (await import(pathToFileURL(`${process.cwd()}/${GEN}/Flow.js`).href)).default;
-const { signalGuidanceRestored } = await import(pathToFileURL(`${process.cwd()}/${GEN}/store.js`).href);
+const Flow = (await import(pathToFileURL(resolve(GEN, 'Flow.js')).href)).default;
+const { signalGuidanceRestored } = await import(pathToFileURL(resolve(GEN, 'store.js')).href);
 
 const result = { ok: false };
 try {

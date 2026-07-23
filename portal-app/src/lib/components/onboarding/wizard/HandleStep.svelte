@@ -15,7 +15,10 @@
 	const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/;
 
 	let handleInput = $state(''); // ⚠️ empty — never prefilled (decision 2)
-	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid'>('idle');
+	// `unreachable` is a DISTINCT state from `taken`: when the control plane can't be
+	// reached the check cannot answer, and calling that "taken" tells an offline user
+	// every name they try is gone. The server signals it with { unreachable: true }.
+	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid' | 'unreachable'>('idle');
 	let saving = $state(false);
 	let saveErr = $state('');
 	let handleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -34,7 +37,8 @@
 		handleState = 'checking';
 		handleTimer = setTimeout(async () => {
 			const d = await getJSON(`/portal/profile/handle/check?handle=${encodeURIComponent(h)}`);
-			handleState = d ? (d.available ? 'available' : 'taken') : 'idle';
+			if (!d) { handleState = 'unreachable'; return; }
+			handleState = d.available ? 'available' : d.unreachable ? 'unreachable' : 'taken';
 		}, 400);
 	}
 
@@ -78,6 +82,7 @@
 			{handleState === 'checking' ? 'checking…'
 				: handleState === 'available' ? 'available ✓'
 				: handleState === 'taken' ? 'that handle is taken'
+				: handleState === 'unreachable' ? "couldn't check right now — you may be offline. You can set this later."
 				: 'use a–z, 0–9 and dashes'}
 		</p>
 	{/if}

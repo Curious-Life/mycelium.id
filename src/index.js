@@ -16,7 +16,9 @@ import { resolveDbKeyHex, atRestEnabled } from './db/open.js';
 import { purgePlaintextBackup } from './account/db-cipher-migrate.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createIdentity, isValidHandle } from './identity/identity.js';
+import { createIdentity } from './identity/identity.js';
+// The ONE authoritative read of the vault's handle (derived from publicHost).
+import { currentHandle } from './identity/handle-service.js';
 import { readRemoteConfig } from './remote/config.js';
 import { buildDomains, collectTools, createMcpServer, TIER2_TOOLS, TOPOLOGY_NOT_READY_MESSAGE } from './mcp.js';
 import { createServiceEmbedder } from './search/embedder.js';
@@ -102,8 +104,8 @@ export async function boot({
   // its first label, validated. When remote is off both are null → the
   // federation surfaces fail closed (did.json 404, /federation/connect 503).
   const publicHost = readRemoteConfig().publicHost || '';
-  const handleCandidate = publicHost ? publicHost.split('.')[0] : null;
-  const handle = handleCandidate && isValidHandle(handleCandidate) ? handleCandidate : null;
+  // ONE derivation, shared with every other reader (src/identity/handle-service.js).
+  const handle = currentHandle();
   const identity = createIdentity({ masterHex: userHex, handle });
   const federationDeps = {
     sign: handle ? (canonical) => identity.sign(canonical) : undefined,

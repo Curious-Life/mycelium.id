@@ -254,7 +254,7 @@ function defaultFreePort(start, { host = '127.0.0.1', range = 64 } = {}) {
  * @param {(baseUrl?:string, fetch?:Function)=>Promise<number[]|null>} [deps.daemonVersion] /api/version probe
  * @param {(opts:object)=>(string|null)} [deps.findHostBinary] host/PATH binary locator
  * @param {(bin:string)=>Promise<number[]|null>} [deps.binaryVersion] `<bin> --version` probe
- * @returns {{ ensureUp:Function, isInstalled:Function, stop:Function }}
+ * @returns {{ ensureUp:Function, isInstalled:Function, stop:Function, getBaseUrl:Function, health:Function }}
  */
 export function createOllamaDaemon({
   baseUrl,
@@ -313,6 +313,13 @@ export function createOllamaDaemon({
   let errBuf = '';
   let inflight = null;        // single-flight: start()
   let installInflight = null; // single-flight: download
+  // The LAST outcome start() produced, kept ONLY so health() can name the reason a
+  // bring-up failed ('not_installed' / 'start_timeout' / 'spawn_failed' / …). It is
+  // never consulted by start() itself and never short-circuits a probe — health()
+  // always RE-PROBES first, so a stale reason can never outvote a daemon that is
+  // actually answering (the "never claim a retry succeeded when it didn't", and its
+  // mirror: never claim it failed when it did come up).
+  let lastResult = null;
 
   function isInstalled() {
     return resolveBinary() !== null;
@@ -449,8 +456,85 @@ export function createOllamaDaemon({
    */
   function ensureUp(onProgress) {
     if (inflight) return inflight;
-    inflight = start(onProgress).finally(() => { inflight = null; });
+    inflight = start(onProgress)
+      .then((r) => { lastResult = r; return r; })
+      .finally(() => { inflight = null; });
     return inflight;
+  }
+
+  // ── Honest daemon health (QA6 P1 §1 + §3) ───────────────────────────────────
+  // WHAT WAS WRONG. The only thing a surface could ask this daemon was `ensureUp()`,
+  // whose return value describes the ATTEMPT ("ok:false, reason:'start_timeout'"),
+  // not the WORLD. Everything else asked `ollamaClient().isUp()` — a bare boolean
+  // that cannot tell "not installed" from "installed and starting" from "crashed".
+  // So the categorize/model panel had exactly two things to say, ok and the generic
+  // "the local model runtime (Ollama) isn't reachable", and no way to act. It also
+  // self-healed silently a moment later with the screen still claiming a fault.
+  //
+  // health() answers the world, in the SHARED taxonomy (src/system/service-state.js):
+  //   'ok'            — the daemon answers on the base we dial (adopted, spawned, or healed)
+  //   'starting'      — a bring-up is IN FLIGHT right now (single-flight `inflight`) ⇒ 'loading'
+  //   'no_model'      — no ollama binary anywhere and auto-install is off ⇒ a setup step
+  //   'deps_missing'  — a binary is absent but we CAN fetch it ⇒ degraded + retryable
+  //   'down'/'error'  — it is installed and it did not come up; `detail` carries the
+  //                     redacted last stderr line / the last failure reason
+  //
+  // ⚠️ IT NEVER STARTS ANYTHING. health() is a pure READ (probe + local facts) so it is
+  // safe on a poll and cannot become a hidden spawn path — bring-up stays exclusively
+  // ensureUp()'s job, with its single-flight, version-gate, adopt/self-heal and spawn
+  // caps untouched.
+  async function health() {
+    let up = false;
+    try { up = await probeUp(); } catch { up = false; }
+    const installed = (() => { try { return isInstalled(); } catch { return false; } })();
+    if (up) {
+      return {
+        status: 'ok',
+        message: 'The local model runtime is running.',
+        detail: null,
+        installed: true,
+        running: true,
+        baseUrl: effectiveBaseUrl,
+      };
+    }
+    if (inflight) {
+      return {
+        status: 'starting',
+        message: 'Starting the local model runtime…',
+        detail: null,
+        installed,
+        running: false,
+        baseUrl: effectiveBaseUrl,
+      };
+    }
+    // Not up, nothing in flight. WHY is the useful part — and it is a REASON, not a guess.
+    const reason = lastResult && lastResult.ok === false ? lastResult.reason || null : null;
+    if (!installed) {
+      // A downloadable absence is a setup step we can re-attempt; a non-downloadable one
+      // (autoInstall off / unsupported platform) is a genuine dead end for this surface.
+      const fetchable = autoInstall && Boolean(dataDir) && reason !== 'unsupported_platform';
+      return {
+        status: fetchable ? 'deps_missing' : 'no_model',
+        message: fetchable
+          ? 'The local model runtime isn’t installed yet — Mycelium can download it.'
+          : 'The local model runtime isn’t installed on this computer.',
+        detail: reason,
+        installed: false,
+        running: false,
+        baseUrl: effectiveBaseUrl,
+      };
+    }
+    return {
+      status: 'down',
+      message: reason === 'start_timeout'
+        ? 'The local model runtime didn’t finish starting.'
+        : 'The local model runtime isn’t running.',
+      // Already redacted at the source (redactDaemonDetail) — never a raw path or PII.
+      detail: reason || redactDaemonDetail(errBuf.trim().split('\n').pop() || '') || null,
+      installed: true,
+      running: false,
+      baseUrl: effectiveBaseUrl,
+    };
   }
 
   /** Kill the daemon ONLY if we started it (never an adopted one). */
@@ -462,7 +546,7 @@ export function createOllamaDaemon({
   /** The base URL every consumer should DIAL — moves to the alt loopback port after a self-heal. */
   function getBaseUrl() { return effectiveBaseUrl; }
 
-  return { ensureUp, isInstalled, stop, getBaseUrl };
+  return { ensureUp, isInstalled, stop, getBaseUrl, health };
 }
 
 export default createOllamaDaemon;

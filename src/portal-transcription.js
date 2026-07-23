@@ -15,6 +15,7 @@
 
 import express from 'express';
 import { ensureTranscribeSupervisor, getTranscriberHealth, transcribeServiceUrl } from './transcribe/supervisor.js';
+import { normalizeHealth } from './system/service-state.js';
 
 // Curated stable models (must match transcribe-service.py ALLOWED_MODELS).
 // Exported for the Intelligence bundle (src/portal-intelligence.js), which needs the
@@ -68,12 +69,46 @@ export function portalTranscriptionRouter({ db, userId, authenticatePortalReques
     // fix, landed with the Intelligence bundle whose size math depends on the pick being real.
     try { ramGB = detectHardware ? (await detectHardware())?.totalRamGb ?? null : null; } catch { /* optional */ }
     const recommended = recommendedWhisperModel(ramGB);
+    const health = getTranscriberHealth();
+    const norm = normalizeHealth(health);
     res.json({
       ok: true,
-      health: getTranscriberHealth(),
+      health,
+      // ONE state machine, served from the server (src/system/service-state.js) rather
+      // than re-derived per screen — the §3 rule. `state` is loading|ready|degraded|
+      // failed|checking; `retryable` says whether a Retry is an honest offer.
+      state: norm.state,
+      retryable: norm.retryable,
       model,
       catalog: CATALOG.map((c) => ({ ...c, recommended: c.model === recommended })),
     });
+  });
+
+  // ── POST /transcription/retry — the owner's escape hatch for a dead transcriber ──
+  // Sibling of POST /portal/embed/retry (#318) and POST /portal/hardware/retry. The
+  // supervisor already owns the ONE resume path — nudge() re-arms a HALTED restart
+  // governor (5 straight crashes, or a foreign process on :8093) and forces an immediate
+  // tick, which re-checks deps, re-probes, and respawns as needed. Nothing here
+  // duplicates or weakens that: this route only presses it.
+  //
+  // ⚠️ NEVER CLAIMS SUCCESS. nudge() is not awaited to an outcome (the restart is
+  // asynchronous by construction), so the answer is a RE-READ of getTranscriberHealth()
+  // — the same single source /transcription/status serves. A retry that didn't help
+  // reports the true 'deps_missing'/'down' with its actionable message; one that did
+  // reports 'starting'/'ok'. `ok` describes the WORLD, not the request.
+  //
+  // Fail-SAFE on the opt-out case: no model configured ⇒ ensure is a no-op ⇒ we answer
+  // the honest 'unknown'/'no_model' rather than spawning an unwanted python process.
+  router.post('/transcription/retry', async (req, res) => {
+    if (!auth(req, res)) return;
+    const model = await chosenModel();
+    try {
+      const sup = ensureTranscribeSupervisor({ model: model || undefined });
+      sup?.nudge?.();
+    } catch { /* best-effort — the re-read below is the answer, not this */ }
+    const health = getTranscriberHealth();
+    const norm = normalizeHealth(health);
+    res.json({ ok: norm.state === 'ready', health, state: norm.state, retryable: norm.retryable, model });
   });
 
   router.post('/transcription/download', async (req, res) => {

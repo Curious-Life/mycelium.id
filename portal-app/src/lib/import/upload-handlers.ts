@@ -10,7 +10,7 @@ import { signalImportCompleted } from '$lib/stores/onboarding-data.svelte';
 
 export type ImportResult = {
 	kind: 'archive' | 'files' | 'folder';
-	type?: string; // 'claude' | 'chatgpt' | 'mycelium' | 'document' | 'file' | 'image' | 'obsidian'
+	type?: string; // 'claude' | 'chatgpt' | 'mycelium' | 'bundle' | 'document' | 'file' | 'image' | 'obsidian'
 	imported: number;
 	skipped: number;
 	failed: number;
@@ -99,11 +99,24 @@ export async function filesFromDataTransfer(dt: DataTransfer | null): Promise<{ 
 	return { files: out.length ? out : fallback, hadDirectory };
 }
 
+// Last path segment (handles `/` and `\`), for depth-aware entry-name checks that
+// mirror the server's basename detection (src/ingest/archive-entries.js).
+const zipBasename = (n: string) => n.split('/').pop()!.split('\\').pop()!;
+
 /**
  * For large conversation ZIPs (>90MB), strip media client-side and re-pack just
- * the data files so the upload stays under the transport (Cloudflare 100MB)
- * limit. Mycelium vault exports and >500MB files are uploaded raw (server
- * extracts / media must be preserved). Throws if a big ZIP has no data files.
+ * the data files, so we don't spend minutes uploading media that a CONVERSATION
+ * import would discard anyway. (Chunked upload already handles >100MB, so this is
+ * a bandwidth/time optimization, not a transport requirement.)
+ *
+ * Uploaded RAW (media preserved), because the media IS the payload there:
+ *   • Mycelium vault exports (a manifest.json at any depth) — media in attachments/;
+ *   • >500MB — server extracts;
+ *   • a BUNDLE (no conversations.json anywhere) — a plain zip of PDFs/images/docs
+ *     (incl. Google Takeout): stripping to json/md/csv would gut the import.
+ * Stripping only happens for a genuine conversation export (a conversations.json
+ * at any depth), where media is discardable noise. Signature files are matched by
+ * BASENAME AT ANY DEPTH so a re-zipped / nested export is handled like the server.
  */
 export async function prepareFile(file: File, onStatus: (s: string) => void = () => {}): Promise<File> {
 	if (file.size < 90_000_000 || !file.name.endsWith('.zip')) return file;
@@ -111,14 +124,21 @@ export async function prepareFile(file: File, onStatus: (s: string) => void = ()
 		onStatus(`Large file (${Math.round(file.size / 1024 / 1024)}MB) — uploading directly, server will extract…`);
 		return file;
 	}
-	onStatus('Large file detected — extracting conversation data…');
 	const zip = await JSZip.loadAsync(await file.arrayBuffer());
-	// A Mycelium vault export keeps media in attachments/ — never strip it.
-	if (zip.file('manifest.json')) {
+	const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
+	// A Mycelium vault export keeps media in attachments/ — never strip it (basename at any depth).
+	if (names.some((n) => zipBasename(n) === 'manifest.json')) {
 		onStatus(`Mycelium vault export (${Math.round(file.size / 1024 / 1024)}MB) — uploading with media intact…`);
 		return file;
 	}
-	const dataFiles = Object.keys(zip.files).filter((n) => /\.(json|md|csv)$/.test(n) && !zip.files[n].dir);
+	// Only a real conversation export (conversations.json at any depth) is stripped —
+	// its media is noise. A bundle has none, so its media must survive: upload raw.
+	if (!names.some((n) => zipBasename(n) === 'conversations.json')) {
+		onStatus(`Large file (${Math.round(file.size / 1024 / 1024)}MB) — uploading with files intact…`);
+		return file;
+	}
+	onStatus('Large file detected — extracting conversation data…');
+	const dataFiles = names.filter((n) => /\.(json|md|csv)$/.test(n));
 	if (dataFiles.length === 0) throw new Error('No importable data found in this ZIP.');
 	const newZip = new JSZip();
 	for (const name of dataFiles) newZip.file(name, await zip.files[name].async('uint8array'));
@@ -132,6 +152,11 @@ export async function importFiles(files: File[], opts: Opts = {}): Promise<Impor
 	const { onStatus = () => {}, onProgress = () => {} } = opts;
 	const { uploadFile } = await import('$lib/chunked-upload');
 	let imported = 0, skipped = 0, failed = 0;
+	// Bundle attachments (images/PDF-as-media) are NOT deduplicated on re-import —
+	// a document keys on its path and updates in place, but an attachment gets a
+	// fresh blob every run. Say so instead of letting the user assume a re-run is
+	// free (server: src/ingest/run-import.js runBundle).
+	let attachmentsAdded = 0;
 	let type: string | undefined;
 	let error: string | undefined;
 	for (let i = 0; i < files.length; i++) {
@@ -145,6 +170,7 @@ export async function importFiles(files: File[], opts: Opts = {}): Promise<Impor
 				if (!res.ok) { failed++; error = d.error || `Could not import ${file.name}.`; continue; }
 				type = type || d.importResult?.type;
 				imported += num(d.importResult?.imported ?? d.stats?.messages ?? d.messages);
+				if (d.importResult?.type === 'bundle') attachmentsAdded += num(d.importResult?.stats?.attachments);
 				skipped += num(d.importResult?.skipped ?? d.stats?.skipped_duplicates);
 				failed += num(d.importResult?.failed ?? d.stats?.failed);
 			} else {
@@ -160,7 +186,8 @@ export async function importFiles(files: File[], opts: Opts = {}): Promise<Impor
 		} catch { failed++; }
 	}
 	const kind: ImportResult['kind'] = files.some((f) => ARCHIVE_RE.test(f.name)) ? 'archive' : 'files';
-	const detail = `${imported.toLocaleString()} imported${skipped ? `, ${skipped} duplicates` : ''}${failed ? `, ${failed} failed` : ''}`;
+	const detail = `${imported.toLocaleString()} imported${skipped ? `, ${skipped} duplicates` : ''}${failed ? `, ${failed} failed` : ''}`
+		+ (attachmentsAdded ? ` — ${attachmentsAdded.toLocaleString()} image/media file${attachmentsAdded === 1 ? '' : 's'} added as new items (importing this zip again adds another copy)` : '');
 	// Data landed → tell the invite panel (and any other readiness consumer) to re-read, so
 	// "no data uploaded" can never persist over a full vault after a drop or a Library import.
 	// This is the shared chokepoint <ImportField> and <ImportDropZone> both funnel through.

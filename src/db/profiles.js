@@ -2,24 +2,11 @@
  * Profiles namespace — user-facing handle + public fingerprint
  * (depth/breadth/coherence/exploration scores, public realm names).
  *
- * Handle reservation is cross-tenant: every tenant D1 stores its own
- * `user_profiles.handle` (denormalized display cache), but the
- * authoritative uniqueness check + reservation row live on the
- * **owner** D1's `handle_reservations` table. PR 4 routes the
- * reservation through `handles.claim()` (the typed Worker endpoint
- * client) — pre-PR-4 this namespace issued raw SQL via
- * `/api/db/query`, which any tenant token could spoof; the typed
- * client derives `user_id` from the bearer-token identity server-
- * side, eliminating the cross-tenant write surface.
- *
- * SECURITY notes:
- *   - Local format pre-check before any network hop
- *     (`^[a-z0-9][a-z0-9_]{2,29}$`, 3–30 chars). PR 7 will reconcile
- *     this with the Worker's DNS-compatible regex.
- *   - Reserved handles blocked locally (defense in depth — Worker
- *     also rejects them).
- *   - `handles` dep is injectable for tests; the production wiring
- *     in db-d1.js passes the createHandleClient instance.
+ * HANDLE SETTING lived here (setHandle + a local format pre-check + a reserved
+ * list) as a multi-tenant Worker artifact. It had ZERO callers in V1 and its
+ * validation rule diverged from the DNS-safe one (it permitted underscores that
+ * can never be a hostname). It has been removed — the ONE handle writer is
+ * src/identity/handle-service.js (QA6 handle unification).
  *
  * `computeFingerprint` derives the public profile from territory +
  * realm counts, message count, chronicle fraction (coherence), and
@@ -29,35 +16,26 @@
  * @typedef {object} ProfilesNamespaceDeps
  * @property {(sql: string, params: any[]) => Promise<any>} d1Query
  * @property {(sql: string, params: any[]) => Promise<any>} d1QueryAdmin — for handle lookups by handle (no user_id filter)
- * @property {{ claim: (h: string) => Promise<{handle: string}>, mine: () => Promise<string|null> }} handles — handle-client instance
  */
 
 export function createProfilesNamespace(deps) {
   if (!deps) throw new TypeError('createProfilesNamespace: deps required');
-  const { d1Query, d1QueryAdmin, handles } = deps;
+  const { d1Query, d1QueryAdmin } = deps;
   if (typeof d1Query !== 'function')      throw new TypeError('createProfilesNamespace: d1Query required');
   if (typeof d1QueryAdmin !== 'function') throw new TypeError('createProfilesNamespace: d1QueryAdmin required');
-  if (!handles || typeof handles.claim !== 'function') {
-    throw new TypeError('createProfilesNamespace: handles (handle-client) required');
-  }
 
-  // Reserved handles — superset of:
-  //   1. Subdomain-conflicting names enforced by the Worker public route
-  //      (publishing.ts RESERVED_HANDLES) — defense in depth before the
-  //      DB-level handle_reservations sentinel rows from migration 141.
-  //   2. UI-route conflicting names that would shadow portal pages.
-  // Keep this list in sync with packages/worker/src/handlers/publishing.ts
-  // — both lists must include any new system reservation.
-  const RESERVED = new Set([
-    // Subdomain-conflicting (mirror Worker)
-    'www', 'cdn', 'api', 'admin', 'app', 'mycelium', 'status', 'docs',
-    'share', 'mail', 'static', 'public', 'auth', 'id', 'well-known',
-    // UI-route conflicting (portal would render the wrong page)
-    'support', 'system', 'vault', 'login', 'signup', 'profile',
-    'settings', 'help', 'about', 'discover', 'connections',
-  ]);
-  const HANDLE_RE = /^[a-z0-9][a-z0-9_]{2,29}$/;
-
+  // NOTE (QA6 handle unification): the handle SETTER + its reserved list + its
+  // validation rule used to live here (setHandle, a second RESERVED set, and an
+  // underscore-permitting HANDLE_RE that could never be a hostname). All of that
+  // moved to the ONE writer, src/identity/handle-service.js, which validates via
+  // the shared DNS-safe isValidHandle and carries the ONE reserved list. This
+  // namespace's setHandle had ZERO callers (grep-proven) — it was a multi-tenant
+  // Worker artifact (d1QueryAdmin / handle-client) never wired into V1's db
+  // assembly — so it was removed rather than left as a divergent second rule.
+  // The `handles` (cross-tenant handle-client) dep went with it: setHandle was its
+  // only consumer, so requiring it here was a constructor gate on a capability
+  // nothing used. createProfilesNamespace itself has zero callers in src/, tests/
+  // and scripts/ today — it is kept only for the V2 multi-tenant port.
   return {
     async get(userId) {
       const result = await d1Query(
@@ -100,48 +78,9 @@ export function createProfilesNamespace(deps) {
       );
     },
 
-    async setHandle(userId, handle) {
-      // Local format/reserved fast-checks. The Worker enforces the
-      // canonical (DNS-compatible) format too; this duplicates for
-      // fast-fail without a network hop and to keep the existing
-      // error messages stable for portal-profile.test.js.
-      if (!handle || !HANDLE_RE.test(handle)) {
-        throw new Error('Handle must be 3-30 chars, lowercase alphanumeric + underscore');
-      }
-      if (RESERVED.has(handle)) {
-        throw new Error('This handle is reserved');
-      }
-
-      // Step 1: claim via the typed Worker endpoint. The client
-      // throws HandleTakenError on 409 and HandleInvalidError on
-      // 400; we translate to the portal's existing error messages
-      // for callers (portal-profile route maps these via safeError).
-      // Fail-closed — if the Worker is unreachable, claim() throws
-      // and we never reach Step 2 (no silent local-only success).
-      try {
-        await handles.claim(handle);
-      } catch (e) {
-        if (e?.code === 'already_claimed') {
-          throw new Error('This handle is already taken');
-        }
-        if (e?.code === 'invalid_handle') {
-          // Worker rejected on canonical format. The local pre-check
-          // should have caught this, but keep the message coherent.
-          throw new Error('Handle must be 3-30 chars, lowercase alphanumeric + underscore');
-        }
-        throw e;
-      }
-
-      // Step 2: write the handle to the local tenant profile (cache).
-      // This used to also be the registry-write fallback; that role
-      // is gone with PR 4 — Step 1 is authoritative. The local row
-      // now is purely a denormalized display cache for the profile UI.
-      await d1Query(
-        `INSERT INTO user_profiles (user_id, handle, updated_at) VALUES (?, ?, datetime('now'))
-         ON CONFLICT (user_id) DO UPDATE SET handle = excluded.handle, updated_at = datetime('now')`,
-        [userId, handle],
-      );
-    },
+    // setHandle() removed — see the note above. The ONE writer is
+    // src/identity/handle-service.js (claim against the control plane +
+    // publicHost authority + derived user_profiles mirror).
 
     async computeFingerprint(userId) {
       // Territory + realm counts.

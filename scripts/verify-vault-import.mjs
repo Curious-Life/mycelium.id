@@ -221,10 +221,17 @@ async function main() {
     const imi = raw.prepare('SELECT COUNT(*) c FROM internal_model_items WHERE id = ?').get('imi1')?.c;
     rec('C2 internal_model_items (model internals) imported', imi === 1);
 
-    const conn = raw.prepare('SELECT user_a, user_b, status FROM connections WHERE id = ?').get('conn1');
-    rec('C3 connections imported with canonical uid remapped to the V1 user',
-      conn?.user_a === 'local-user' && conn?.user_b === 'other-user-9' && conn?.status === 'accepted',
-      `user_a=${conn?.user_a}`);
+    const conn = raw.prepare('SELECT user_a, user_b, status, accepted_at FROM connections WHERE id = ?').get('conn1');
+    // status is now forced to 'pending' on EVERY import path (restoreTable), not just
+    // the full-export one: an archive is attacker-supplyable input on both routes, and
+    // an imported connection born 'accepted' is a live sealed-send target
+    // (federationDeliver re-resolves peerDid from remote_did / remote_instance — both
+    // bundle-chosen — so scrubbing the peer-key cache alone only delays the redirect by
+    // one resolve). Cost: the user re-establishes the peer after a restore.
+    // See src/ingest/import-credential-policy.js → `connections`.
+    rec('C3 connections imported with canonical uid remapped to the V1 user, and born PENDING (never accepted)',
+      conn?.user_a === 'local-user' && conn?.user_b === 'other-user-9' && conn?.status === 'pending' && conn?.accepted_at == null,
+      `user_a=${conn?.user_a} status=${conn?.status} accepted_at=${conn?.accepted_at}`);
 
     const prov = raw.prepare('SELECT credentials FROM ai_providers WHERE id = ?').get(7);
     // SQLCipher collapse (Stage B/C cut 4): ai_providers.credentials is plaintext-in-

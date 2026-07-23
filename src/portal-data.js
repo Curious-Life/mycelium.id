@@ -18,6 +18,7 @@
 
 import express from 'express';
 import { bulkDelete, dataSummary } from './core/bulk-delete.js';
+import { beginDelete } from './core/delete-lane.js';
 
 // The data TYPES a Phase-2 delete-by-type may target (mirrors the engine's
 // TYPE_MODES). Kept here too so the router rejects a bad key before spawning a job.
@@ -78,6 +79,10 @@ export function portalDataRouter({ db, userId, searchHelpers }) {
         total: 0, processed: 0, deleted: 0, attachments: 0, blobs: 0, indexed: 0,
         mindscapeStale: false, cancelled: false, error: null, cancel: false,
       };
+      // Claim the delete lane BEFORE the job goes async, so a Generate that starts
+      // one tick later already sees it (jobs.js:startClusteringJob refuses while
+      // held). Released in the finally below — never conditionally.
+      const releaseLane = beginDelete();
       (async () => {
         try {
           const s = await bulkDelete(db, {
@@ -91,7 +96,7 @@ export function portalDataRouter({ db, userId, searchHelpers }) {
           job.status = (job.cancel || s.cancelled) ? 'cancelled' : 'done';
         } catch (e) {
           job.status = 'error'; job.error = String(e?.message || e).slice(0, 200);
-        } finally { job.finishedAt = Date.now(); }
+        } finally { job.finishedAt = Date.now(); releaseLane(); }
       })();
       return res.json({ ok: true, ...publicJob(job) });
     } catch (e) {

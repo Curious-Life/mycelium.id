@@ -645,6 +645,12 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
       }
 
       const r = startClusteringJob({ dbPath, userId, db });
+      // Reverse writer-guard (jobs.js): a bulk delete is emptying clustering_points
+      // right now, so a run would stabilize ids against a torn membership. Honest,
+      // actionable, and content-free.
+      if (r?.status === 'delete_running') {
+        return res.status(409).json({ jobId: null, status: 'delete_running', note: 'A delete is running — wait for it to finish, then Generate.' });
+      }
       res.json(r);
     } catch {
       // resolveKeys/spawn unavailable — fail closed, no internals leaked.

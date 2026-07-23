@@ -25,7 +25,7 @@ import { getActiveTurn } from './inbound-context.js';
 // telegram
 import { createTelegramApi } from './telegram-api.js';
 import { createTelegramChokepoint } from './chokepoint.js';
-import { createVoicePipeline } from './voice-pipeline.js';
+import { createVoicePipeline, createVoiceReplyPolicy } from './voice-pipeline.js';
 import { createInboundHandler } from './inbound.js';
 import { contextualizeMedia } from './media.js';
 import { createMediaQueue } from './media-queue.js';
@@ -277,6 +277,10 @@ export async function buildDaemon(cfg, { runTurn, runtime: injectedRuntime, dedu
       sendToTelegram: (a) => telegram.sendMessage(a), recordEgress, persistOutbound,
       checkAuthority: checkTelegramAuthority, dedup, rateLimit, voicePipeline, getActiveTurn, agentId: cfg.agentId,
       trustedToken,
+      // The voice toggle, consulted at REPLY TIME (QA6-VOICE). `isEnabled` reads the
+      // live TTS provider config (Settings → Voice, re-hydrated per refresh), so
+      // switching voice on/off takes effect on the next reply with no restart.
+      voiceReplyDefault: createVoiceReplyPolicy({ isEnabled: () => voicePipeline.isEnabled(), getActiveTurn }),
     });
 
     const sendReply = async ({ chatId, text, replyToMessageId, messageThreadId }) => {

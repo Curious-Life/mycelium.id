@@ -243,8 +243,79 @@ exit 1
   delete process.env.SYSTEM_KEY;
 }
 
+// ── A8) DEFERRED CONTINUOUS ROWS reach the feed HONEST (QA6) ──────────────────
+// The unified feed aggregates the CONTINUOUS projections (embed/categorize/enrich) alongside the
+// discrete background_jobs rows above — a surface this gate did not exercise at all until now. While
+// embedding still drains, the drainer serializes the on-box stages and DEFERS categorize + enrich
+// (drainer.js waitOnEmbed). Those rows must reach active[] as a SCHEDULING state — never `running`,
+// no "on device" process, no ETA — or the always-on indicator ticks a frozen, plausible, WRONG
+// countdown while PipelineStatus on the same screen says "Waiting for embedding to finish" (QA6).
+// Drive the REAL router (portalActivityRouter) with a REAL drainer forced into the deferred state via
+// an inexhaustible embed backlog (the loop caps out every cycle while still progressing).
+{
+  const { startEnrichDrainer, resumeEnrichProcessing } = await import('../src/enrich/drainer.js');
+  const { portalActivityRouter } = await import('../src/portal-activity.js');
+  const MODEL = 'qwen3.5:4b';
+  let embN = 0;
+  const memDb = {
+    users: { getSettings: async () => ({ taskModels: { categorize: { model: MODEL }, enrich: { model: MODEL } } }) },
+    async rawQuery() { return { rows: [] }; },
+    activityFeed: { async reap() {}, async active() { return []; }, async recent() { return []; } },
+    messages: {
+      // inexhaustible embed backlog ⇒ the embed loop hits its 200-batch/cycle cap while STILL
+      // progressing (embedded > 0, never drains, never stalls) ⇒ deferCategorizeForEmbed defers L1+L2.
+      async selectPendingEnrichment(_u, { limit = 50 } = {}) { return Array.from({ length: limit }, () => ({ id: `e${embN++}`, content: 'row about minds', scope: null, nlp_error: null })); },
+      async updateEnrichment() {},
+      async selectPendingCategories() { return []; },   // deferred ⇒ the L1 loop never reaches this
+      async updateCategories() {},
+      async selectPendingNlp() { return []; },
+      async updateNlp() {},
+      async embedBacklogCached() { return { embedded: 0, total: 100000, pending: 100000 }; },
+      async categoriesBacklogCached() { return { tagged: 100, total: 1000, pending: 900 }; },   // pending>0 ⇒ the row renders
+      async nlpBacklogCached() { return { done: 50, total: 1000, pending: 950 }; },
+    },
+  };
+  resumeEnrichProcessing();
+  const d = startEnrichDrainer({
+    db: memDb, userId: U, intervalMs: 10_000_000, log: () => {},
+    classify: async () => ({ domain: 'Mind & Growth', register: 'Inquiry', subregister: 'Map' }),
+    enrich: async () => ({ entities: ['x'], tags: ['y'], entitySummary: 'z' }),
+    daemon: { calls: 0, async ensureUp() { this.calls++; return { ok: true, running: true }; } },
+    ollama: { async listInstalled() { return [MODEL]; }, async pullModel() { return true; } },
+    embed: { async health() { return { status: 'ok', loaded: true, dim: 768 }; }, async embed() { return new Array(768).fill(0.01); } },
+  });
+  // The deferral arms only AFTER the embed loop caps out this cycle; the huge interval means cycle 2
+  // never starts, so once true it stays true while the router reads the projections.
+  let deferred = false;
+  for (let i = 0; i < 800; i++) { if (d.status()?.categorizeWaitingOnEmbed === true) { deferred = true; break; } await new Promise((r) => setTimeout(r, 25)); }
+
+  const router = portalActivityRouter({ db: memDb, userId: U, authenticatePortalRequest: () => U });
+  const call = (url) => new Promise((resolve) => {
+    const req = { method: 'GET', url, headers: {} };
+    const res = { statusCode: 200, status(cc) { this.statusCode = cc; return this; }, json(o) { resolve({ status: this.statusCode, body: o }); } };
+    router(req, res, (e) => resolve({ status: 500, body: { e: String(e) } }));
+  });
+  const r = await call('/activity');
+  d.stop();
+  const catRow = (r.body?.active || []).find((x) => x.kind === 'categorize');
+  const enrRow = (r.body?.active || []).find((x) => x.kind === 'enrich');
+  rec('A8. a DEFERRED categorize row reaches the feed as a scheduling state — not "running", no "on device", no ETA',
+    deferred && !!catRow && catRow.status === 'waiting' && catRow.status !== 'running'
+      && catRow.process === null && catRow.etaSeconds === null && / waiting for embedding$/.test(catRow.stage),
+    `deferred=${deferred} · categorize row=${JSON.stringify(catRow)}`);
+  rec('A8b. a DEFERRED enrich row reaches the feed the same honest way',
+    !!enrRow && enrRow.status === 'waiting' && enrRow.process === null && enrRow.etaSeconds === null
+      && / waiting for embedding$/.test(enrRow.stage),
+    `enrich row=${JSON.stringify(enrRow)}`);
+  // CONTROL: prove the deferred shape is NOT the trivial "no model / paused" one — the model IS
+  // approved and processing is resumed, so a bare `running` would have rendered without the arm.
+  rec('A8c. control: the deferral is the ONLY reason the row is not running (model approved, not paused)',
+    !!catRow && catRow.model === MODEL && catRow.remaining > 0,
+    `model=${catRow?.model} remaining=${catRow?.remaining}`);
+}
+
 raw.close();
 close();
 const okAll = ledger.every(Boolean);
-console.log(`VERDICT: ${okAll ? 'GO' : 'NO-GO'} — activity feed: begin/heartbeat/finish/active/recent + fail-closed reap + content-free + failure-reason leak (A6) + terminal-on-spawn-failure (A7)  EXIT=${okAll ? 0 : 1}`);
+console.log(`VERDICT: ${okAll ? 'GO' : 'NO-GO'} — activity feed: begin/heartbeat/finish/active/recent + fail-closed reap + content-free + failure-reason leak (A6) + terminal-on-spawn-failure (A7) + deferred continuous rows honest in the feed (A8)  EXIT=${okAll ? 0 : 1}`);
 process.exit(okAll ? 0 : 1);

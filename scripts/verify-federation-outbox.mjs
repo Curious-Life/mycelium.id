@@ -28,9 +28,11 @@ const bobDoc = buildDidDocument('bob.mycelium.id', bob.publicKeyB64, null, bob.k
 let relayUp = true;       // toggles the relay's /v1/queue/enqueue reachability
 let failNextEnqueues = 0; // reject the next N enqueues even when relayUp (mid-batch failure model)
 const enqueues = [];
+const sharePosts = []; // captured DIRECT-transport /share bodies (announceShare egress — unsealed)
 const okJson = (o, s = 200) => ({ ok: s >= 200 && s < 300, status: s, async json() { return o; }, async text() { return JSON.stringify(o); } });
 function shimFetch(urlStr, init = {}) {
   const u = new URL(urlStr); const body = init.body ? JSON.parse(init.body) : null;
+  if (u.pathname.endsWith('/share')) { sharePosts.push(body); return Promise.resolve(okJson({ ok: true })); }
   if (u.pathname === '/v1/queue/enqueue') {
     if (!relayUp) return Promise.reject(new Error('ECONNREFUSED (relay down)'));
     if (failNextEnqueues > 0) { failNextEnqueues--; return Promise.reject(new Error('enqueue rejected (transient)')); }
@@ -160,6 +162,34 @@ try {
   rec('O7. a message at the attempt cap is not swept (dead peer left alone; not retried forever)',
     r7.retried === 0 && statusOf('only') === 'failed' && rowOf('only').send_attempts === 10,
     `retried=${r7.retried} status=${statusOf('only')} attempts=${rowOf('only').send_attempts}`);
+
+  // ── O8 (QA6 re-review): the outbound `from_handle` on the WIRE is the FEDERATION handle
+  //    ('alice' — what a peer WebFingers back, acct:<handle>@<host>), NEVER the internal userId
+  //    ('alice-user'). A concat/computed key (`['from_'+'handle']: userId`) at connections.js
+  //    :892/:948/:1168 evades the STATIC regex in verify:handle (it drops the literal token from
+  //    both counts equally); these assert the VALUE the peer actually receives, per egress path.
+  //    Shipping the opaque userId breaks the reverse handshake AND leaks an internal id (§1/§4g).
+  sq.exec(`DELETE FROM peer_messages`);
+  relayUp = true; failNextEnqueues = 0;
+  // (a) DIRECT send — connections.js sendMessage (:892), relay reachable at send → sealed envelope.
+  const dsend = await send('direct-egress handle check');
+  const dPayload = await unsealTo(enqueues[enqueues.length - 1].body.envelope);
+  rec('O8a. sendMessage egress from_handle is the federation handle "alice", never the userId "alice-user"',
+    statusOf(dsend.id) === 'delivered' && dPayload.from_handle === 'alice' && dPayload.from_handle !== 'alice-user',
+    `status=${statusOf(dsend.id)} from_handle=${dPayload.from_handle}`);
+  // (b) OUTBOX retry — connections.js federationOutbox (:948): a send that failed, then a sweep.
+  relayUp = false; const osend = await send('outbox-egress handle check'); relayUp = true;
+  await conns.federationOutbox('alice-user');
+  const oPayload = await unsealTo(enqueues[enqueues.length - 1].body.envelope);
+  rec('O8b. federationOutbox egress from_handle is the federation handle "alice", never the userId',
+    statusOf(osend.id) === 'delivered' && oPayload.from_handle === 'alice' && oPayload.from_handle !== 'alice-user',
+    `status=${statusOf(osend.id)} from_handle=${oPayload.from_handle}`);
+  // (c) SHARE announce — connections.js announceShare (:1168): DIRECT transport, unsealed canonical JSON.
+  await conns.announceShare('alice-user', 'conn-1', { kind: 'context', ref: 'ctx-egress', name: 'n' });
+  const sharePayload = sharePosts[sharePosts.length - 1];
+  rec('O8c. announceShare egress from_handle is the federation handle "alice", never the userId',
+    !!sharePayload && sharePayload.from_handle === 'alice' && sharePayload.from_handle !== 'alice-user',
+    `from_handle=${sharePayload?.from_handle}`);
 } catch (e) {
   rec('FATAL', false, String(e && e.stack || e));
 }

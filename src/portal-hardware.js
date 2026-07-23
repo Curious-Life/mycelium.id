@@ -17,6 +17,7 @@ import { createOllamaClient, isValidModelName, classifyOllamaFault } from './har
 import { ONBOX_TASKS } from './inference/resolve.js';   // deleting a LOCAL file may only revoke LOCAL approvals
 import { createOllamaDaemon } from './hardware/ollama-daemon.js';
 import { CATALOG } from './hardware/catalog.js';
+import { normalizeHealth } from './system/service-state.js';
 
 const CATALOG_NAMES = new Set(CATALOG.map((m) => m.name));
 
@@ -25,6 +26,12 @@ const CATALOG_NAMES = new Set(CATALOG.map((m) => m.name));
 // map the fault CODE — the point of N2 is that this must NOT read as the generic "check your
 // network". Mirrors drainer.js FAULT_MESSAGE[INCOMPATIBLE_RUNTIME] + IntelligenceFlow's copy.
 const INCOMPATIBLE_RUNTIME_MSG = 'Your Ollama runtime is too old for this model — upgrade Ollama, or let Mycelium manage its own.';
+
+// POST /hardware/retry answer budget (LOW-6): how long we let a bring-up run before answering with
+// the honest in-progress health rather than blocking on a multi-hundred-MB runtime download. The
+// download itself continues in the daemon's single-flight; the client polls GET /hardware/ollama.
+// Read at request time (not frozen at import) so a gate can drive the bounded path with a small budget.
+const retryBringupBudgetMs = () => Number(process.env.MYCELIUM_RETRY_BRINGUP_MS) || 3000;
 
 /**
  * @param {object} [deps]
@@ -40,8 +47,18 @@ const INCOMPATIBLE_RUNTIME_MSG = 'Your Ollama runtime is too old for this model 
  *                                    persist the decline.
  * @param {string} [deps.userId]      owner id for the settings write.
  */
-export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, detect = detectHardware, daemon, db = null, userId = null } = {}) {
+export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, detect = detectHardware, daemon, db = null, userId = null, authenticatePortalRequest = null } = {}) {
   const router = express.Router();
+  // Session gate for the routes that ACT on the daemon (retry). Optional so the existing
+  // verify mounts keep working; when absent the route is still behind the global /api
+  // owner gate that fronts every /api/v1/portal mount (server-rest.js) — this is the
+  // second, per-router layer (CLAUDE.md §2 defence in depth), never the only one.
+  const gate = (req, res) => {
+    if (typeof authenticatePortalRequest !== 'function') return true;
+    if (authenticatePortalRequest(req)) return true;
+    res.status(401).json({ ok: false, error: 'Unauthorized' });
+    return false;
+  };
   const ollamaDaemon = daemon || createOllamaDaemon({ baseUrl: ollamaUrl, fetch });
   // Resolve the ollama client at USE time from the daemon's EFFECTIVE base, so after an alt-port
   // self-heal (ollama-daemon.js getBaseUrl) every list/pull/delete here dials the healed port
@@ -86,6 +103,66 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
   router.post('/hardware/start', async (_req, res) => {
     try { res.json({ ...(await ollamaDaemon.ensureUp()) }); }
     catch { res.status(500).json({ ok: false, error: 'start failed' }); }
+  });
+
+  // ── GET /hardware/ollama — the TRUE daemon health, as a pure read ────────────
+  // The honest-state read behind every Ollama surface. Never starts anything (see
+  // ollama-daemon.js health()), so it is safe to poll and cannot become a hidden
+  // spawn path. `state`/`retryable` come from the ONE shared taxonomy
+  // (src/system/service-state.js) so the panel never re-derives its own line
+  // between "loading" and "broken" — the conflation that painted a red indicator
+  // over a runtime that was merely starting.
+  router.get('/hardware/ollama', async (_req, res) => {
+    try {
+      const h = await ollamaDaemon.health?.();
+      if (!h) return res.status(503).json({ ok: false, error: 'daemon health unavailable' });
+      res.json({ ok: true, ollama: { ...normalizeHealth(h), installed: !!h.installed, running: !!h.running, baseUrl: h.baseUrl ?? null } });
+    } catch { res.status(500).json({ ok: false, error: 'health read failed' }); }
+  });
+
+  // ── POST /hardware/retry — the owner's escape hatch for a dead Ollama ─────────
+  // THE §1 un-strand. On first open the categorize model showed unavailable, the
+  // details said the runtime could not be detected, and there was NOTHING to press;
+  // it silently self-healed later. Mirrors POST /portal/embed/retry (#318) exactly:
+  //
+  //   1. re-attempt bring-up through the ONE path — ollamaDaemon.ensureUp(). Every
+  //      guarantee that path carries is untouched and deliberately NOT bypassed here:
+  //      the single-flight, the >= OLLAMA_MIN_VERSION adopt gate, the alt-port
+  //      self-heal for a too-old squatter, and the OLLAMA_SPAWN_CAPS RAM caps (#312).
+  //      This route only presses the button the boot path already presses.
+  //   2. RE-READ the world and answer with THAT — never with the attempt's own claim.
+  //      `ensureUp()` returning ok:false while the daemon in fact came up (or the
+  //      reverse, after a self-heal moved the port) must resolve in favour of the
+  //      probe. So a retry that did not help stays honestly failed, and one that did
+  //      shows ready — we never say "retried ✓" on the strength of having tried.
+  //
+  // Fail-SAFE: ensureUp() may reject (spawn/install throw); we swallow it and still
+  // report the re-read health, because a thrown bring-up is not evidence the daemon
+  // is down — the probe is.
+  router.post('/hardware/retry', async (req, res) => {
+    if (!gate(req, res)) return;
+    // BOUND THE BRING-UP (LOW-6). ensureUp() DOWNLOADS the pinned Ollama runtime (hundreds of MB)
+    // when the binary is absent — and this JSON route has no progress channel, so a naive `await`
+    // held the request open with the button frozen on "Checking…" for the whole silent fetch. We
+    // still PRESS the one bring-up path (its single-flight, version-gate, adopt/self-heal and spawn
+    // caps all intact and NOT bypassed), but we do not block the response on a long download: once a
+    // bring-up is inflight, health() reports 'starting' ⇒ 'loading', so we answer with that honest
+    // in-progress state and the client's GET /portal/hardware/ollama poll renders "Downloading
+    // runtime…" instead of a hung button. A fast bring-up (already installed) still resolves within
+    // the budget and is reflected exactly as before.
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => ollamaDaemon.ensureUp?.()).catch(() => {}),
+        new Promise((r) => setTimeout(r, retryBringupBudgetMs())),
+      ]);
+    } catch { /* best-effort — the RE-READ below is what we answer with, not this */ }
+    try {
+      const h = await ollamaDaemon.health?.();
+      if (!h) return res.status(503).json({ ok: false, error: 'daemon health unavailable' });
+      const norm = normalizeHealth(h);
+      // `ok` describes the WORLD (is it running now), never "the request was accepted".
+      res.json({ ok: norm.state === 'ready', ollama: { ...norm, installed: !!h.installed, running: !!h.running, baseUrl: h.baseUrl ?? null } });
+    } catch { res.status(500).json({ ok: false, error: 'retry failed' }); }
   });
 
   // POST /hardware/pull { name } — stream Ollama pull progress as SSE. The name

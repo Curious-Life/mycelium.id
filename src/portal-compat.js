@@ -1,12 +1,15 @@
 import express from 'express';
 import { createReadiness } from './readiness.js';
-import { getEmbedderHealth } from './embed/supervisor.js';
+import { getEmbedderHealth, getEmbedSupervisor } from './embed/supervisor.js';
 import { nudgeEnrichDrainer, resetPullBackoff, resetEnrichGiveUpCounters, pauseEnrichProcessing, resumeEnrichProcessing, pauseEmbed, resumeEmbed, pauseCategorize, resumeCategorize, isCategorizePaused, defaultLabelModel } from './enrich/drainer.js';
 import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
 import { createInferenceRouter } from './inference/router.js';
-import { isValidHandle } from './identity/identity.js';
+// The ONE handle writer + the ONE authoritative read. Validation (isValidHandle),
+// the single reserved list, the control-plane availability check and the claim all
+// live there — this router never touches user_profiles.handle itself.
+import { setHandle, checkAvailability, currentHandle, pendingHandle, mirrorProfileHandle } from './identity/handle-service.js';
 import { computeContentHash, validatePath, SaveDocumentError } from './core/document-store.js';
 import { resolveKeyAgreementKey } from './federation/did.js';
 import { applyShareGrant, applyShareRevoke } from './federation/space-membership.js';
@@ -383,12 +386,12 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   // — plaintext by design, not in ENCRYPTED_FIELDS). Cognitive scores
   // (depth/breadth/coherence/exploration) are pipeline-computed (Tier-2) and stay
   // null until clustering runs. apiGet throws on non-200, so GET must always 200.
-  // Handle validation is UNIFIED on the DNS-safe rule in identity.js (isValidHandle:
-  // 2-32 chars, a–z0–9 + internal dashes, no leading/trailing dash, NO underscore) so a
-  // profile handle is always a valid <handle>.mycelium.id subdomain / did:web label.
-  // This layer previously allowed underscores that can never be a hostname (the bug).
-  const RESERVED_HANDLES = new Set(['admin', 'api', 'www', 'app', 'mycelium', 'settings', 'profile', 'login', 'support', 'system', 'public', 'auth', 'id']);
-  const HANDLE_HINT = '2–32 chars: a–z, 0–9, and dashes (no leading/trailing dash)';
+  // HANDLE: this router is NOT a writer. `user_profiles.handle` is a DERIVED
+  // MIRROR of firstLabel(remote.json publicHost) — see src/identity/handle-service.js
+  // for why (a bare `UPDATE user_profiles SET handle=?` here used to be COSMETIC:
+  // no claim, no DNS, no did:web, and the Profile screen then advertised a
+  // <handle>.mycelium.id that did not exist). Validation, the reserved list, the
+  // availability check and the claim all live in the ONE setter.
 
   const countOf = async (fn) => { try { return await fn(); } catch { return 0; } };
   async function readProfile() {
@@ -405,9 +408,16 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
     const message_count = await countOf(() => db.messages.countByUser(userId));
     const territory_count = await countOf(async () => (await db.mindscape.getTerritoryProfiles(userId)).length);
     const realm_count = await countOf(async () => (await db.mindscape.getRealms(userId)).length);
+    // handle is DERIVED from the authoritative store (publicHost), never read from
+    // the row — the row is only a mirror and a stale one would re-create the exact
+    // divergence this unification removes. `pending_handle` is a name the owner
+    // picked that is not claimed yet; the UI must render it as NOT yet live.
+    const handle = currentHandle();
     return {
       display_name: row.display_name || 'You',
-      handle: row.handle || null,
+      handle,
+      handle_claimed: handle ? 1 : 0,
+      pending_handle: handle ? null : pendingHandle(),
       avatar_url: row.avatar_url || null,
       signature: row.signature || null,
       // Public Space (#19): the enable flag + the intentionally-public bio.
@@ -428,14 +438,12 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   });
 
   // GET /profile/handle/check?handle=… → { available, reason? }
+  // Hits the CONTROL PLANE — the only authority. It used to query the LOCAL
+  // user_profiles table, which in a single-user vault says "available" for every
+  // name on earth, so onboarding promised handles the relay then 409'd.
+  // FAIL CLOSED: unreachable → available:false with a distinguishable reason.
   router.get('/profile/handle/check', async (req, res) => {
-    const h = typeof req.query.handle === 'string' ? req.query.handle.trim().toLowerCase() : '';
-    if (!isValidHandle(h)) return ok(res, { available: false, reason: HANDLE_HINT });
-    if (RESERVED_HANDLES.has(h)) return ok(res, { available: false, reason: 'reserved' });
-    try {
-      const r = await db.rawQuery(`SELECT user_id FROM user_profiles WHERE handle = ? AND user_id != ?`, [h, userId]);
-      ok(res, { available: !((r.results || r || []).length) });
-    } catch { ok(res, { available: true }); }
+    ok(res, await checkAvailability(req.query.handle));
   });
 
   // PUT /profile → update handle / display_name / signature → { ok, profile }
@@ -443,11 +451,20 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
     try {
       const body = req.body || {};
       const sets = [], params = [];
+      // HANDLE → delegate to the ONE setter (claim + publicHost + mirror). We never
+      // write `handle` into `sets` — that bare UPDATE was the cosmetic-handle bug.
+      // A failed claim is IDENTITY-AFFECTING: surface it, never swallow it.
+      let handleResult = null;
       if (typeof body.handle === 'string') {
-        const h = body.handle.trim().toLowerCase();
-        if (!isValidHandle(h)) return fail(res, 400, `invalid handle (${HANDLE_HINT})`);
-        if (RESERVED_HANDLES.has(h)) return fail(res, 400, 'that handle is reserved');
-        sets.push('handle = ?'); params.push(h);
+        try {
+          handleResult = await setHandle({
+            handle: body.handle,
+            mirror: (h) => mirrorProfileHandle(db, userId, h),
+          });
+        } catch (e) {
+          const st = Number.isInteger(e?.status) ? e.status : 400;
+          return fail(res, st, e?.message || 'could not set that handle');
+        }
       }
       // Validate-don't-silently-slice: a too-long name is rejected (the user
       // learns), not quietly truncated. The signature/bio is free-text content —
@@ -460,10 +477,14 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
       // Public Space (#19): enable flag (0/1) + the public bio (free text, bounded).
       if (body.public_space_enabled !== undefined) { sets.push('public_space_enabled = ?'); params.push(body.public_space_enabled ? 1 : 0); }
       if (typeof body.public_bio === 'string') { sets.push('public_bio = ?'); params.push(clampStored(body.public_bio)); }
-      if (!sets.length) return fail(res, 400, 'nothing to update');
-      await ensureRow();
-      await db.rawQuery(`UPDATE user_profiles SET ${sets.join(', ')}, updated_at = datetime('now') WHERE user_id = ?`, [...params, userId]);
-      ok(res, { ok: true, profile: await readProfile() });
+      if (!sets.length && !handleResult) return fail(res, 400, 'nothing to update');
+      if (sets.length) {
+        await ensureRow();
+        await db.rawQuery(`UPDATE user_profiles SET ${sets.join(', ')}, updated_at = datetime('now') WHERE user_id = ?`, [...params, userId]);
+      }
+      // `handle` echoes the setter's honest outcome: claimed (live address, needs a
+      // restart for the signing identity) vs recorded-but-not-claimed.
+      ok(res, { ok: true, profile: await readProfile(), ...(handleResult ? { handle: handleResult } : {}) });
     } catch { fail(res, 500, 'could not save profile'); }
   });
 
@@ -1171,6 +1192,29 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
       // read these. messageCount drives hasImportedData.
       steps: { data: { messageCount: total, enrichedCount: embedded, enrichmentPending: pending, enrichmentUnprocessable: unprocessable } },
     });
+  });
+
+  // ── Retry the embedder (the bundled Nomic model) ────────────────────────────
+  // THE fresh-install un-hang. The embedder is NOT infallibly "bundled + ok": it
+  // downloads its ONNX weights from HuggingFace at first load (embed-service.py
+  // _load_model → hf_hub_download nomic-embed-text-v1.5). That download can fail
+  // (network/HF/disk), the deps can be missing (dev), or the restart governor can
+  // HALT after repeated crashes — and a dead embedder means the drainer embeds
+  // nothing → Generate preflight 409s forever → "Processing 0/N" with no escape.
+  // This is the user's escape hatch, wired to the ONE resume path:
+  //   • embedSup.nudge()  — resumes a halted governor + forces an immediate
+  //                         re-evaluate (adopt/deps-recheck/respawn as needed).
+  //   • nudgeEnrichDrainer() — kicks a drain so a live-but-'error' service gets an
+  //                         /embed that re-calls _load_model() → re-downloads now.
+  // Best-effort + fail-SAFE: nudge is never awaited to a success (the download is
+  // async on the service side), and a null supervisor (verify/injected-keys boot)
+  // is a no-op — we NEVER claim a retry succeeded. The response reflects REAL
+  // health from the one source, so the UI shows the true state (still loading /
+  // deps_missing with the actionable hint / recovered), never a fake ✓.
+  router.post('/embed/retry', (_req, res) => {
+    try { getEmbedSupervisor()?.nudge?.(); } catch { /* best-effort — nudge must never throw the route */ }
+    try { nudgeEnrichDrainer(); } catch { /* best-effort — a nudge is a hint, not a contract */ }
+    ok(res, { ok: true, health: getEmbedderHealth() });
   });
 
   // ── Enrichment (embedding backlog) status/trigger/progress ──────────────────

@@ -57,6 +57,19 @@ let _instance = null;
  */
 export function getEmbedderHealth() { return { ..._health }; }
 
+/**
+ * The live supervisor instance, or null if none is running (verify scripts,
+ * injected-keys boots, or before startEmbedSupervisor). Lets a route (POST
+ * /portal/embed/retry) reach nudge() — the resume-out-of-a-halt path — WITHOUT
+ * plumbing the handle through server-rest's boot closure. Null-safe by design:
+ * the retry route treats a null handle as "nothing to nudge" and just returns
+ * the current health, never throwing. Unlike startEmbedSupervisor() this NEVER
+ * starts a service — a retry must not spawn a python process on a box that
+ * deliberately has none (a verify run, an injected-keys boot).
+ * @returns {{getHealth:Function,nudge:Function,stop:Function}|null}
+ */
+export function getEmbedSupervisor() { return _instance; }
+
 function resolvePython({ home, pythonBin }) {
   if (pythonBin) return pythonBin;
   if (process.env.MYCELIUM_PYTHON) return process.env.MYCELIUM_PYTHON;
@@ -97,6 +110,7 @@ export function startEmbedSupervisor({
   let spawnedByUs = false;   // never kill a service we merely adopted
   let failures = 0;          // consecutive crashes (drives backoff + 'down')
   let nextStartAt = 0;       // backoff gate (epoch ms)
+  let startInFlight = false;  // a tryStart is between its guard and its spawn — see below
   let stopped = false;
   let errBuf = '';
   let tickTimer = null;
@@ -176,48 +190,63 @@ export function startEmbedSupervisor({
   }
 
   // Adopt-or-spawn. Only runs when :8091 is unreachable and no child is alive.
+  //
+  // ⚠️ IN-FLIGHT LATCH (startInFlight). The `child` guard alone does NOT close a double-spawn:
+  // `child` is set only AFTER `await checkDeps()` (~100-300ms), so two concurrent ticks — a Retry
+  // mashed across two surfaces, or a nudge racing the 3s background tick — could BOTH pass the guard
+  // during the checkDeps window and spawn a second embed-service.py on :8091. It self-heals (the
+  // loser dies at bind → down flash → recovers), but a second resident local-model process is
+  // exactly what the P0 caps work exists to prevent. The latch is set SYNCHRONOUSLY at the top
+  // (before any await) and cleared in a finally, so a concurrent tryStart's synchronous guard check
+  // always sees it — no interleaving is possible before the first await. It composes with the
+  // `child` guard (both must be clear to proceed) and can never deadlock (always cleared).
   async function tryStart() {
-    if (stopped || child || Date.now() < nextStartAt) return;
+    if (stopped || child || startInFlight || Date.now() < nextStartAt) return;
     if (governor.isHalted()) return; // bounded: no more attempts until nudge()/resume
 
-    if (!(await checkDeps())) {
-      setHealth('deps_missing', 'The embedding engine needs setup — run: bash pipeline/setup.sh', `python: ${python}`);
-      nextStartAt = Date.now() + DEPS_RETRY_MS; // recover promptly once deps appear (no crash-backoff)
-      return;
-    }
-
-    setHealth('starting', failures ? 'Restarting the embedding engine…' : 'Starting the embedding engine…');
+    startInFlight = true;
     try {
-      child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(port)], {
-        cwd: home, env: childEnv(), stdio: ['ignore', 'ignore', 'pipe'],
-      });
-    } catch (e) {
-      setHealth('down', 'Could not start the embedding engine.', String(e?.message || e));
-      failures++; backoff(); return;
-    }
-    spawnedByUs = true; errBuf = '';
-    child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
-    child.on('error', () => { /* surfaced via exit/last stderr */ });
-    child.on('exit', (code) => {
-      const wasOurs = child;
-      child = null;
-      if (stopped || !wasOurs) return;
-      const tail = lastErrLine();
-      // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
-      if (looksLikePortConflict(errBuf)) {
-        log(`[embed-supervisor] embed-service exited (code ${code}) — port :${port} conflict${tail ? `: ${tail}` : ''}`);
-        void handlePortConflict();
+      if (!(await checkDeps())) {
+        setHealth('deps_missing', 'The embedding engine needs setup — run: bash pipeline/setup.sh', `python: ${python}`);
+        nextStartAt = Date.now() + DEPS_RETRY_MS; // recover promptly once deps appear (no crash-backoff)
         return;
       }
-      failures++;
-      if (failures >= DOWN_AFTER) {
-        setHealth('down', 'The embedding engine keeps stopping. Check that its dependencies are installed (bash pipeline/setup.sh).', tail || `exited code ${code}`);
-      } else {
-        setHealth('starting', 'Restarting the embedding engine…', tail || `exited code ${code}`);
+
+      setHealth('starting', failures ? 'Restarting the embedding engine…' : 'Starting the embedding engine…');
+      try {
+        child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(port)], {
+          cwd: home, env: childEnv(), stdio: ['ignore', 'ignore', 'pipe'],
+        });
+      } catch (e) {
+        setHealth('down', 'Could not start the embedding engine.', String(e?.message || e));
+        failures++; backoff(); return;
       }
-      backoff();
-      log(`[embed-supervisor] embed-service exited (code ${code}) — restart #${failures} scheduled${tail ? `: ${tail}` : ''}`);
-    });
+      spawnedByUs = true; errBuf = '';
+      child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
+      child.on('error', () => { /* surfaced via exit/last stderr */ });
+      child.on('exit', (code) => {
+        const wasOurs = child;
+        child = null;
+        if (stopped || !wasOurs) return;
+        const tail = lastErrLine();
+        // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
+        if (looksLikePortConflict(errBuf)) {
+          log(`[embed-supervisor] embed-service exited (code ${code}) — port :${port} conflict${tail ? `: ${tail}` : ''}`);
+          void handlePortConflict();
+          return;
+        }
+        failures++;
+        if (failures >= DOWN_AFTER) {
+          setHealth('down', 'The embedding engine keeps stopping. Check that its dependencies are installed (bash pipeline/setup.sh).', tail || `exited code ${code}`);
+        } else {
+          setHealth('starting', 'Restarting the embedding engine…', tail || `exited code ${code}`);
+        }
+        backoff();
+        log(`[embed-supervisor] embed-service exited (code ${code}) — restart #${failures} scheduled${tail ? `: ${tail}` : ''}`);
+      });
+    } finally {
+      startInFlight = false;
+    }
   }
 
   async function tick() {

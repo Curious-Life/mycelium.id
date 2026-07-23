@@ -203,4 +203,16 @@ async function run() {
   }
 }
 
-run().catch(err => { console.error('[sync] Fatal:', err); process.exit(1); });
+// Surface the REAL cause. `console.error('[sync] Fatal:', err)` prints the whole
+// stack, so the LAST stderr line is a `    at …` frame — and jobs.js's lastErrLine()
+// takes exactly that last line, which is why every failure here was reported to the
+// user as a bare "failed at step 1/16 (exit 1)". Print the stack FIRST (for the log),
+// then a single trimmed one-line cause LAST so lastErrLine() picks up something
+// honest. §1: the message is an error string only — this script never puts row
+// content or plaintext in an Error, and we take only the first line, capped.
+run().catch((err) => {
+  const cause = String(err?.message || err || 'unknown error').split('\n')[0].trim().slice(0, 200);
+  if (err?.stack) console.error('[sync] Fatal:', err.stack);
+  console.error(`[sync] FAILED: ${cause}`);
+  process.exit(1);
+});

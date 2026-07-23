@@ -133,8 +133,10 @@ UMAP_N_COMPONENTS_VIZ = 3
 UMAP_N_NEIGHBORS_VIZ = 15
 UMAP_MIN_DIST_VIZ = 0.1
 
-# Jaccard stabilization
-JACCARD_THRESHOLD = 0.3  # minimum overlap to consider a match
+# Jaccard stabilization — ONE definition, owned by pipeline/stabilize.py (the
+# module the stabilization gate imports). Re-exported so existing references here
+# and in the lab scripts keep resolving to the same number.
+from stabilize import JACCARD_THRESHOLD, stabilize_ids  # noqa: E402
 
 # ── API Helpers ────────────────────────────────────────────────────
 
@@ -1163,190 +1165,9 @@ def run_clustering(embeddings: np.ndarray) -> dict:
 
 # ── Jaccard Stabilization ──────────────────────────────────────────
 
-def stabilize_ids(
-    old_assignments: dict[str, int],
-    new_assignments: dict[str, int],
-    level: str,
-    anchored_ids: set = None,
-    old_centroids: dict = None,
-    new_centroids: dict = None,
-) -> tuple[dict[int, int], list[dict], list[dict]]:
-    """
-    Match new cluster IDs to old ones by Jaccard membership overlap.
-    Anchored territories get extra protection: lower Jaccard threshold + centroid backup.
-
-    Returns:
-        id_mapping: {new_id: stable_id} for relabeling
-        events: list of growth event dicts
-        lineage: list of {old_id, new_id, message_count, transfer_strength, is_dominant}
-                 for dissolved territories
-    """
-    anchored_ids = anchored_ids or set()
-
-    if not old_assignments:
-        # First run — all clusters are newly formed
-        unique_new = set(new_assignments.values()) - {-1}
-        events = []
-        for cid in unique_new:
-            members = [k for k, v in new_assignments.items() if v == cid]
-            events.append({
-                'event_type': 'formed',
-                'cluster_id': int(cid),
-                'point_count': len(members),
-                'point_delta': len(members),
-            })
-        return {cid: cid for cid in unique_new}, events, []
-
-    # Build membership sets
-    old_clusters = defaultdict(set)
-    for pid, cid in old_assignments.items():
-        if cid is not None and cid >= 0:
-            old_clusters[cid].add(pid)
-
-    new_clusters = defaultdict(set)
-    for pid, cid in new_assignments.items():
-        if cid >= 0:
-            new_clusters[cid].add(pid)
-
-    # Compute Jaccard similarity matrix
-    id_mapping = {}
-    matched_old = set()
-    matched_new = set()
-    events = []
-
-    # Find best matches by Jaccard score
-    # Anchored territories get a lower threshold (0.15 instead of 0.3)
-    ANCHORED_THRESHOLD = 0.15
-    matches = []
-    for new_id, new_members in new_clusters.items():
-        for old_id, old_members in old_clusters.items():
-            intersection = len(new_members & old_members)
-            union = len(new_members | old_members)
-            jaccard = intersection / union if union > 0 else 0
-            threshold = ANCHORED_THRESHOLD if old_id in anchored_ids else JACCARD_THRESHOLD
-            if jaccard >= threshold:
-                matches.append((jaccard, new_id, old_id))
-
-    # Greedy matching: best Jaccard first
-    matches.sort(reverse=True)
-    for jaccard, new_id, old_id in matches:
-        if new_id in matched_new or old_id in matched_old:
-            continue
-
-        id_mapping[new_id] = old_id
-        matched_new.add(new_id)
-        matched_old.add(old_id)
-
-        old_count = len(old_clusters[old_id])
-        new_count = len(new_clusters[new_id])
-        delta = new_count - old_count
-
-        if delta > 0:
-            event_type = 'grew'
-        elif delta == 0:
-            event_type = 'stable'
-        else:
-            event_type = 'stable'  # Shrunk slightly, still stable
-
-        events.append({
-            'event_type': event_type,
-            'cluster_id': int(old_id),
-            'old_cluster_ids': json.dumps([int(old_id)]),
-            'jaccard_score': round(jaccard, 3),
-            'point_count': new_count,
-            'point_delta': delta,
-        })
-
-    # New clusters (no match to any old)
-    next_id = max(list(old_clusters.keys()) + list(new_clusters.keys())) + 1 if old_clusters or new_clusters else 0
-    for new_id in new_clusters:
-        if new_id not in matched_new:
-            id_mapping[new_id] = next_id
-            events.append({
-                'event_type': 'formed',
-                'cluster_id': int(next_id),
-                'point_count': len(new_clusters[new_id]),
-                'point_delta': len(new_clusters[new_id]),
-            })
-            next_id += 1
-
-    # Centroid-similarity backup for unmatched anchored territories
-    # If an anchored territory failed Jaccard, try matching by embedding centroid
-    if old_centroids and new_centroids:
-        unmatched_anchored = [oid for oid in anchored_ids if oid in old_clusters and oid not in matched_old]
-        for old_id in unmatched_anchored:
-            old_c = old_centroids.get(old_id)
-            if old_c is None:
-                continue
-            best_sim, best_new = 0, None
-            for new_id in new_clusters:
-                if new_id in matched_new:
-                    continue
-                new_c = new_centroids.get(new_id)
-                if new_c is None:
-                    continue
-                # Cosine similarity
-                dot = sum(a * b for a, b in zip(old_c, new_c))
-                na = sum(a * a for a in old_c) ** 0.5
-                nb = sum(b * b for b in new_c) ** 0.5
-                sim = dot / (na * nb) if na * nb > 0 else 0
-                if sim > best_sim:
-                    best_sim, best_new = sim, new_id
-            if best_new is not None and best_sim >= 0.85:
-                id_mapping[best_new] = old_id
-                matched_new.add(best_new)
-                matched_old.add(old_id)
-                old_count = len(old_clusters[old_id])
-                new_count = len(new_clusters[best_new])
-                events.append({
-                    'event_type': 'stable',
-                    'cluster_id': int(old_id),
-                    'old_cluster_ids': json.dumps([int(old_id)]),
-                    'jaccard_score': 0.0,
-                    'centroid_similarity': round(best_sim, 3),
-                    'point_count': new_count,
-                    'point_delta': new_count - old_count,
-                    'matched_via': 'centroid',
-                })
-
-    # Dissolved clusters (old with no match to any new) — compute lineage
-    lineage = []
-    for old_id in old_clusters:
-        if old_id in matched_old:
-            continue
-        old_members = old_clusters[old_id]
-        events.append({
-            'event_type': 'dissolved',
-            'cluster_id': int(old_id),
-            'old_cluster_ids': json.dumps([int(old_id)]),
-            'point_count': 0,
-            'point_delta': -len(old_members),
-        })
-
-        # Compute lineage: where did old_members go?
-        successor_counts = defaultdict(int)
-        for pid in old_members:
-            new_cid = new_assignments.get(pid)
-            if new_cid is not None and new_cid >= 0:
-                # Map raw new_cid → stable_id (via id_mapping)
-                stable_id = id_mapping.get(new_cid, new_cid)
-                successor_counts[stable_id] += 1
-
-        # Top 3 successors by count
-        top_successors = sorted(successor_counts.items(), key=lambda x: -x[1])[:3]
-        if top_successors:
-            dominant_id = top_successors[0][0]
-            for new_id, count in top_successors:
-                lineage.append({
-                    'old_territory_id': int(old_id),
-                    'new_territory_id': int(new_id),
-                    'message_count': count,
-                    'transfer_strength': round(count / len(old_members), 3),
-                    'is_dominant': 1 if new_id == dominant_id else 0,
-                })
-
-    return id_mapping, events, lineage
-
+# stabilize_ids lives in pipeline/stabilize.py (imported at the top of this file) —
+# pure stdlib, so verify:stabilize-reserved can import and gate it with no
+# numpy/faiss/dotenv/vault/keys in the way.
 
 # ── Write Results ──────────────────────────────────────────────────
 
@@ -1954,6 +1775,202 @@ def write_clustering_diagnostics(results, embeddings, user_id, version, dry_run=
     return diag
 
 
+# ── Liveness prune (ghost territories) ─────────────────────────────
+
+
+def live_territory_ids(user_id: str) -> set:
+    """Territory ids that still hold at least one clustering point."""
+    rows = d1_query(
+        "SELECT DISTINCT territory_id FROM clustering_points "
+        "WHERE user_id = ? AND territory_id IS NOT NULL",
+        [user_id],
+    )
+    return {int(r['territory_id']) for r in rows if r.get('territory_id') is not None}
+
+
+def has_reembed_backlog(user_id: str) -> bool:
+    """Is the vault mid re-embed? A point can be TRANSIENTLY absent from
+    clustering_points without its territory being dead.
+
+    The trap: a re-import routes through messages.updateContent (src/db/messages.js),
+    which DELETES the message's clustering_points row and nulls embedding_768 so the
+    drainer re-embeds + re-clusters. Between the delete and the re-add the message is
+    STILL LIVE — but its territory momentarily holds no live point. If a clustering
+    run lands in that window, the liveness prune would dissolve a territory whose
+    content the user never erased, and (dissolved_at being set-only, the id reserved)
+    its returning points would form a NEW territory — the old name/essence/chronicle
+    unreachable forever.
+
+    So: if ANY message is awaiting (re-)embedding (embedding_768 IS NULL and not
+    forgotten), or any clustering point is awaiting its nomic embedding
+    (nomic_embedding IS NULL), the embed pipeline has not settled — defer the prune.
+    Fix (a) below (clearing dissolved_at when points return) makes a slipped-through
+    dissolve reversible; this gate stops it happening in the first place. Together
+    they close the re-import hole. The JS delete path (src/core/delete-cascade.js)
+    is UNAFFECTED — it snapshots ids and prunes only what an explicit delete emptied.
+
+    STALENESS BOUND — capped rows do NOT count as backlog (fix, 2026-07-22): a
+    message that is PERMANENTLY un-embeddable (embedding_768 NULL forever — e.g. a
+    too-long row that times out and can never encode) would otherwise keep this probe
+    True FOREVER, deferring the vault-wide prune indefinitely so genuinely-dead
+    territories (real deletes) are never cleaned. The drainer already distinguishes
+    such rows: src/enrich/service.js retires a row to nlp_processed = -1 with
+    nlp_error 'embed-capped:N' ONLY after EMBED_MAX_ATTEMPTS counted attempts against
+    a PROVABLY-UP service (an outage burns zero attempts) plus a long last-chance
+    rescue. That terminal marker is the confidently-stuck signal — an attempt-count
+    OVER A CEILING, already persisted plaintext-queryable, no new column. We exclude
+    exactly those rows here.
+
+    This is SURGICAL, not a widening: a genuine in-progress re-import shows up as
+    PENDING rows (nlp_processed 0 / 'embed-retry:N'), which are NOT capped and still
+    register as backlog — so an active re-import still defers the prune (fix b holds).
+    Only when the ENTIRE remaining backlog is capped rows does the prune proceed.
+    And it is REVERSIBLE regardless: reclaimGaveUpRows (boot) / retry-failed re-queue
+    a capped row, and if it finally embeds and rejoins a dissolved territory, fix (a)
+    restores that territory (dissolved_at cleared). A capped row also has NO clustering
+    point (no embedding ⇒ never clustered), so it is never itself the sole live member
+    of any territory. The COALESCE keeps the predicate two-valued: a -1 row with a NULL
+    or non-capped error (e.g. a legacy poison row the self-heal re-queues) is NOT
+    excluded — it still counts as backlog, the conservative default.
+
+    Fail-SAFE: on any query error, assume a backlog (return True) so the prune is
+    skipped rather than dissolving live territories on incomplete information.
+    """
+    try:
+        r = d1_query(
+            "SELECT 1 FROM messages "
+            "WHERE user_id = ? AND embedding_768 IS NULL AND forgotten_at IS NULL "
+            "AND NOT (nlp_processed = -1 AND COALESCE(nlp_error, '') LIKE 'embed-capped:%') "
+            "LIMIT 1",
+            [user_id],
+        )
+        if r:
+            return True
+    except Exception as e:
+        print(f"  (re-embed backlog probe failed on messages — deferring prune: {e})")
+        return True
+    try:
+        r = d1_query(
+            "SELECT 1 FROM clustering_points "
+            "WHERE user_id = ? AND nomic_embedding IS NULL LIMIT 1",
+            [user_id],
+        )
+        if r:
+            return True
+    except Exception as e:
+        print(f"  (re-embed backlog probe failed on clustering_points — deferring prune: {e})")
+        return True
+    return False
+
+
+def reserved_territory_ids(user_id: str) -> set:
+    """EVERY territory id that already owns a profile row — live, dissolved, ghost.
+    Handed to stabilize_ids so a freshly-formed cluster is never allocated an id
+    whose profile row already exists (which would make the upsert inherit its
+    name/essence/chronicle instead of inserting a clean one)."""
+    try:
+        rows = d1_query("SELECT territory_id FROM territory_profiles WHERE user_id = ?", [user_id])
+        return {int(r['territory_id']) for r in rows if r.get('territory_id') is not None}
+    except Exception as e:
+        print(f"  (reserved-id query failed, proceeding without: {e})")
+        return set()
+
+
+def prune_dead_territories(user_id: str, version: str, dry_run: bool = False) -> int:
+    """LIVENESS prune — the ghost fix.
+
+    A territory is dead when it holds NO live clustering points, full stop. The old
+    rule dissolved a territory only when stabilize_ids() emitted a `dissolved` event,
+    and that diff is computed from `old_territories` loaded FROM clustering_points —
+    the very rows a delete has already removed. So a fully-deleted territory was
+    invisible to the diff, never dissolved, then auto-anchored (last_active < 30d,
+    :2062) and protected forever.
+
+    Liveness is computed directly, so it holds regardless of the diff, regardless of
+    anchoring, and regardless of whether clustering even ran this pass (the
+    below-min-points early return calls this too).
+
+    CONSERVATIVE by design: marks `dissolved_at` rather than deleting the row —
+    territory_lineage and the identity-inheritance read want the history, and the
+    delete path (src/core/delete-cascade.js) is the one that hard-removes profiles
+    for content the user explicitly erased. Dissolved rows are excluded from the
+    search corpus (src/search/d1-loader.js) and from the anchor set (dissolved_at IS
+    NULL), and their ids stay RESERVED so nothing is ever merged into them.
+
+    REVERSIBLE: a territory that later regains live points has its `dissolved_at`
+    cleared here (fix a). Without this, a dissolve was permanent even when the points
+    came straight back (re-import), because dissolved_at was set-only — so returning
+    points formed a NEW territory and the old identity was lost forever.
+
+    GATED on re-embed backlog: when embeddings are still draining (has_reembed_backlog),
+    a live message's clustering point can be TRANSIENTLY absent, so the prune is
+    deferred entirely — a territory whose points vanish via re-import (not delete)
+    must survive (fix b). Both call sites route through here, so the below-min-points
+    early return (main()) is gated too.
+    """
+    if dry_run:
+        return 0
+    live = live_territory_ids(user_id)
+
+    # Fix (a) — REVERSIBILITY: un-dissolve any territory that has regained live
+    # points. Runs BEFORE the dead scan (and independently of the backlog gate) so a
+    # territory whose points returned is restored to its original row — same
+    # id/name/essence/chronicle — instead of being stranded dissolved while a new
+    # territory inherits its points. dissolved_version is cleared too so the row
+    # reads as fully live again.
+    if live:
+        try:
+            resurrectable = d1_query(
+                "SELECT territory_id FROM territory_profiles "
+                "WHERE user_id = ? AND dissolved_at IS NOT NULL",
+                [user_id],
+            )
+            revived = [int(r['territory_id']) for r in resurrectable
+                       if r.get('territory_id') is not None and int(r['territory_id']) in live]
+            if revived:
+                print(f"  Liveness restore: un-dissolving {len(revived)} territories whose points returned: "
+                      f"{sorted(revived)[:20]}{' …' if len(revived) > 20 else ''}")
+                for tid in revived:
+                    d1_query(
+                        "UPDATE territory_profiles SET dissolved_at = NULL, dissolved_version = NULL "
+                        "WHERE territory_id = ? AND user_id = ? AND dissolved_at IS NOT NULL",
+                        [tid, user_id],
+                    )
+        except Exception as e:
+            print(f"  (liveness restore skipped — resurrect query failed: {e})")
+
+    # Fix (b) — BACKLOG GATE: defer the dissolve while embeddings are still draining,
+    # so a territory whose live points are transiently absent (re-import window) is
+    # never dissolved. The restore above still ran, so anything wrongly dissolved on
+    # an earlier pass is already recovered.
+    if has_reembed_backlog(user_id):
+        print("  Liveness prune deferred: re-embed backlog present "
+              "(messages/points awaiting embedding — points may be transiently absent).")
+        return 0
+
+    try:
+        rows = d1_query(
+            "SELECT territory_id FROM territory_profiles WHERE user_id = ? AND dissolved_at IS NULL",
+            [user_id],
+        )
+    except Exception as e:
+        print(f"  (liveness prune skipped — profile query failed: {e})")
+        return 0
+    dead = [int(r['territory_id']) for r in rows
+            if r.get('territory_id') is not None and int(r['territory_id']) not in live]
+    if not dead:
+        return 0
+    print(f"  Liveness prune: dissolving {len(dead)} territories with no live points: {sorted(dead)[:20]}"
+          f"{' …' if len(dead) > 20 else ''}")
+    for tid in dead:
+        d1_query(
+            "UPDATE territory_profiles SET dissolved_at = ?, dissolved_version = ? "
+            "WHERE territory_id = ? AND user_id = ?",
+            [version, version, tid, user_id],
+        )
+    return len(dead)
+
+
 # ── Main ───────────────────────────────────────────────────────────
 
 def main():
@@ -2001,7 +2018,13 @@ def main():
     point_ids, embeddings = fetch_all_embeddings(dry_run=args.dry_run)
 
     if len(point_ids) < args.min_points:
-        print(f"\n  Only {len(point_ids)} points with embeddings (min: {args.min_points}). Skipping.")
+        print(f"\n  Only {len(point_ids)} points with embeddings (min: {args.min_points}). Skipping clustering.")
+        # BUT still run the liveness prune. Returning here WITHOUT it was a distinct
+        # bug: delete most of a vault and the run falls below the threshold, so the
+        # entire stale mindscape survived while clustering_points was (nearly) empty
+        # — the worst case, because those ghosts are then the only mindscape the user
+        # sees and every later run inherits them.
+        prune_dead_territories(user_id, version, dry_run=args.dry_run)
         return
 
     # Auto-scale clustering targets for dataset size
@@ -2073,6 +2096,10 @@ def main():
         except Exception as e:
             print(f"  (anchoring query failed, proceeding without: {e})")
 
+        # Ghost ids that already own a territory_profiles row (live OR dissolved).
+        # stabilize_ids must not hand any of them to a newly-formed cluster.
+        reserved_terr = reserved_territory_ids(user_id)
+
         new_realms = {pid: int(results['realm_ids'][i]) for i, pid in enumerate(point_ids)}
         realm_mapping, realm_events, _ = stabilize_ids(old_realms, new_realms, 'realm')
 
@@ -2085,6 +2112,7 @@ def main():
         terr_mapping, terr_events, terr_lineage = stabilize_ids(
             old_territories, new_territories, 'territory',
             anchored_ids=anchored_ids,
+            reserved_ids=reserved_terr,
         )
 
         for i, pid in enumerate(point_ids):
@@ -2120,6 +2148,15 @@ def main():
                 "UPDATE territory_profiles SET dissolved_at = ?, dissolved_version = ? WHERE territory_id = ? AND user_id = ?",
                 [version, version, e['cluster_id'], user_id],
             )
+
+    # LIVENESS prune — the diff above can only see territories that still had points
+    # in clustering_points; anything whose membership was DELETED is invisible to it.
+    # This second pass closes that hole by asking the only question that actually
+    # matters: does this territory still hold a live point? Runs on every pass,
+    # including fresh-start, and AFTER write_results so it reads this run's
+    # assignments (see prune_dead_territories).
+    if not args.dry_run:
+        prune_dead_territories(user_id, version, dry_run=False)
 
     # Prune stale realm rows. Territories get dissolved_at because lineage /
     # identity-inheritance reads the dissolved rows; realms have neither, and a

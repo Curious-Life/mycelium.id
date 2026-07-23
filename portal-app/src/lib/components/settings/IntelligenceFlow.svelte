@@ -72,6 +72,31 @@
 	let tts = $state<any>(null);
 	let loaded = $state(false);
 	let loadErr = $state(false);
+	// The embedder health states that mean "the bundled Nomic weights did NOT load and a retry is
+	// the fix" (mirrors readiness.js's DOWN set). Search offers a Retry only in these states.
+	const EMBEDDER_FAILED = new Set(['down', 'error', 'deps_missing', 'unavailable']);
+	let embedderRetrying = $state(false);
+	// ── QA6 P1 §1: the Ollama un-strand ─────────────────────────────────────────
+	// The categorize (Understanding) model runs on the local Ollama daemon, so when that
+	// daemon isn't answering the row reads 'down'/'error' with the drainer's honest but
+	// UNACTIONABLE line ("The local model runtime (Ollama) isn't reachable — is it
+	// running?"). On first open that is exactly what the operator saw — and there was
+	// nothing to press; it self-healed silently minutes later. These states now offer
+	// "Retry connection", which re-attempts bring-up through the daemon's OWN ensureUp()
+	// (version gate, adopt/self-heal and spawn caps all untouched) and then renders the
+	// RE-READ health — never a claimed success.
+	//
+	// ⚠️ 'no_model' AND 'paused' ARE DELIBERATELY ABSENT from this set: they are owner
+	// CHOICES, and a Retry over a choice trains the owner to "fix" their own decision
+	// (ModelHealth's own rule). 'downloading'/'loading' are absent too — a retry over a
+	// thing that IS trying is the "red error while it's actually loading" lie in button
+	// form. Only genuine faults and a re-attemptable install are here.
+	const RUNTIME_FAILED = new Set(['down', 'error', 'unavailable', 'deps_missing']);
+	let ollamaRetrying = $state(false);
+	let transcriberRetrying = $state(false);
+	// The daemon's TRUE health (GET /portal/hardware/ollama — a pure read, never a spawn).
+	// null = not read yet ⇒ we claim nothing about it.
+	let ollama = $state<{ status: string; state: string; retryable: boolean; message: string | null; detail: string | null; installed: boolean; running: boolean } | null>(null);
 	// ⚠️ EMPTINESS IS NOT A FAILED READ. STATE A claims "you have never set anything up" — a
 	// claim earned only by REAL reads that returned empty. A transient 500 on /providers must
 	// not render the first-run card over a configured vault (the onboarding-status lesson:
@@ -249,8 +274,12 @@
 		if (f.kind === 'bundled') return { key: f.key, label: f.label, what: 'included', status: h?.status ?? 'unknown', cls: dotClass(h?.status), unset: false };
 		if (f.key === 'understanding') {
 			const m = taskModels.categorize?.model;
+			// The daemon health matters only once a model is CHOSEN (absent-model precedence lives in
+			// withOllama; here `!m` already renders the muted choice, so a down daemon over an unset row
+			// stays muted, never a red alarm over a decision the owner hasn't made).
+			const uh = m ? withOllama(h) : h;
 			const what = m ? `${m} (on this ${machineNoun})` : 'not set up';
-			return { key: f.key, label: f.label, what, status: h?.status ?? null, cls: m ? dotClass(h?.status) : 'choice', unset: !m };
+			return { key: f.key, label: f.label, what, status: uh?.status ?? null, cls: m ? dotClass(uh?.status) : 'choice', unset: !m };
 		}
 		if (f.key === 'descriptions') {
 			const name = providerName(taskModels.narrate?.providerId);
@@ -292,6 +321,23 @@
 	// ModelHealth component — the canonical honest per-model renderer.
 	const mh = (status: string, extra: Record<string, any> = {}) =>
 		({ status, message: null, detail: null, model: null, progress: null, ...extra });
+	// ── QA6 P1 §1 (LOW-5): the Understanding row runs on the Ollama DAEMON ───────────────────────
+	// Its readiness health (labeler/enricher slice) can read a stale 'ok'/'unknown' while the daemon
+	// itself is unreachable — the exact strand GET /portal/hardware/ollama (loaded via loadOllama)
+	// closes. Merge the daemon's TRUE health into the row health with two guards:
+	//   • ABSENT-MODEL PRECEDENCE — a genuinely-absent model ('no_model') wins; pick/download a model
+	//     first, the daemon is moot, and a "Retry connection" over a model you never chose is noise.
+	//   • NULL CLAIMS NOTHING — an unread daemon (ollama === null) leaves the slice health untouched;
+	//     we never invent a fault the daemon has not reported (the emptiness-is-not-a-failed-read rule).
+	// Only a genuinely-FAILED daemon (the RUNTIME_FAILED set) overrides — then it is the truer, more
+	// actionable state, and it carries the daemon's own message so the row reads why.
+	function withOllama(h: Health | null): Health | null {
+		if (!ollama) return h;                                   // not read yet → claim nothing
+		if (h?.status === 'no_model') return h;                  // absent-model precedence
+		if (ollama.state === 'failed' && RUNTIME_FAILED.has(ollama.status))
+			return mh(ollama.status, { model: h?.model ?? null, message: ollama.message });
+		return h;
+	}
 	// Voice health is synthesized from the tts model phase + the honest `samplePending` gate:
 	// a downloaded Qwen3-TTS with no reference sample yet CANNOT speak (§2.2/§5), so it reads as
 	// an actionable 'deps_missing' ("add a voice sample"), never a false 'ok' (W2 executability).
@@ -310,7 +356,7 @@
 	}
 	const localModels = $derived.by<LocalModelRow[]>(() => {
 		const brow = (k: string) => bundle?.rows?.find((r) => r.key === k);
-		const uH = healthFor('understanding') ?? mh('no_model');
+		const uH = withOllama(healthFor('understanding') ?? mh('no_model'));
 		const tH = healthFor('transcription') ?? mh('no_model');
 		const vH = voiceHealth();
 		// The RAW tts phase + sample-pending flag — the action logic below must distinguish the two
@@ -324,11 +370,28 @@
 		// a re-pull is not the fix. ('unknown' is reachable for an INSTALLED, caught-up model —
 		// ModelHealth's own note — so it must not wear a Download button. Review finding, 2026-07-18.)
 		const canDl = (s: string | null | undefined) => s === 'no_model';
+		// A local model whose RUNTIME failed (Ollama not reachable for Understanding; the
+		// whisper engine crash-looping for Transcription) offers "Retry connection" — the
+		// escape hatch the operator lacked. Gated on genuine faults only, never on a choice
+		// ('no_model'/'paused') or a busy state ('downloading'/'loading'), so the button can
+		// never appear over a model that is a choice away or merely mid-load (§3).
+		const runtimeFailed = (s: string | null | undefined) => RUNTIME_FAILED.has(String(s || ''));
 		return [
 			{ key: 'understanding', label: 'Understanding', sub: 'labels + entities', kind: 'consented',
-				health: uH, sizeGb: dlSize(und), action: canDl(uH?.status) ? 'download' : 'none', busy: applying },
+				health: uH, sizeGb: dlSize(und),
+				action: canDl(uH?.status) ? 'download' : runtimeFailed(uH?.status) ? 'retry-runtime' : 'none',
+				// LOW-6: when the daemon is actually bringing up / DOWNLOADING its runtime (state 'loading',
+				// surfaced by GET /portal/hardware/ollama), say so — a bounded retry no longer freezes on
+				// "Checking…" through a silent multi-hundred-MB fetch; the poll shows the real progress state.
+				actionLabel: runtimeFailed(uH?.status)
+					? (ollama?.state === 'loading' ? (ollama.message || 'Downloading runtime…') : ollamaRetrying ? 'Checking…' : 'Retry connection')
+					: null,
+				busy: applying || ollamaRetrying || ollama?.state === 'loading' },
 			{ key: 'transcription', label: 'Transcription', sub: 'audio → text', kind: 'consented',
-				health: tH, sizeGb: dlSize(tr), action: canDl(tH?.status) ? 'download' : 'none', busy: applying },
+				health: tH, sizeGb: dlSize(tr),
+				action: canDl(tH?.status) ? 'download' : runtimeFailed(tH?.status) ? 'retry-runtime' : 'none',
+				actionLabel: runtimeFailed(tH?.status) ? (transcriberRetrying ? 'Checking…' : 'Retry connection') : null,
+				busy: applying || transcriberRetrying },
 			{ key: 'voice', label: 'Voice', sub: 'speaking', kind: 'consented',
 				health: vH, sizeGb: null,
 				// ⚠️ voiceHealth() COLLAPSES two distinct blockers into status 'deps_missing': a
@@ -354,8 +417,12 @@
 			// 'ok' would paint the green "Included" dot ModelHealth's own fail-closed fix removed
 			// (ModelHealth.svelte 'included' branch). null ⇒ ModelHealth renders 'unknown' → idle,
 			// still "Included with the app" but NOT green (review finding F2, 2026-07-18).
+			// The bundled Nomic weights download from HuggingFace at first load — so a FAILED state
+			// (down/error/deps_missing) is retryable: offer a Retry that pokes POST /portal/embed/retry
+			// (never a fresh 'download' — the model ships in the app; it just didn't finish loading).
 			{ key: 'search', label: 'Search', sub: 'semantic recall', kind: 'included',
-				health: models.embedder ?? null, sizeGb: null, action: 'none' },
+				health: models.embedder ?? null, sizeGb: null,
+				action: EMBEDDER_FAILED.has(models.embedder?.status as string) ? 'retry' : 'none', busy: embedderRetrying },
 		];
 	});
 
@@ -410,6 +477,17 @@
 		try {
 			const r = await api('/portal/readiness?slices=models');
 			if (r.ok) models = (await r.json())?.models || {};
+		} catch { /* hold the last snapshot */ }
+	}
+
+	// The daemon's TRUE health (LOW-5): GET /portal/hardware/ollama is a PURE READ (never a spawn),
+	// safe to poll. It closes the strand where the Understanding row read a stale slice 'ok' while
+	// the runtime was actually down. A failed read leaves `ollama` at its last value / null so we
+	// never fabricate a fault the daemon has not reported (withOllama's null-claims-nothing guard).
+	async function loadOllama() {
+		try {
+			const r = await api('/portal/hardware/ollama');
+			if (r.ok) { const d = await r.json().catch(() => null); if (d?.ollama) ollama = d.ollama; }
 		} catch { /* hold the last snapshot */ }
 	}
 
@@ -543,6 +621,52 @@
 		if (key === 'understanding') void applyBundle(['understanding']);
 		else if (key === 'transcription') void applyBundle(['transcription']);
 		else if (key === 'voice') void startTtsDownload();
+		else if (key === 'search') void retryEmbedder();
+	}
+	// The 'retry-runtime' action — a local model whose RUNTIME (not the model file) is the
+	// blocker. Understanding runs on the Ollama daemon; Transcription on the whisper service.
+	// Each pokes the SERVICE's own retry route and re-reads health, never claiming success.
+	function retryRuntime(key: string) {
+		if (key === 'understanding') void retryOllama();
+		else if (key === 'transcription') void retryTranscriber();
+	}
+	// Ollama "Retry connection" (QA6 P1 §1). Re-attempt bring-up via the daemon's own path
+	// (POST /portal/hardware/retry → ensureUp, version gate + self-heal + spawn caps intact),
+	// then re-read BOTH the daemon health and the readiness models slice (the Understanding
+	// row reads the latter). We report the daemon's re-read state; a retry that didn't help
+	// stays honestly failed.
+	async function retryOllama() {
+		if (ollamaRetrying) return;
+		ollamaRetrying = true;
+		try {
+			const res = await api('/portal/hardware/retry', { method: 'POST', body: JSON.stringify({}) });
+			const d = await res.json().catch(() => ({}));
+			if (d?.ollama) ollama = d.ollama;
+		} catch { /* best-effort — the models re-read reports the true state either way */ }
+		await loadModels(); // the Understanding row reflects the labeler's re-read health
+		ollamaRetrying = false;
+	}
+	// Whisper transcriber "Retry connection". Nudge the supervisor (POST /portal/transcription/
+	// retry) and re-read. Same contract: the re-read health is the answer, never a fake ✓.
+	async function retryTranscriber() {
+		if (transcriberRetrying) return;
+		transcriberRetrying = true;
+		try { await api('/portal/transcription/retry', { method: 'POST', body: JSON.stringify({}) }); }
+		catch { /* best-effort */ }
+		await loadModels();
+		transcriberRetrying = false;
+	}
+	// The Search (Nomic) retry — the bundled weights download from HuggingFace at first load; when
+	// that failed the row offers Retry (action 'retry'). Poke POST /portal/embed/retry (nudges the
+	// supervisor + drainer to re-attempt the download), then re-read the readiness models slice so
+	// the row reflects REAL health — a retry that didn't help stays honestly failed, never a fake ✓.
+	async function retryEmbedder() {
+		if (embedderRetrying) return;
+		embedderRetrying = true;
+		try { await api('/portal/embed/retry', { method: 'POST', body: JSON.stringify({}) }); }
+		catch { /* best-effort — the models re-read below reports the true state either way */ }
+		await loadModels();
+		embedderRetrying = false;
 	}
 	// The 'add-sample' action for a downloaded-but-mute voice: route to the character page, where
 	// the record/upload capture already lives (CharacterView) — no forked capture UI here, just the
@@ -567,6 +691,7 @@
 		void loadSpine();
 		void loadFacts();
 		void loadModels();
+		void loadOllama();   // LOW-5: seed the daemon's true health so the Understanding row reads it, not a stale slice
 		// W7: the summary must stay true while visible — the popover's own slice at the
 		// popover's own cadence (models ∈ C1 POLLED; SYNC, zero DB). Mount-to-unmount only.
 		// ⚠️ HONEST SCOPE: this interval runs in BOTH states, not just the returning summary —
@@ -574,7 +699,7 @@
 		// C1's POLLED list, zero DB touches), but it is a poll; do not claim otherwise
 		// (review of this PR, 2026-07-17). Gating it on stateB would need an $effect-managed
 		// interval across the A→B flip — deliberate simplicity over that edge.
-		const t = setInterval(loadModels, 4000);
+		const t = setInterval(() => { void loadModels(); void loadOllama(); }, 4000);
 		return () => clearInterval(t);
 	});
 </script>
@@ -652,7 +777,7 @@
 		     scattered across OnboxTaskSelect / TranscriptionSetup / VoiceSection — and, since Phase
 		     3, the ONLY place they render in STATE B (no more duplicated summary dots). -->
 		<div class="odm-wrap">
-			<OnDeviceModels models={localModels} ondownload={downloadModel} onsample={openCharacter} machineNoun={machineNoun} />
+			<OnDeviceModels models={localModels} ondownload={downloadModel} onsample={openCharacter} onretryruntime={retryRuntime} machineNoun={machineNoun} />
 		</div>
 
 		{#if pullPct != null}

@@ -232,9 +232,14 @@
 				const data = await res.json().catch(() => ({}));
 				if (seq !== reqSeq) return; // a newer keystroke superseded this response
 				// Distinguish a genuine "taken" (control plane answered) from the control
-				// plane being unreachable/errored — otherwise EVERY failure reads as "taken".
+				// plane being unreachable/errored — otherwise EVERY failure reads as "taken",
+				// and an OFFLINE user is told every name on earth is gone.
+				// `data.unreachable` is the AUTHORITATIVE signal: the endpoint now always
+				// answers 200 with { available:false, unreachable:true } on a failed check,
+				// so the old status>=500 / error-string tests can never fire. They are kept
+				// only as belt-and-braces for a transport-level failure.
 				if (res.ok && data.available) availability = 'available';
-				else if (res.status >= 500 || data?.error === 'control plane unreachable') availability = 'unreachable';
+				else if (data?.unreachable || res.status >= 500 || data?.error === 'control plane unreachable') availability = 'unreachable';
 				else availability = 'taken';
 			} catch {
 				if (seq === reqSeq) availability = 'unreachable';

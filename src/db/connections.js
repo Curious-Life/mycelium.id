@@ -45,7 +45,6 @@
  * @typedef {object} ConnectionsNamespaceDeps
  * @property {(sql: string, params: any[]) => Promise<any>} d1Query
  * @property {() => string} workerUrl — current MYA_WORKER_URL
- * @property {() => string} workerAuth — bearer token for handle-resolve calls
  * @property {() => string} [randomUUID] — test seam; defaults to node:crypto.randomUUID
  * @property {(url: string, init?: any) => Promise<any>} [fetch] — test seam; defaults to globalThis.fetch
  */
@@ -57,6 +56,10 @@ import { createDirectHttpTransport } from '../federation/transport.js';
 import { planDelivery } from '../federation/transport-chooser.js';
 import { sealEnvelope } from '../federation/envelope.js';
 import { safeFetch } from '../federation/ssrf.js';
+// isValidHandle = the SHARED DNS-safe rule; firstLabel = the ONE handle-from-host
+// derivation. Both live with the single handle setter (src/identity/handle-service.js).
+import { isValidHandle } from '../identity/identity.js';
+import { firstLabel } from '../identity/handle-service.js';
 import { decodeSharedSpace } from '../crypto/space-reader.js';
 
 const SHARED_CONTENT_MAX_BYTES = 1024 * 1024; // cap an inbound shared-content response (DoS)
@@ -96,10 +99,23 @@ function classifyDeliveryFailure(err) {
   return 'unreachable';
 }
 
-// Human label for a federated target: bare mycelium handles (client expands `x` →
-// `x@x.mycelium.id`) collapse back to `@x`; everything else stays `@handle@domain`.
+// The managed namespace: a BARE handle `x` IS the address `x.mycelium.id`. This is
+// the expansion the Connections UI has always promised ("their handle") and that
+// nothing actually performed — a bare handle used to be looked up ONLY in the local
+// user_profiles table (vacuously empty in a single-user vault) and then in a dead
+// Worker registry, so every bare-handle connect died as "No user <x> found".
+const MANAGED_DOMAIN = 'mycelium.id';
+
+/** Expand a bare handle to its managed address. ONE place, server-side, so every
+ *  caller (portal, MCP requestConnection, channel agent) resolves identically. */
+export function expandBareHandle(handle) {
+  return `${handle}.${MANAGED_DOMAIN}`;
+}
+
+// Human label for a federated target: bare mycelium handles (`x` → `x.mycelium.id`)
+// collapse back to `@x`; everything else stays `@handle@domain`.
 function friendlyHandle(remoteHandle, remoteDomain) {
-  return remoteDomain === `${remoteHandle}.mycelium.id` ? `@${remoteHandle}` : `@${remoteHandle}@${remoteDomain}`;
+  return remoteDomain === expandBareHandle(remoteHandle) ? `@${remoteHandle}` : `@${remoteHandle}@${remoteDomain}`;
 }
 
 const PENDING_LIMIT = 20;
@@ -108,7 +124,6 @@ const OUTBOX_MAX_ATTEMPTS = 10; // stop re-attempting a failed DM after this man
 // Endpoint resolution + signed POST (WebFinger/DOMAIN_RE + federation timeouts) now live
 // in the transport seam (src/federation/transport.js). PRESENCE_QUERY_TIMEOUT_MS below is
 // this caller's tighter per-peer budget, passed to transport.request().
-const RESOLVE_HANDLE_TIMEOUT_MS = 5000;
 const OVERLAP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const PRESENCE_QUERY_TIMEOUT_MS = 3000;          // short per-peer timeout: a slow peer just shows last-known/offline
 const PRESENCE_RESULT_TTL_MS = 45 * 1000;        // memoize the whole presence map (UI polls ~30s)
@@ -119,10 +134,11 @@ export function createConnectionsNamespace(deps) {
   if (!deps) throw new TypeError('createConnectionsNamespace: deps required');
   const {
     d1Query,
-    // Multi-tenant Worker deps — OPTIONAL in single-user V1. When absent, the
-    // cross-tenant local-handle resolve is skipped (only the @handle@domain
-    // federation path is live), and from_instance falls back to selfInstance().
-    workerUrl, workerAuth,
+    // Multi-tenant Worker dep — OPTIONAL, and only a from_instance fallback now.
+    // The cross-tenant `/api/resolve-handle` registry lookup that used to sit behind
+    // a bare handle is GONE: it is unreachable in single-user V1 and a bare handle
+    // now resolves through the managed namespace (<h>.mycelium.id) over WebFinger.
+    workerUrl,
     // Federation (Tier-0) deps — OPTIONAL. When sign+did are present the outbound
     // connect-request is signed (X-Myc-Did/X-Myc-Sig over the canonical body);
     // selfInstance() is our own public host for the request's from_instance.
@@ -158,8 +174,21 @@ export function createConnectionsNamespace(deps) {
   // which is a human label that can differ ("person") and 404s WebFinger. Outbound
   // from_handle uses this so the reverse handshake (connect-response) can find us.
   function selfHandle() {
-    const h = selfInstance && selfInstance();
-    return h ? String(h).split('.')[0] : null;
+    return firstLabel(selfInstance && selfInstance());
+  }
+
+  // Every outbound envelope carries `from_handle` so the peer can resolve us BACK
+  // (acct:<handle>@<host> WebFinger). It used to fall back to `user_profiles.handle`
+  // and then to the internal `userId` — both UNRESOLVABLE by a peer, so a vault with
+  // no federation configured silently shipped a handle nobody could answer, and the
+  // handshake died on the far side with no local signal. Fail LOUDLY instead: a null
+  // selfHandle means federation is not configured, which is a state the user must fix.
+  function requireSelfHandle() {
+    const h = selfHandle();
+    if (!h) {
+      throw new Error('Your vault has no public address yet — claim your handle in Settings → Connections before connecting to others.');
+    }
+    return h;
   }
 
   async function loadConnection(connectionId, { requireStatus } = {}) {
@@ -339,7 +368,7 @@ export function createConnectionsNamespace(deps) {
     if (hasVectorKey(profile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
     const requestBody = {
       $type: 'social.mycelium.connect-request.v1',
-      from_handle: selfHandle() || fp.handle || fromUserId,
+      from_handle: requireSelfHandle(),
       from_instance: selfHost,
       from_did: did ? did() : null,
       to_handle: remoteHandle,
@@ -403,31 +432,27 @@ export function createConnectionsNamespace(deps) {
         return requestRemote(fromUserId, remoteMatch[1].toLowerCase(), remoteMatch[2]);
       }
 
-      // Local handle: tenant DB first, fall back to owner registry for cross-tenant.
+      // BARE handle. Two steps, in this order:
+      //   1. the LOCAL user_profiles row — the only thing it can legitimately match
+      //      in a single-user vault is YOU, so this is the self-connect guard.
+      //   2. expand to the managed address <h>.mycelium.id and go through the SAME
+      //      signed WebFinger federation path as an explicit @handle@domain. This is
+      //      the resolution the UI promises; it did not exist before.
+      // The old cross-tenant Worker registry fallback (a resolve-handle lookup) is
+      // GONE: it belongs to the multi-tenant Worker deployment, is unreachable in V1,
+      // and its only effect here was to add 5s of timeout before "User not found".
+      const bare = String(toHandle).trim().toLowerCase();
       const target = await d1Query(
         `SELECT user_id FROM user_profiles WHERE handle = ?`,
-        [toHandle],
+        [bare],
       );
-      let toUserId = target.results?.[0]?.user_id;
-      if (!toUserId && typeof workerUrl === 'function' && typeof workerAuth === 'function') {
-        try {
-          const res = await fetchImpl(
-            `${workerUrl()}/api/resolve-handle?handle=${encodeURIComponent(toHandle)}`,
-            {
-              headers: { 'Authorization': `Bearer ${workerAuth()}` },
-              signal: AbortSignal.timeout(RESOLVE_HANDLE_TIMEOUT_MS),
-            },
-          );
-          if (res.ok) {
-            const data = await res.json();
-            toUserId = data.user_id;
-          }
-        } catch {
-          // Registry unreachable — fall through to "not found".
-        }
-      }
-      if (!toUserId) throw new Error('User not found');
+      const toUserId = target.results?.[0]?.user_id;
       if (toUserId === fromUserId) throw new Error('Cannot connect to yourself');
+      if (bare === selfHandle()) throw new Error('Cannot connect to yourself');
+      if (!toUserId) {
+        if (!isValidHandle(bare)) throw new Error('User not found');
+        return requestRemote(fromUserId, bare, expandBareHandle(bare));
+      }
 
       const { user_a, user_b } = canonical(fromUserId, toUserId);
 
@@ -532,7 +557,7 @@ export function createConnectionsNamespace(deps) {
       if (action === 'accept' && row.remote_instance && row.remote_user_handle && sign && did) {
         try {
           // include our own public bio so the peer can render us in their list
-          const me = (await d1Query(`SELECT handle, signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
+          const me = (await d1Query(`SELECT signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
           const respProfile = { signature: me.signature ?? null };
           // §7 tripwire on THIS outbound path too (parity with requestRemote) —
           // never federate a vector/embedding field, even via a future regression.
@@ -541,7 +566,7 @@ export function createConnectionsNamespace(deps) {
           // (so the ACCEPT lands even if the requester is now offline), else direct.
           await federationDeliver({ remoteDomain: row.remote_instance, remoteHandle: row.remote_user_handle, remoteDid: row.remote_did, connId: connectionId }, 'connect-response', {
             $type: 'social.mycelium.connect-response.v1',
-            from_handle: selfHandle() || me.handle || userId,
+            from_handle: requireSelfHandle(),
             from_instance: (selfInstance && selfInstance()) || '',
             from_did: did(),
             to_handle: row.remote_user_handle,
@@ -862,10 +887,9 @@ export function createConnectionsNamespace(deps) {
 
       let status = 'failed';
       try {
-        const me = (await d1Query(`SELECT handle FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
         await federationDeliver({ remoteDomain: row.remote_instance, remoteHandle: row.remote_user_handle, remoteDid: row.remote_did, connId: connectionId }, 'message', {
           $type: 'social.mycelium.message.v1',
-          from_handle: selfHandle() || me.handle || userId,
+          from_handle: requireSelfHandle(),
           from_instance: (selfInstance && selfInstance()) || '',
           from_did: did(),
           to_handle: row.remote_user_handle,
@@ -911,8 +935,6 @@ export function createConnectionsNamespace(deps) {
          ORDER BY send_attempts ASC, created_at ASC LIMIT ?`,
         [userId, OUTBOX_MAX_ATTEMPTS, limit],
       )).results || [];
-      // The sender handle is the same for every message this sweep → resolve it once, not per row.
-      const me = failed.length ? ((await d1Query(`SELECT handle FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {}) : {};
       let delivered = 0;
       for (const m of failed) {
         try {
@@ -923,7 +945,7 @@ export function createConnectionsNamespace(deps) {
           await d1Query(`UPDATE peer_messages SET send_attempts = send_attempts + 1 WHERE id = ?`, [m.id]);
           await federationDeliver({ remoteDomain: row.remote_instance, remoteHandle: row.remote_user_handle, remoteDid: row.remote_did, connId: m.connection_id }, 'message', {
             $type: 'social.mycelium.message.v1',
-            from_handle: selfHandle() || me.handle || userId,
+            from_handle: requireSelfHandle(),
             from_instance: (selfInstance && selfInstance()) || '',
             from_did: did(),
             to_handle: row.remote_user_handle,
@@ -1143,7 +1165,7 @@ export function createConnectionsNamespace(deps) {
         await transport.send(endpoint, 'share', {
           $type: 'social.mycelium.share.v1',
           from_did: did(),
-          from_handle: selfHandle() || userId,
+          from_handle: requireSelfHandle(),
           kind, ref, name, role, action,
           nonce: randomUUID(),
           ts: Date.now(),

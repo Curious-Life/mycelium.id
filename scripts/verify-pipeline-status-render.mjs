@@ -57,7 +57,7 @@ function run(probe, opts = {}) {
 }
 const byKey = (o) => Object.fromEntries(o.stages.map((s) => [s.key, s]));
 
-let midflight, caughtup, toofew, paused, embedderdown, idle, error, uptodate;
+let midflight, caughtup, toofew, paused, embedderdown, idle, error, uptodate, waitingembed;
 try {
   midflight = run('midflight');
   caughtup = run('caughtup');
@@ -67,12 +67,13 @@ try {
   idle = run('idle');
   error = run('error');
   uptodate = run('uptodate');
+  waitingembed = run('waitingembed');
 } catch (e) {
   console.log(`FAIL  R0. the component MOUNTS and every probe runs — ${String(e?.message || e).slice(0, 400)}`);
   console.log('\nVERDICT: NO-GO — a probe failed to run  EXIT=1');
   process.exit(1);
 }
-rec('R0. PipelineStatus mounts and all eight probes run', true);
+rec('R0. PipelineStatus mounts and all nine probes run', true);
 
 t('R1. the six stages render TOP-TO-BOTTOM in the server order (never re-sorted)', () => {
   assert.deepEqual(midflight.order, ORDER, `expected the six keys in order. Got: ${JSON.stringify(midflight.order)}`);
@@ -173,6 +174,26 @@ t('R4c. ⭐ co-located per-stage controls (R2/R3/N9): a RUNNING stage shows a �
   }
   // A caught-up (all-done) vault shows no controls — nothing to stop, nothing paused.
   assert.equal(caughtup.ctrlCount, 0, 'a settled vault must show no Stop/Resume controls');
+});
+
+t('R4d. ⭐ QA6: a DEFERRED categorize (waiting_embed) renders its reason + Pause control, NO generic action, and NOT "waiting on you"', () => {
+  const cat = byKey(waitingembed).categorize;
+  assert.equal(cat.state, 'blocked', 'a deferred categorize renders as blocked (! marker), never a lying running/done');
+  assert.ok(/waiting for embedding/i.test(cat.text),
+    `the deferral must show its reason text ("Waiting for embedding to finish"). Got: "${cat.text}"`);
+  // NO generic action button — a deferral has no user remedy (this is the ACTIONLESS block). A
+  // regression that attached an action to waiting_embed would render a dead button here.
+  assert.ok(!cat.actionLabel, `a deferred stage must render NO generic action button. Got: ${JSON.stringify(cat.actionLabel)}`);
+  // The Pause control STAYS reachable during the deferral (paused:false ⇒ the ⏸ Pause side), so a
+  // user can pre-empt the labeling pass during a long import — the whole reason hasControls treats
+  // waiting_embed as controllable.
+  const ctrls = Object.fromEntries(cat.controls.map((c) => [c.kind, c]));
+  assert.ok(ctrls.pause && ctrls.pause.visible && !ctrls.pause.disabled,
+    `a deferred categorize must still show its ⏸ Pause control. Got: ${JSON.stringify(cat.controls)}`);
+  assert.ok(!ctrls.resume, 'not paused ⇒ the toggle shows Pause, not Resume');
+  // overall stays running (embed is healthy) — the deferral must NOT paint the pipeline as blocked-on-you.
+  assert.ok(!/waiting on you/i.test(waitingembed.overallText),
+    `a deferral behind a healthy embed must NOT render "Waiting on you". Got overall: "${waitingembed.overallText}"`);
 });
 
 t('W1. ⭐ intelligence wiring — clicking a target:"intelligence" action navigates to Intelligence, and NOTHING else', () => {

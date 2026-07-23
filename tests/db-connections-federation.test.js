@@ -37,10 +37,16 @@ describe('connections — single-user dep guard', () => {
     const { d1Query } = makeDb();
     assert.doesNotThrow(() => createConnectionsNamespace({ d1Query }));
   });
-  it('a non-federated local handle with no peers → "User not found" (resolve path skipped)', async () => {
-    const { d1Query } = makeDb();
+  it('a bare handle in a vault with NO public address fails LOUDLY (not a misleading "User not found")', async () => {
+    // QA6: a bare handle now resolves through the managed namespace (ghost →
+    // ghost.mycelium.id) over federation — the resolution the UI always promised.
+    // With federation unconfigured (no selfInstance/sign/did) the vault has no
+    // address a peer could answer, so it fails honestly rather than blaming the
+    // target. Proven: no phantom pending row is written before the throw.
+    const { d1Query, writes } = makeDb();
     const ns = createConnectionsNamespace({ d1Query });
-    await assert.rejects(() => ns.request('me', 'ghost'), /User not found/);
+    await assert.rejects(() => ns.request('me', 'ghost'), /no public address/i);
+    assert.equal(writes.filter((w) => w.kind === 'connection').length, 0, 'no pending row written on the loud-fail path');
   });
 });
 
@@ -68,6 +74,14 @@ describe('connections — signed outbound connect', () => {
     assert.equal(verifyDetached(id.publicKeyB64, captured.init.body, captured.init.headers['X-Myc-Sig']), true);
     const parsed = JSON.parse(captured.init.body);
     assert.equal(parsed.from_instance, 'alice.mycelium.id');
+    // BEHAVIOURAL from_handle guard: the outbound `from_handle` VALUE must be exactly the
+    // FEDERATION handle (firstLabel(selfInstance) = 'alice'), never the internal userId.
+    // requireSelfHandle() throws when federation is off, so a per-site fallback like
+    // `requireSelfHandle() && fromUserId` still passes the throw-path tests — but here,
+    // WITH federation configured, it would yield fromUserId ('me') and this assertion
+    // reds. This is the observable the file-level regex alone cannot see (mutation:
+    // reverting connections.js:371 to `requireSelfHandle() && fromUserId`).
+    assert.equal(parsed.from_handle, 'alice', 'outbound from_handle is the federation handle, not the raw userId');
     assert.equal(captured.init.body, canonicalize(parsed));
   });
 
@@ -266,6 +280,13 @@ describe('connections — Tier-0b accept handshake', () => {
     const body = JSON.parse(posted.init.body);
     assert.equal(body.$type, 'social.mycelium.connect-response.v1');
     assert.equal(body.action, 'accept');
+    // BEHAVIOURAL from_handle guard on the ACCEPT egress path (connections.js:569).
+    // selfInstance is 'bob.mycelium.id' → the federation handle is firstLabel = 'bob';
+    // the caller's raw userId here is 'me'. Assert the wire VALUE is the federation
+    // handle, NEVER the internal userId. This is the observable the §11 static regex
+    // could not see: rewriting :569 to the computed key `['from_handle']: userId` (or a
+    // `requireSelfHandle() && userId` fallback) leaks 'me' to the peer and REDS here.
+    assert.equal(body.from_handle, 'bob', 'ACCEPT-path from_handle is the federation handle, not the raw userId');
     assert.equal(verifyDetached(id.publicKeyB64, posted.init.body, posted.init.headers['X-Myc-Sig']), true);
   });
 

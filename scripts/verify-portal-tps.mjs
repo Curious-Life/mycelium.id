@@ -14,7 +14,10 @@
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
 import crypto from 'node:crypto';
-import { rmSync, mkdirSync } from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { rmSync, mkdirSync, mkdtempSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startRestServer } from '../src/server-rest.js';
@@ -25,10 +28,36 @@ const hex = () => crypto.randomBytes(32).toString('hex');
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? `\n      ${d}` : ''}`); };
 
+// HERMETIC CONTROL-PLANE STUB. The handle surface (checkAvailability / setHandle's
+// intent path) talks to the control plane — the ONLY authority on whether a name is
+// free. Point it at an in-process stub over a fresh remote.json so P2/P3/P4 assert the
+// TRUE endpoint behaviour deterministically (no live-internet dependency, no flakiness):
+// every non-reserved name reads as available, so a submitted handle is RECORDED as an
+// intent (desiredHandle → pending_handle) rather than a live claim (this vault has no
+// operator password + no in-process master key, so it can never provision here — exactly
+// the onboarding state the new contract is written for).
+function startCpStub() {
+  const srv = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (/^\/v1\/handle\//.test(req.url)) { res.end(JSON.stringify({ available: true })); return; }
+    if (/^\/v1\/challenge/.test(req.url)) { res.end(JSON.stringify({ nonce: 'n-1' })); return; }
+    res.statusCode = 404; res.end('{}');
+  });
+  return new Promise((resolve) => srv.listen(0, '127.0.0.1', () => resolve({ srv, base: `http://127.0.0.1:${srv.address().port}` })));
+}
+
 async function main() {
   for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
   mkdirSync('data', { recursive: true });
   const raw = new Database(DB); applyMigrations(raw); raw.close();
+
+  // Fresh, isolated remote.json (no publicHost → federation fail-closed, GET handle
+  // null) + the stubbed control plane. readProfile/setHandle read these via process.env.
+  const cpDir = mkdtempSync(path.join(os.tmpdir(), 'tps-cp-'));
+  const cp = await startCpStub();
+  process.env.MYCELIUM_REMOTE_CONFIG = path.join(cpDir, 'remote.json');
+  process.env.MYCELIUM_CONTROL_PLANE = cp.base;
+  delete process.env.MYCELIUM_PUBLIC_HOST;
 
   const srv = await startRestServer({ dbPath: DB, kcvPath: KCV, userHex: hex(), systemHex: hex(), port: 0, host: '127.0.0.1', portalMode: 'legacy' });
   const { url } = srv;
@@ -82,21 +111,36 @@ async function main() {
       okHandle.body?.available === false && freeHandle.body?.available === true,
       `reserved=${okHandle.body?.available} free=${freeHandle.body?.available}`);
 
-    // P3 — edit (PUT) persists handle + display_name + signature
+    // P3 — edit (PUT). NEW CONTRACT (this PR's thesis): `handle` is no longer a
+    // cosmetic `UPDATE user_profiles SET handle=?`. A vault that cannot provision yet
+    // (no operator password / no master key — the onboarding state) RECORDS the picked
+    // name as an INTENT: it surfaces as `pending_handle`, and GET .handle stays DERIVED
+    // from publicHost (null here — federation fail-closed). display_name + signature DO
+    // still persist through user_profiles. Asserting the old `handle:'forest-walker'`
+    // round-trip would re-assert the repudiated cosmetic-handle behaviour.
     const put = await fetch(`${url}/api/v1/portal/profile`, {
       method: 'PUT', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ handle: 'forest-walker', display_name: 'Alice', signature: 'into the trees' }),
     });
     const putBody = await put.json().catch(() => ({}));
-    rec('P3. PUT /profile persists handle/display_name/signature',
-      put.status === 200 && putBody.profile?.handle === 'forest-walker' && putBody.profile?.display_name === 'Alice' && putBody.profile?.signature === 'into the trees',
-      `status=${put.status} handle=${putBody.profile?.handle}`);
+    rec('P3. PUT /profile persists display_name+signature; handle is INTENT (pending), not a cosmetic row write',
+      put.status === 200
+      && putBody.profile?.display_name === 'Alice'
+      && putBody.profile?.signature === 'into the trees'
+      && putBody.profile?.handle === null            // derived from publicHost (none) — NOT the submitted name
+      && putBody.profile?.pending_handle === 'forest-walker'  // the intent was recorded
+      && putBody.handle?.claimed === false,           // the setter's honest outcome: recorded, not claimed
+      `status=${put.status} handle=${putBody.profile?.handle} pending=${putBody.profile?.pending_handle} claimed=${putBody.handle?.claimed}`);
 
-    // P4 — read-back is persisted (round-trips through user_profiles)
+    // P4 — read-back reflects the new contract: display_name persisted, handle still
+    // DERIVED (null), the picked name surfaced as pending_handle.
     const prof2 = await j(M('/profile'));
-    rec('P4. GET /profile reflects the saved edits',
-      prof2.body?.profile?.handle === 'forest-walker' && prof2.body?.profile?.display_name === 'Alice',
-      `handle=${prof2.body?.profile?.handle}`);
+    rec('P4. GET /profile reflects saved edits (display_name persisted; handle derived-null; pending_handle carries the intent)',
+      prof2.body?.profile?.display_name === 'Alice'
+      && prof2.body?.profile?.signature === 'into the trees'
+      && prof2.body?.profile?.handle === null
+      && prof2.body?.profile?.pending_handle === 'forest-walker',
+      `handle=${prof2.body?.profile?.handle} pending=${prof2.body?.profile?.pending_handle} name=${prof2.body?.profile?.display_name}`);
 
     // P5 — invalid handle rejected (fail-closed)
     const bad = await fetch(`${url}/api/v1/portal/profile`, {
@@ -123,6 +167,8 @@ async function main() {
       `stats.total=${stats.body?.messages?.total}`);
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
+    try { cp.srv.close(); } catch {}
+    try { rmSync(cpDir, { recursive: true, force: true }); } catch {}
   }
 
   const allPass = ledger.every(Boolean);

@@ -19,6 +19,20 @@
 	let transBusy = $state(false);
 	let transStarting = $state<string | null>(null); // model whose download we just kicked off (instant feedback)
 	let transPoll: ReturnType<typeof setInterval> | null = null;
+	let transRetrying = $state(false);
+
+	// Retry connection — a crash-looping / unreachable transcription engine (down/error/
+	// unavailable/deps_missing) is a fault the owner could not previously act on. Poke the
+	// supervisor's own retry route and re-read; never claim it recovered — loadTranscription()
+	// below re-renders whatever the re-read health actually is (QA6 P1 §1).
+	async function retryTranscription() {
+		if (transRetrying) return;
+		transRetrying = true; transErr = null;
+		try { await api('/portal/transcription/retry', { method: 'POST', body: JSON.stringify({}) }); }
+		catch { /* best-effort — the re-read is the answer */ }
+		await loadTranscription();
+		transRetrying = false;
+	}
 
 	async function loadTranscription() {
 		try {
@@ -71,12 +85,14 @@
 			<div class="muted pulse">{trans.health?.message || 'Preparing transcription…'}</div>
 		{:else if trans.health?.status === 'deps_missing'}
 			<div class="note-amber">{trans.health?.message}</div>
+			<button class="ghost-btn" data-testid="trans-retry" disabled={transRetrying} onclick={retryTranscription}>{transRetrying ? 'Checking…' : 'Retry connection'}</button>
 		{:else if trans.health?.status === 'error' || trans.health?.status === 'down' || trans.health?.status === 'unavailable'}
 			<!-- `down` was MISSING from this chain once, so a crash-looping engine fell through to
 			     the {:else} and told the owner to DOWNLOAD a model they already have — discarding
 			     the honest message for marketing copy (independent review, 2026-07-16). `message`
 			     first here: for `down` it is the sentence written for the owner. -->
 			<div class="err-box">{trans.health?.message || trans.health?.detail || 'The transcription model failed.'}</div>
+			<button class="ghost-btn" data-testid="trans-retry" disabled={transRetrying} onclick={retryTranscription}>{transRetrying ? 'Checking…' : 'Retry connection'}</button>
 		{:else}
 			<div class="muted">Voice notes currently lean on your chat model — slow and only when it understands audio. Download a dedicated Whisper model once for fast, accurate transcripts that never leave your device.</div>
 		{/if}

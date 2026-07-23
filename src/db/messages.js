@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { assertSafeColumns, clampLimit } from './column-guard.js';
 import { buildAgentIdFilter, resolveAgentIds } from '../agent-id-aliases.js';
 import { bustMindscapePoints } from '../mindscape-cache.js';
+import { purgeDerived } from '../core/delete-cascade.js';
+import { unlinkBlobIfUnreferenced } from '../ingest/blob-store.js';
 
 /**
  * Backfill sentinel for categorized_at (0041 provenance). Stamped by restampLegacyCategories
@@ -64,6 +66,11 @@ export function createMessagesNamespace(deps) {
   if (typeof d1Query !== 'function')      throw new TypeError('createMessagesNamespace: d1Query required');
   if (typeof d1Batch !== 'function')      throw new TypeError('createMessagesNamespace: d1Batch required');
   if (typeof firstRow !== 'function')     throw new TypeError('createMessagesNamespace: firstRow required');
+
+  // Minimal db facade for the shared delete cascade (src/core/delete-cascade.js):
+  // purgeDerived only ever touches db.rawQuery, and this namespace is constructed
+  // before the assembled `db` object exists.
+  const cascadeDb = { rawQuery: (sql, params = []) => d1Query(sql, params) };
 
   // SWR cache for embedBacklog (see the method below). The count is a full-table
   // scan over the large, at-rest-encrypted messages table (multiple seconds on a
@@ -697,9 +704,9 @@ export function createMessagesNamespace(deps) {
      * @param {string} userId
      * @returns {Promise<{found:boolean, alreadyForgotten?:boolean, contentHash:string|null, length:number}>}
      */
-    async redact(id, userId) {
+    async redact(id, userId, opts = {}) {
       const cur = await d1Query(
-        `SELECT content, forgotten_at FROM messages WHERE id = ? AND user_id = ?`,
+        `SELECT content, forgotten_at, attachment_id FROM messages WHERE id = ? AND user_id = ?`,
         [id, userId],
       );
       const row = firstRow(cur);
@@ -707,49 +714,85 @@ export function createMessagesNamespace(deps) {
       if (row.forgotten_at) return { found: true, alreadyForgotten: true, contentHash: null, length: 0 };
       const content = row.content ?? '';
       const contentHash = createHash('sha256').update(content, 'utf8').digest('hex');
-      await d1Batch([
-        {
-          sql: `UPDATE messages SET
-                  content = NULL, content_hash = NULL, thinking = NULL, tags = NULL, entities = NULL,
-                  entity_summary = NULL, relations = NULL, metadata = NULL,
-                  suggested_new_tag = NULL, nlp_error = NULL, embedding_768 = NULL,
-                  forgotten_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE id = ? AND user_id = ?`,
-          params: [id, userId],
-        },
-        {
-          sql: `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'message' AND source_id = ?`,
-          params: [userId, id],
-        },
-      ]);
+      // Snapshot the attachment (transcript/description/blob) BEFORE the cascade so
+      // its storage key survives the row delete for the reference-counted unlink.
+      // attachments.transcript is the VERBATIM voice-note transcription (still listed
+      // by portal-attachments.js) and the blob is the raw file bytes — forget()
+      // promises "content destroyed, cannot be undone" (src/tools/curate.js), so both
+      // must go, exactly as bulk delete already does (src/core/bulk-delete.js).
+      let attLocalPath = null;
+      const attId = row.attachment_id || null;
+      if (attId) {
+        const attCur = await d1Query(
+          `SELECT local_path FROM attachments WHERE id = ? AND user_id = ?`,
+          [attId, userId],
+        );
+        attLocalPath = firstRow(attCur)?.local_path ?? null;
+      }
+      // FULL cascade FIRST (fail-closed): purges every derived row AND evicts the
+      // search sidecar. Before this, redact() nulled the row + dropped the point but
+      // left fts_docs / vec_docs_768 / vec_docs_256 / doc_meta intact — forgotten
+      // content stayed full-text AND vector searchable, which defeats the entire
+      // forget contract. If the cascade throws, the row is NOT tombstoned and the
+      // caller reports failure rather than a false "forgotten".
+      await purgeDerived(cascadeDb, userId, { messageIds: [id] }, { searchHelpers: opts.searchHelpers });
+      await d1Query(
+        `UPDATE messages SET
+           content = NULL, content_hash = NULL, thinking = NULL, tags = NULL, entities = NULL,
+           entity_summary = NULL, relations = NULL, metadata = NULL,
+           suggested_new_tag = NULL, nlp_error = NULL, embedding_768 = NULL,
+           forgotten_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ? AND user_id = ?`,
+        [id, userId],
+      );
+      // Purge the attachment row (transcript + description live in it) AFTER the
+      // message tombstone, then reference-counted blob unlink (a byte-identical blob
+      // still referenced by another attachment row is KEPT). Same order + helper as
+      // bulk-delete: rows gone → refcount is accurate. Never throws.
+      if (attId) {
+        await d1Query(`DELETE FROM attachments WHERE id = ? AND user_id = ?`, [attId, userId]);
+        if (attLocalPath) { try { await unlinkBlobIfUnreferenced(cascadeDb, attLocalPath); } catch { /* orphan ciphertext is safe */ } }
+      }
       bustMindscapePoints(userId); // clustering_points row deleted → drop BOTH points + full caches
       return { found: true, contentHash, length: content.length };
     },
 
     /**
-     * HARD-delete a batch of messages by id (user-scoped) + their derived
-     * clustering_points, in ONE transaction. Unlike redact() (which leaves an
-     * immutable tombstone), this fully removes the rows — the primitive behind
-     * bulk delete-by-source / by-type and V2 right-to-erasure. Callers chunk the
-     * id list (≤500) and MUST have resolved ids from a user_id+source/type SELECT
-     * so the scope predicate can never widen. Search-sidecar eviction (noteDelete)
-     * + blob unlink are the CALLER's responsibility (see src/core/bulk-delete.js).
+     * HARD-delete a batch of messages by id (user-scoped) + the FULL derived
+     * cascade (src/core/delete-cascade.js — clustering_points, note_links,
+     * entity_links, seen-points, conversation_summaries, content-quoting theme_cards
+     * / person_claims, the liveness prune of dead territories/themes/realms, and
+     * search-sidecar eviction). Unlike redact() (which leaves an immutable
+     * tombstone), this fully removes the rows — the primitive behind bulk
+     * delete-by-source / by-type and V2 right-to-erasure. Callers chunk the id list
+     * (≤500) and MUST have resolved ids from a user_id+source/type SELECT so the
+     * scope predicate can never widen. Blob unlink stays the CALLER's job (only the
+     * caller knows the attachment refcount — see src/core/bulk-delete.js).
+     *
+     * NOT atomic — and never was: the adapter's d1Batch is a sequential await loop,
+     * not a transaction (src/adapter/d1.js:107). What holds instead is crash-ORDER
+     * safety: derived rows die BEFORE the source row, so a crash mid-cascade leaves
+     * a live message with a partly-purged derived graph (re-running the same delete
+     * completes it), never an orphaned derived graph pointing at nothing.
      *
      * @param {string[]} ids
      * @param {string} userId
-     * @returns {Promise<{deleted:number}>}
+     * @param {{searchHelpers?:object}} [opts]
+     * @returns {Promise<{deleted:number, cascade:object}>}
      */
-    async deleteIds(ids, userId) {
+    async deleteIds(ids, userId, opts = {}) {
       const list = Array.isArray(ids) ? ids.filter((id) => typeof id === 'string' && id) : [];
       if (!userId) throw new Error('messages.deleteIds: userId required (fail-closed, never table-wide)');
       if (!list.length) return { deleted: 0 };
       const ph = list.map(() => '?').join(',');
-      await d1Batch([
-        { sql: `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'message' AND source_id IN (${ph})`, params: [userId, ...list] },
-        { sql: `DELETE FROM messages WHERE user_id = ? AND id IN (${ph})`, params: [userId, ...list] },
-      ]);
+      // Derived graph FIRST (clustering_points → note/entity links → seen-points →
+      // summaries → quoting rows → liveness prune → search eviction), THEN the rows.
+      // Fail-closed: a throw here leaves the messages in place, so the caller can
+      // never report a completed delete over a half-purged derived graph.
+      const cascade = await purgeDerived(cascadeDb, userId, { messageIds: list }, { searchHelpers: opts.searchHelpers });
+      await d1Query(`DELETE FROM messages WHERE user_id = ? AND id IN (${ph})`, [userId, ...list]);
       bustMindscapePoints(userId);
-      return { deleted: list.length };
+      return { deleted: list.length, cascade };
     },
 
     /**
@@ -1049,7 +1092,10 @@ export function createMessagesNamespace(deps) {
       const total = countResult.results?.[0]?.count || 0;
 
       const dataResult = await d1Query(
-        `SELECT content, role, source, agent_id, created_at FROM messages ${where} ORDER BY created_at ASC LIMIT ? OFFSET ?`,
+        // attachment_id rides the projection so the agent-facing reader can join
+        // the attachment's derived text (transcript/caption) — src/agent/attachment-context.js.
+        // Still vector-free (no embedding_768) and metadata-free.
+        `SELECT id, content, role, source, agent_id, attachment_id, created_at FROM messages ${where} ORDER BY created_at ASC LIMIT ? OFFSET ?`,
         [...params, limit, offset],
       );
 
@@ -1197,13 +1243,22 @@ export function createMessagesNamespace(deps) {
       // condition (the /internal/v1/search/mindscape endpoint
       // already returns 503 + Retry-After when subsystems aren't
       // ready, so the user-visible signal is preserved).
-      const { getMindSearch } = await import('../mind-search/registry.js');
-      const mindSearch = getMindSearch();
-      if (!mindSearch) return [];
+      // NOTE (found while wiring the delete cascade): this used to import
+      // '../mind-search/registry.js' — a path that DOES NOT EXIST (the module is
+      // src/search/registry.js). The dynamic import rejected, so matchMessages threw
+      // instead of degrading to []. It also called mindSearch.query(), which the
+      // helpers object does not expose (it has backend.query / search / bulkSearch).
+      // Both fixed here; behaviour on a missing subsystem is still an empty result.
+      let mindSearch = null;
+      try {
+        const { getMindSearch } = await import('../search/registry.js');
+        mindSearch = getMindSearch();
+      } catch { return []; }
+      if (!mindSearch?.backend?.query) return [];
 
       let matches = [];
       try {
-        const result = await mindSearch.query({
+        const result = await mindSearch.backend.query({
           embedding,
           topK: count,
           recency: 'mixed',

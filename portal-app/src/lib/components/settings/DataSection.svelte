@@ -22,28 +22,65 @@
 	let destroyBusy = $state(false);
 	let destroyErr = $state<string | null>(null);
 	let destroyDone = $state(false);
+	// Honest post-destroy reporting: steps that did NOT succeed are shown, never
+	// swallowed. `handleBlocked` is the pre-flight 409 — the vault is still fully
+	// intact at that point, so the user can retry or knowingly proceed.
+	let handleBlocked = $state<{ reason?: string } | null>(null);
+	let destroyWarnings = $state<string[]>([]);
 	const destroyArmed = $derived(destroyPhrase === DESTROY_PHRASE && destroyKey.trim().length >= 8 && !destroyBusy);
 	onMount(() => {
 		if (browser) isTauri = !!((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__);
 	});
-	async function destroyVault() {
-		if (!destroyArmed) return;
+	function relaunch() {
+		const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
+		if (typeof invoke === 'function') { try { invoke('destroy_and_relaunch'); } catch { /* app is restarting */ } }
+	}
+	async function destroyVault(force = false) {
+		if (!destroyArmed && !force) return;
+		const key = destroyKey.trim();
 		destroyBusy = true; destroyErr = null;
 		try {
 			const res = await fetch('/api/v1/account/destroy', {
 				method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin',
-				body: JSON.stringify({ recoveryKey: destroyKey.trim(), phrase: destroyPhrase }),
+				body: JSON.stringify({ recoveryKey: key, phrase: DESTROY_PHRASE, ...(force ? { force: true } : {}) }),
 			});
 			const d = await res.json().catch(() => ({}));
+			// 409 = handle release failed and NOTHING was deleted. Keep the typed
+			// inputs so the user can simply retry once they are back online.
+			if (res.status === 409 && d?.canForce) {
+				handleBlocked = d.handleRelease || {};
+				destroyErr = d.error || 'Could not release your handle — nothing was deleted.';
+				return;
+			}
 			if (!res.ok || !d.ok) throw new Error(d.error || 'Destroy failed — nothing was deleted.');
+			handleBlocked = null;
+			// Collect the steps that did NOT fully succeed, so "destroyed" never
+			// over-claims. Everything clean → relaunch straight away as before.
+			const warn: string[] = [];
+			if (d.handleRelease?.applicable && !d.handleRelease?.released) {
+				warn.push('Your public handle could NOT be released — it stays registered and can no longer be freed (the key that signs the release is gone).');
+			}
+			const failedConnectors = Array.isArray(d.connectors?.failed) ? d.connectors.failed : [];
+			// A locked/unopened vault can't read its own connector tokens, so nothing
+			// was revoked upstream — say that plainly rather than naming a fake id.
+			if (failedConnectors.some((f: any) => f.reason === 'vault-not-open')) {
+				warn.push('Your vault was not open, so no connected accounts could be revoked. Any accounts you linked (Google, Notion, …) may still have access — remove Mycelium from their security settings.');
+			}
+			const named = failedConnectors.filter((f: any) => f.id && f.id !== '*');
+			if (named.length) {
+				warn.push(`These connected accounts could NOT be revoked and still have access — remove Mycelium from their security settings: ${named.map((f: any) => f.id).join(', ')}.`);
+			}
+			if (d.failed > 0) warn.push(`${d.failed} item(s) could not be deleted.`);
+			destroyWarnings = warn;
 			destroyDone = true;
-			// Vault + keys are gone. Relaunch to onboarding via the Tauri command.
-			const invoke = (window as any).__TAURI_INTERNALS__?.invoke;
-			if (typeof invoke === 'function') { try { await invoke('destroy_and_relaunch'); } catch { /* app is restarting */ } }
+			// Vault + keys are gone. Relaunch to onboarding via the Tauri command —
+			// but only automatically when there is nothing the user needs to read.
+			if (!warn.length) relaunch();
 		} catch (e: any) {
 			destroyErr = e?.message || 'Destroy failed.';
 		} finally {
-			destroyBusy = false; destroyKey = ''; destroyPhrase = '';
+			destroyBusy = false;
+			if (!handleBlocked) { destroyKey = ''; destroyPhrase = ''; }
 		}
 	}
 
@@ -226,7 +263,35 @@
 		</p>
 
 		{#if destroyDone}
-			<p class="text-sm text-[var(--color-text-primary)]">Vault destroyed. Restarting…</p>
+			{#if destroyWarnings.length}
+				<div class="space-y-3">
+					<p class="text-sm text-[var(--color-text-primary)]">Your local vault is destroyed — but not everything succeeded:</p>
+					<ul class="text-xs text-coral list-disc pl-4 space-y-1">
+						{#each destroyWarnings as w}<li>{w}</li>{/each}
+					</ul>
+					<button onclick={relaunch}
+						class="px-3 py-2 rounded-lg bg-coral/10 border border-coral/40 text-sm text-coral hover:bg-coral/20 transition-colors">I've read this — restart</button>
+				</div>
+			{:else}
+				<p class="text-sm text-[var(--color-text-primary)]">Vault destroyed. Restarting…</p>
+			{/if}
+		{:else if handleBlocked}
+			<div class="space-y-3">
+				<p class="text-sm text-[var(--color-text-primary)]"><strong>Nothing was deleted.</strong> Your public handle could not be released, so your vault is untouched.</p>
+				<p class="text-xs text-[var(--color-text-tertiary)]">
+					Reconnect to the internet and try again. If you destroy anyway, the handle stays registered to you forever —
+					the key that signs the release is destroyed along with the vault.
+					{#if handleBlocked.reason}<span class="block mt-1 opacity-70">Reason: {handleBlocked.reason}</span>{/if}
+				</p>
+				<div class="flex gap-2">
+					<button onclick={() => destroyVault()} disabled={destroyBusy}
+						class="px-3 py-2 rounded-lg bg-coral/10 border border-coral/40 text-sm text-coral disabled:opacity-40">{destroyBusy ? 'Retrying…' : 'Try again'}</button>
+					<button onclick={() => destroyVault(true)} disabled={destroyBusy}
+						class="px-3 py-2 rounded-lg bg-coral/20 border border-coral/50 text-sm text-coral font-medium disabled:opacity-40">Destroy anyway</button>
+					<button onclick={() => { handleBlocked = null; showDestroy = false; destroyKey = ''; destroyPhrase = ''; destroyErr = null; }} disabled={destroyBusy}
+						class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Cancel</button>
+				</div>
+			</div>
 		{:else if !showDestroy}
 			<button onclick={() => { showDestroy = true; destroyErr = null; }}
 				class="px-3 py-2 rounded-lg bg-coral/10 border border-coral/40 text-sm text-coral hover:bg-coral/20 transition-colors">Destroy the entire vault…</button>
@@ -239,7 +304,7 @@
 					onkeydown={(e) => { if (e.key === 'Enter' && destroyArmed) destroyVault(); }}
 					class="input w-full text-sm" />
 				<div class="flex gap-2">
-					<button onclick={destroyVault} disabled={!destroyArmed}
+					<button onclick={() => destroyVault()} disabled={!destroyArmed}
 						class="px-3 py-2 rounded-lg bg-coral/20 border border-coral/50 text-sm text-coral font-medium disabled:opacity-40">
 						{destroyBusy ? 'Destroying…' : 'Permanently destroy'}</button>
 					<button onclick={() => { showDestroy = false; destroyKey = ''; destroyPhrase = ''; destroyErr = null; }} disabled={destroyBusy}

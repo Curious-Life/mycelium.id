@@ -159,6 +159,122 @@ const mountWith = async (deps) => {
   await app2.close();
 }
 
+// ── QA6 P1 §1: the Ollama un-strand — GET /hardware/ollama + POST /hardware/retry ──
+
+// HR11 — GET /hardware/ollama returns the daemon's TRUE health, normalized to the shared
+// taxonomy (state/retryable), NOT the raw ensureUp attempt. A 'down' daemon reads
+// state:'failed' + retryable:true — the actionable state a bare isUp() boolean could not carry.
+{
+  const fake = {
+    ensureUp: async () => ({ ok: false }),
+    isInstalled: () => true, stop() {}, getBaseUrl: () => 'http://127.0.0.1:11434',
+    health: async () => ({ status: 'down', message: 'The local model runtime isn’t running.', detail: 'start_timeout', installed: true, running: false, baseUrl: 'http://127.0.0.1:11434' }),
+  };
+  const app2 = await mountWith({ daemon: fake });
+  const r = await J(await fetch(`${app2.base}/portal/hardware/ollama`));
+  const ok = r.status === 200 && r.body.ok && r.body.ollama.status === 'down'
+    && r.body.ollama.state === 'failed' && r.body.ollama.retryable === true && r.body.ollama.installed === true;
+  rec('HR11. GET /hardware/ollama → true health + shared state/retryable', ok, `state=${r.body.ollama?.state} retryable=${r.body.ollama?.retryable}`);
+  await app2.close();
+}
+
+// HR12 — POST /hardware/retry RE-ATTEMPTS bring-up via ensureUp() AND answers with the RE-READ
+// health, never the attempt's claim. Here ensureUp is called (spy) and health() reports 'ok' →
+// ok:true. Proves the route presses the ONE bring-up path and reflects the real world.
+{
+  let ensured = false;
+  const fake = {
+    ensureUp: async () => { ensured = true; return { ok: true }; },
+    isInstalled: () => true, stop() {}, getBaseUrl: () => 'http://127.0.0.1:11434',
+    health: async () => ({ status: 'ok', message: 'running', detail: null, installed: true, running: true, baseUrl: 'http://127.0.0.1:11434' }),
+  };
+  const app2 = await mountWith({ daemon: fake });
+  const r = await J(await fetch(`${app2.base}/portal/hardware/retry`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+  const ok = r.status === 200 && ensured === true && r.body.ok === true && r.body.ollama.state === 'ready';
+  rec('HR12. POST /hardware/retry → calls ensureUp + reports RE-READ health', ok, `ensured=${ensured} ok=${r.body.ok} state=${r.body.ollama?.state}`);
+  await app2.close();
+}
+
+// HR13 — a retry that DID NOT help must NOT claim success. ensureUp is called but health() still
+// reports 'down' → ok:false + state:'failed' + retryable:true. The mirror of #318's contract.
+// ⚠️ STUB-ONLY (LOW-4): the `fake` daemon here is a hand-written stub, so HR11–HR14 prove the ROUTE's
+// contract (presses ensureUp, answers with the re-read health, is session-gated) but NOT that the real
+// ollama-daemon.js health()/ensureUp() emit these shapes — that wiring is covered by verify:hardware
+// against the genuine daemon. Read these as route-logic assertions, not end-to-end proof.
+{
+  const fake = {
+    ensureUp: async () => ({ ok: false, reason: 'start_timeout' }),
+    isInstalled: () => true, stop() {}, getBaseUrl: () => 'http://127.0.0.1:11434',
+    health: async () => ({ status: 'down', message: 'didn’t start', detail: 'start_timeout', installed: true, running: false, baseUrl: 'http://127.0.0.1:11434' }),
+  };
+  const app2 = await mountWith({ daemon: fake });
+  const r = await J(await fetch(`${app2.base}/portal/hardware/retry`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+  const ok = r.status === 200 && r.body.ok === false && r.body.ollama.state === 'failed' && r.body.ollama.retryable === true;
+  rec('HR13. retry that failed stays honestly failed (never a fake ✓)', ok, `ok=${r.body.ok} state=${r.body.ollama?.state}`);
+  await app2.close();
+}
+
+// HR14 — POST /hardware/retry is SESSION-GATED when an authenticator is wired: an unauthenticated
+// request 401s and NEVER touches the daemon (ensureUp not called). Mirror of #318's P12b.
+{
+  let ensured = false;
+  const fake = {
+    ensureUp: async () => { ensured = true; return { ok: true }; },
+    isInstalled: () => true, stop() {}, getBaseUrl: () => 'http://127.0.0.1:11434',
+    health: async () => ({ status: 'ok', installed: true, running: true }),
+  };
+  const a = express();
+  a.use(express.json());
+  a.use('/portal', portalHardwareRouter({ fetch: mockFetch, detect, daemon: fake, authenticatePortalRequest: () => null }));
+  const s = await new Promise((r) => { const x = a.listen(0, '127.0.0.1', () => r(x)); });
+  const base = `http://127.0.0.1:${s.address().port}`;
+  const r = await J(await fetch(`${base}/portal/hardware/retry`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+  const ok = r.status === 401 && ensured === false;
+  rec('HR14. POST /hardware/retry → 401 + daemon untouched when unauthenticated', ok, `status=${r.status} ensured=${ensured}`);
+  await new Promise((r2) => s.close(r2));
+}
+
+// HR15 — LOW-6: a retry that would trigger a SLOW runtime download (ensureUp downloading hundreds of
+// MB) must NOT hang the request. Bounded by the answer budget, the route returns promptly with the
+// honest in-progress health ('starting' ⇒ state 'loading') while the download continues in the
+// daemon's single-flight; the client polls GET /hardware/ollama for progress. Budget driven low here.
+{
+  process.env.MYCELIUM_RETRY_BRINGUP_MS = '60';
+  let ensureResolved = false;   // becomes true ONLY if the download runs to completion
+  let aborted = false;          // a daemon.stop() mid-download flips this (kills a spawnedByUs bring-up)
+  let resolveEnsure = null;
+  const fake = {
+    // A long runtime download. stop() aborts it (real ollama-daemon.stop() kills the spawned
+    // process); an aborted bring-up never reaches the completion that sets ensureResolved.
+    ensureUp: async () => {
+      await new Promise((resolve) => { resolveEnsure = resolve; setTimeout(resolve, 400); });
+      if (aborted) return { ok: false, aborted: true };
+      ensureResolved = true; return { ok: true };
+    },
+    isInstalled: () => false,
+    stop() { aborted = true; resolveEnsure?.(); },   // a real stop() kills the in-flight download
+    getBaseUrl: () => 'http://127.0.0.1:11434',
+    health: async () => ({ status: 'starting', message: 'Downloading the Ollama runtime…', detail: null, installed: false, running: false, baseUrl: 'http://127.0.0.1:11434' }),
+  };
+  const app2 = await mountWith({ daemon: fake });
+  const t0 = Date.now();
+  const r = await J(await fetch(`${app2.base}/portal/hardware/retry`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }));
+  const elapsed = Date.now() - t0;
+  // (1) the retry answers PROMPTLY with the honest in-progress state — never blocks on the download.
+  const promptAndHonest = r.status === 200 && elapsed < 2000 && ensureResolved === false
+    && r.body.ok === false && r.body.ollama.state === 'loading';
+  // (2) …AND the background download must SURVIVE to completion. The route may NOT stop() the daemon
+  //     after the Promise.race — that kills a spawnedByUs bring-up and the model never lands, leaving
+  //     the owner staring at "loading" forever. Wait past the download duration and prove it resolved.
+  //     Mutation: add `ollamaDaemon.stop()` after the race → aborted → ensureResolved stays false → reds.
+  await new Promise((res) => setTimeout(res, 700));
+  const survived = ensureResolved === true && aborted === false;
+  rec('HR15. slow runtime download: retry answers in-progress promptly AND the download survives to completion (not aborted)',
+    promptAndHonest && survived, `elapsed=${elapsed}ms resolvedAtResponse=false? ${r?.body?.ollama?.state === 'loading'} survived=${survived} aborted=${aborted}`);
+  await app2.close();
+  delete process.env.MYCELIUM_RETRY_BRINGUP_MS;
+}
+
 await new Promise((r) => server.close(r));
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));

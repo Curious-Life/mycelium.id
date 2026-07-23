@@ -28,6 +28,7 @@ import { rmSync, mkdirSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startRestServer } from '../src/server-rest.js';
+import { startEmbedSupervisor, getEmbedSupervisor, _resetEmbedSupervisor } from '../src/embed/supervisor.js';
 
 const DB = 'data/verify-processing-pause.db';
 const KCV = 'data/verify-processing-pause-kcv.json';
@@ -164,6 +165,36 @@ async function main() {
     rec('P11. a failed per-stage persist → 500 (never a silent per-stage pause)',
       stageFailed.status === 500 && s11?.enrichEmbedPaused !== true,
       `status=${stageFailed.status} body=${JSON.stringify(stageFailed.body)} embed=${s11?.enrichEmbedPaused}`);
+
+    // ── P12: the embedder retry route (the fresh-install un-hang) is MOUNTED, session-gated (it
+    // rides the same vaultAuth as every /api route), FAIL-SAFE, and HONEST. This boot injects keys,
+    // so the embed supervisor is NOT started (getEmbedSupervisor() === null) — the route must still
+    // 200 with the REAL current health rather than throwing on a null handle or claiming a retry
+    // succeeded. That null-safe path is exactly the one a real box hits before/after a supervisor
+    // lifecycle, so proving it here proves the route can never wedge on a missing supervisor.
+    const retry = await post('/api/v1/portal/embed/retry');
+    rec('P12. POST /portal/embed/retry → 200, fail-safe with NO supervisor, returns real health (never a fake success)',
+      retry.status === 200 && retry.body?.ok === true && typeof retry.body?.health?.status === 'string',
+      `status=${retry.status} body=${JSON.stringify(retry.body)}`);
+
+    // ── P12b: the route ACTUALLY calls the supervisor's nudge() — the resume-out-of-a-halt edge ──
+    // P12 proves fail-safe on a null supervisor; it does NOT prove the route reaches nudge(), so a
+    // regression dropping `getEmbedSupervisor()?.nudge()` (leaving a halted governor un-resumable)
+    // would stay GREEN. Start an in-process supervisor (the route reads the SAME module singleton),
+    // spy its nudge(), hit the route, and assert the spy fired. The supervisor is driven with an
+    // unreachable stub client + a non-existent interpreter so it never spawns a real :8091 process.
+    _resetEmbedSupervisor();
+    const sup = startEmbedSupervisor({ embed: { async health() { throw new Error('unreachable'); } }, pythonBin: '/usr/bin/false' });
+    let nudged = 0;
+    const realNudge = sup.nudge;
+    sup.nudge = () => { nudged += 1; return realNudge(); };
+    const routed = getEmbedSupervisor() === sup; // the route reads exactly this handle
+    const retry2 = await post('/api/v1/portal/embed/retry');
+    rec('P12b. the route CALLS getEmbedSupervisor().nudge() (resume-out-of-halt), not just returns health — MUTATION: drop the nudge() line ⇒ this REDS',
+      routed && retry2.status === 200 && nudged >= 1,
+      `routedToSameHandle=${routed} status=${retry2.status} nudged=${nudged}`);
+    try { sup.stop(); } catch { /* */ }
+    _resetEmbedSupervisor();
   } finally {
     try { await srv.close(); } catch { /* best-effort */ }
     for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

@@ -104,6 +104,7 @@ export function startTranscribeSupervisor({
   let spawnedByUs = false;
   let failures = 0;
   let nextStartAt = 0;
+  let startInFlight = false;  // a tryStart is between its guard and its spawn — see the latch note on tryStart()
   let stopped = false;
   let errBuf = '';
   let tickTimer = null;
@@ -221,61 +222,78 @@ export function startTranscribeSupervisor({
     });
   }
 
+  // Adopt-or-spawn. Only runs when :8093 is unreachable and no child is alive.
+  //
+  // ⚠️ IN-FLIGHT LATCH (startInFlight) — a faithful port of embed/supervisor.js. The `child` guard
+  // alone does NOT close a double-spawn: `child` is set only AFTER `await checkDeps()` (and, on a
+  // fresh box, after a multi-second `await pipInstallDeps()`), so two concurrent ticks — the Retry
+  // button mashed across the Understanding + Transcription rows, or a nudge racing the 3s background
+  // tick — could BOTH pass the guard during that async window and spawn a second transcribe-service.py
+  // on :8093. The loser dies at bind and self-heals, but a second resident local-model process is
+  // exactly what the P0 caps work exists to prevent. The latch is set SYNCHRONOUSLY at the top
+  // (before any await) and cleared in a finally, so a concurrent tryStart's synchronous guard check
+  // always sees it — no interleaving is possible before the first await. It composes with the `child`
+  // guard (both must be clear to proceed) and can never deadlock (always cleared).
   async function tryStart() {
-    if (stopped || child || Date.now() < nextStartAt) return;
+    if (stopped || child || startInFlight || Date.now() < nextStartAt) return;
     if (governor.isHalted()) return; // bounded: no more attempts until nudge()/setModel resumes
 
-    if (!(await checkDeps())) {
-      if (!_depsAttempted) {
-        _depsAttempted = true;
-        setHealth('installing_deps', 'Installing the transcription engine (one-time, ~1 min)…', `python: ${python}`);
-        await pipInstallDeps();
-        if (!(await checkDeps())) {
-          setHealth('deps_missing', 'Transcription engine install failed — check your connection, then re-select the model.', `python: ${python}`);
+    startInFlight = true;
+    try {
+      if (!(await checkDeps())) {
+        if (!_depsAttempted) {
+          _depsAttempted = true;
+          setHealth('installing_deps', 'Installing the transcription engine (one-time, ~1 min)…', `python: ${python}`);
+          await pipInstallDeps();
+          if (!(await checkDeps())) {
+            setHealth('deps_missing', 'Transcription engine install failed — check your connection, then re-select the model.', `python: ${python}`);
+            nextStartAt = Date.now() + DEPS_RETRY_MS;
+            return;
+          }
+          // deps now present → fall through and start the service
+        } else {
+          setHealth('deps_missing', 'Transcription engine not installed yet — re-select the model to retry.', `python: ${python}`);
           nextStartAt = Date.now() + DEPS_RETRY_MS;
           return;
         }
-        // deps now present → fall through and start the service
-      } else {
-        setHealth('deps_missing', 'Transcription engine not installed yet — re-select the model to retry.', `python: ${python}`);
-        nextStartAt = Date.now() + DEPS_RETRY_MS;
-        return;
       }
-    }
 
-    setHealth('starting', failures ? 'Restarting the transcription engine…' : 'Starting the transcription engine…');
-    try {
-      mkdirSync(WHISPER_HF_HOME, { recursive: true }); // ensure the user-data HF cache exists
-      child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(port)], {
-        cwd: home, env: childEnv(), stdio: ['ignore', 'ignore', 'pipe'],
+      setHealth('starting', failures ? 'Restarting the transcription engine…' : 'Starting the transcription engine…');
+      try {
+        mkdirSync(WHISPER_HF_HOME, { recursive: true }); // ensure the user-data HF cache exists
+        child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(port)], {
+          cwd: home, env: childEnv(), stdio: ['ignore', 'ignore', 'pipe'],
+        });
+      } catch (e) {
+        setHealth('down', 'Could not start the transcription engine.', String(e?.message || e));
+        failures++; backoff(); return;
+      }
+      spawnedByUs = true; errBuf = '';
+      child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
+      child.on('error', () => { /* surfaced via exit/last stderr */ });
+      child.on('exit', (code) => {
+        const wasOurs = child;
+        child = null;
+        if (stopped || !wasOurs) return;
+        const tail = lastErrLine();
+        // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
+        if (looksLikePortConflict(errBuf)) {
+          log(`[transcribe-supervisor] service exited (code ${code}) — port :${port} conflict${tail ? `: ${tail}` : ''}`);
+          void handlePortConflict();
+          return;
+        }
+        failures++;
+        if (failures >= DOWN_AFTER) {
+          setHealth('down', 'The transcription engine keeps stopping.', tail || `exited code ${code}`);
+        } else {
+          setHealth('starting', 'Restarting the transcription engine…', tail || `exited code ${code}`);
+        }
+        backoff();
+        log(`[transcribe-supervisor] service exited (code ${code}) — restart #${failures} scheduled${tail ? `: ${tail}` : ''}`);
       });
-    } catch (e) {
-      setHealth('down', 'Could not start the transcription engine.', String(e?.message || e));
-      failures++; backoff(); return;
+    } finally {
+      startInFlight = false;
     }
-    spawnedByUs = true; errBuf = '';
-    child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
-    child.on('error', () => { /* surfaced via exit/last stderr */ });
-    child.on('exit', (code) => {
-      const wasOurs = child;
-      child = null;
-      if (stopped || !wasOurs) return;
-      const tail = lastErrLine();
-      // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
-      if (looksLikePortConflict(errBuf)) {
-        log(`[transcribe-supervisor] service exited (code ${code}) — port :${port} conflict${tail ? `: ${tail}` : ''}`);
-        void handlePortConflict();
-        return;
-      }
-      failures++;
-      if (failures >= DOWN_AFTER) {
-        setHealth('down', 'The transcription engine keeps stopping.', tail || `exited code ${code}`);
-      } else {
-        setHealth('starting', 'Restarting the transcription engine…', tail || `exited code ${code}`);
-      }
-      backoff();
-      log(`[transcribe-supervisor] service exited (code ${code}) — restart #${failures} scheduled${tail ? `: ${tail}` : ''}`);
-    });
   }
 
   async function tick() {

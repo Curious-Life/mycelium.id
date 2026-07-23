@@ -48,6 +48,14 @@ import { WHISPER_CATALOG, recommendedWhisperModel } from './portal-transcription
 import { vaultDiskHeadroom } from './db/disk-guard.js';
 import { resetPullBackoff, nudgeEnrichDrainer } from './enrich/drainer.js';
 import { getModelState as voiceModelState, hasVoiceSample, defaultVariant, DEFAULT_VOICE_MODEL } from './tts/qwen3-tts-model.js';
+import { getEmbedderHealth } from './embed/supervisor.js';
+
+// The embedder health states that mean "the bundled Nomic weights did NOT load and a
+// retry is the fix" — a failed/absent HF download, or a governor-halted service. Kept in
+// lockstep with readiness.js's DOWN set (the pipeline slice's embedder_down trigger).
+const EMBEDDER_RETRYABLE = new Set(['down', 'error', 'deps_missing', 'unavailable']);
+// …and the states that mean "the download/load is in flight — wait, don't retry".
+const EMBEDDER_LOADING = new Set(['loading', 'starting', 'downloading']);
 
 const GiB = 2 ** 30;
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -68,6 +76,9 @@ const isInstalled = (installed, model) => {
  */
 export async function composeBundle({
   db, userId, detect = detectHardware, listInstalled, dbPath = null, headroom = vaultDiskHeadroom,
+  // Embedder health seam — injectable so the gate can drive the failed/loading/ok states of the
+  // bundled Nomic model without a live :8091. Defaults to the real supervisor health.
+  embedderHealth = getEmbedderHealth,
   // Voice seams — injectable so the gate can drive BOTH the runnable and not-runnable states
   // offline. `voiceState` reports whether the Qwen3-TTS model is downloaded (sync); `voiceRunnable`
   // is hasVoiceSample() — now REAL per #234 (async: does the personal agent have a recorded voice
@@ -133,7 +144,26 @@ export async function composeBundle({
       // stated as a flag, not folded into the number (its size isn't ours to invent).
       needsRuntime: !labelInstalled,
     },
-    { key: 'search', model: 'nomic-v1.5', runs: 'on-device', included: true, installed: true, assigned: true, downloadGb: 0 },
+    // Search (Nomic) SHIPS with the app, but its ONNX weights download from HuggingFace at first
+    // load — so `included` is the healthy-case fact, and `embedder` carries the REAL health so the
+    // wizard/settings can show a failed/loading state + a Retry (→ POST /portal/embed/retry) instead
+    // of a fake ✓ that strands a fresh user at "Processing 0/N". Fail-soft: a throwing/absent health
+    // read reads as 'unknown' (benign — treated as included, never a false retry prompt).
+    (() => {
+      const emb = (() => { try { return embedderHealth?.() || null; } catch { return null; } })();
+      const embStatus = emb?.status || 'unknown';
+      return {
+        key: 'search', model: 'nomic-v1.5', runs: 'on-device', included: true, installed: true, assigned: true, downloadGb: 0,
+        embedder: {
+          status: embStatus,
+          message: emb?.message ?? null,
+          detail: emb?.detail ?? null,
+          // retryable ⇒ show a Retry button; loading ⇒ show the in-flight state (no ✓, no button).
+          retryable: EMBEDDER_RETRYABLE.has(embStatus),
+          loading: EMBEDDER_LOADING.has(embStatus),
+        },
+      };
+    })(),
     {
       key: 'transcription', model: whisperModel, runs: 'on-device',
       installed: whisperAssigned, assigned: whisperAssigned,

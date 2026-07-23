@@ -96,6 +96,23 @@ function readFileJson(p) {
 }
 
 /**
+ * Distinguish "remote.json is legitimately absent" from "remote.json is present
+ * but unparseable" — a distinction readRemoteConfig()/readFileJson() DELIBERATELY
+ * flatten (a torn file fails soft to `{}` → remoteMode:'off') so a corrupt config
+ * never crashes boot. That soft-fail is wrong on the DESTROY path: a truncated
+ * remote.json would otherwise report "not-managed" and let a factory reset proceed
+ * while a real managed handle stays squatted (review round-3, FIX 2). Callers that
+ * must fail CLOSED on corruption use this.
+ * @returns {'absent'|'ok'|'corrupt'}
+ */
+export function remoteConfigParseState({ env = process.env } = {}) {
+  const p = remoteConfigPath({ env });
+  if (!existsSync(p)) return 'absent';
+  try { JSON.parse(readFileSync(p, 'utf8')); return 'ok'; }
+  catch { return 'corrupt'; }
+}
+
+/**
  * Resolve the effective remote config. env wins (parity with the rest of the
  * config surface), then remote.json, then defaults.
  * @returns {{ publicBaseUrl:string, remoteEnabled:boolean, operatorEmail:string }}
@@ -120,6 +137,11 @@ export function readRemoteConfig({ env = process.env } = {}) {
     requirePasskeyForWeb: env.MYCELIUM_REQUIRE_PASSKEY_WEB === '1' || file.requirePasskeyForWeb === true,
     remoteMode: REMOTE_MODES.has(remoteMode) ? remoteMode : 'off',
     publicHost,
+    // A handle the owner PICKED but that is not claimed yet (no publicHost) — an
+    // INTENT, never an identity. Kept here so there is still exactly ONE handle
+    // store; federation stays fail-closed (selfHandle/did derive from publicHost
+    // only) until the real claim lands. Written solely by identity/handle-service.
+    desiredHandle: clean(file.desiredHandle) || '',
     relayAddr: clean(env.MYCELIUM_RELAY_ADDR) || clean(file.relayAddr) || '',
     acmeDnsServer: clean(env.MYCELIUM_ACME_DNS) || clean(file.acmeDnsServer) || DEFAULT_ACME_DNS,
     controlPlaneUrl: clean(env.MYCELIUM_CONTROL_PLANE) || clean(file.controlPlaneUrl) || DEFAULT_CONTROL_PLANE,
@@ -163,14 +185,46 @@ export function writeRemoteConfig(patch = {}, { env = process.env } = {}) {
   // Transport keys (all NON-secret — secrets go in auth.db via setRemoteSecret).
   if (typeof patch.remoteMode === 'string' && REMOTE_MODES.has(patch.remoteMode)) next.remoteMode = patch.remoteMode;
   if (typeof patch.publicHost === 'string') {
-    const h = patch.publicHost.trim();
+    // CANONICALIZE at write. Hostnames are case-insensitive in DNS but SAFE_HOST is
+    // `/i`, so a mixed-case host used to be stored verbatim — and every consumer that
+    // derives from it (firstLabel → the federation handle, did:web, WebFinger, rpID)
+    // then had to decide for itself whether to fold case. One consumer folding and
+    // another not is exactly how a vault that previously FAILED CLOSED (no derivable
+    // handle → no signing identity → did.json 404) can start serving an identity.
+    // Normalize here, once, at the single write point; derivation stays literal.
+    const h = patch.publicHost.trim().toLowerCase();
     if (h !== '' && !isSafeHostname(h)) throw new Error('invalid publicHost');
+    // SET-ONCE backstop (defence in depth). setHandle() is the sole LEGIT writer and
+    // refuses a rename; this store-level rule is a SECOND layer for any writer that
+    // reaches writeRemoteConfig directly. It is NOT the whole story, so the comment
+    // must not overstate it: this rule allows the FIRST provisioning write (current
+    // empty), no-ops a same-host re-write, and ALLOWS clearing to '' (fail-closed — no
+    // signing identity, did.json 404 — not a rotation). Because clearing is allowed, a
+    // TWO-STEP sequence (publicHost:'' then publicHost:'attacker') would walk PAST this
+    // guard — so a direct-to-DID rotation is NOT fully "refused" here on its own. The
+    // untrusted door (POST /api/v1/remote/config) therefore does NOT accept publicHost
+    // at all (see the whitelist in remote/router.js); publicHost only ever changes via
+    // the managed-claim ceremony behind setHandle. A one-shot direct rename to a
+    // different non-empty host IS refused below; a real rename needs the deferred
+    // DID-rotation migration, not a config poke.
+    const currentHost = next.publicHost || '';
+    if (currentHost !== '' && h !== '' && h !== currentHost) {
+      throw new Error('publicHost is already set — changing it would orphan connected peers (rename is not supported)');
+    }
     // A WebAuthn passkey is bound to the host's rpID, so CHANGING the host orphans
     // every enrolled passkey. Auto-disable the passkey-for-web requirement on a real
     // host change so a rename/disconnect can never lock the owner out of the web
     // (they re-enroll on the new host, then re-enable). Same-value writes don't trip it.
     if (h !== (next.publicHost || '') && next.requirePasskeyForWeb) next.requirePasskeyForWeb = false;
     next.publicHost = h;
+  }
+  // The not-yet-claimed handle intent. Validated with the SAME DNS-safe rule as a
+  // real handle so it can never be a value the control plane would reject, and so
+  // nothing unsafe reaches a rendered config/URL if a surface reads it.
+  if (typeof patch.desiredHandle === 'string') {
+    const d = patch.desiredHandle.trim().toLowerCase();
+    if (d !== '' && !/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/.test(d)) throw new Error('invalid desiredHandle');
+    next.desiredHandle = d;
   }
   if (typeof patch.relayAddr === 'string') {
     const a = patch.relayAddr.trim();

@@ -19,9 +19,12 @@
 
 	let { onNext }: { onNext: () => void } = $props();
 
+	// The bundled embedder's REAL health, threaded onto the search row (composeBundle) so the
+	// Search item reflects the actual HF-download state — not a fake ✓ (the fresh-install hang).
+	type EmbedderHealth = { status: string; message?: string | null; detail?: string | null; retryable?: boolean; loading?: boolean };
 	type BundleRow = {
 		key: string; model?: string; runs: string; included?: boolean; installed?: boolean;
-		assigned?: boolean; downloadGb?: number; needsRuntime?: boolean;
+		assigned?: boolean; downloadGb?: number; needsRuntime?: boolean; embedder?: EmbedderHealth;
 	};
 	type Bundle = {
 		hardware: { platform: string | null; totalRamGb: number | null };
@@ -37,6 +40,10 @@
 	let downloading = $state(false);
 	let dlLabel = $state('');
 	let applyErr = $state('');
+	// Embedder (Search) retry — the bundled Nomic weights download from HuggingFace at first load,
+	// so this row can fail/stall. `retryEmbedder` pokes POST /portal/embed/retry (nudges the
+	// supervisor + drainer to re-attempt the download) then re-reads the bundle for fresh health.
+	let embedderRetrying = $state(false);
 
 	// Which conversational engine is connected (drives the card ✓ + the name beat reveal).
 	let hasEngine = $state(false);
@@ -59,7 +66,7 @@
 	// still needs a reference sample to SPEAK). Per the operator's locked Step-3
 	// decision it is nonetheless a 4th DOWNLOADABLE here — default-on, trimmable like
 	// Whisper — so its bytes are surfaced, totalled, and pulled via the TTS route.
-	type CoreItem = { key: string; label: string; sub: string; included: boolean; installed: boolean; downloadable: boolean; sizeGb: number };
+	type CoreItem = { key: string; label: string; sub: string; included: boolean; installed: boolean; downloadable: boolean; sizeGb: number; embedder?: EmbedderHealth };
 	const coreItems = $derived.by<CoreItem[]>(() => {
 		const rows = (bundle?.rows || []).filter((r) => r.runs === 'on-device');
 		const order = ['search', 'understanding', 'transcription'];
@@ -69,6 +76,8 @@
 				key: r.key, label: OUTCOME[r.key]?.label || r.key, sub: OUTCOME[r.key]?.sub || '',
 				included: !!r.included, installed: !!r.installed,
 				downloadable: isDownloadable(r), sizeGb: r.downloadGb || 0,
+				// Search carries the embedder health so the row shows the TRUE state below.
+				embedder: r.embedder,
 			}));
 		const av = bundle?.adjacent?.voice;
 		if (av) items.push({
@@ -110,6 +119,19 @@
 			bundle = b;
 			if (b.adjacent?.conversation?.subscriptionConnected && !hasEngine) markEngine('Claude subscription', 'sub');
 		} else loadErr = true;
+	}
+
+	// ── Search / embedder retry — the fresh-install un-hang ─────────────────────
+	// The bundled Nomic ONNX weights download from HuggingFace at first load; when that fails
+	// (network/HF/disk) or the deps are missing, the Search row shows the true state + this button.
+	// It re-attempts the download server-side (nudge supervisor + drainer) and re-reads real health.
+	async function retryEmbedder() {
+		if (embedderRetrying) return;
+		embedderRetrying = true;
+		try { await api('/portal/embed/retry', { method: 'POST', body: JSON.stringify({}) }); }
+		catch { /* best-effort — the fresh bundle read below reports the true state either way */ }
+		await loadBundle();
+		embedderRetrying = false;
 	}
 
 	// ── One-click serialized download (reuse the #279 path) ─────────────────────
@@ -309,18 +331,44 @@
 			</div>
 			<div class="rows">
 				{#each coreItems as it (it.key)}
-					<label class="mrow" class:disabled={!it.downloadable}>
-						{#if it.downloadable}
-							<input type="checkbox" checked={checked[it.key] !== false} onchange={(e) => (checked = { ...checked, [it.key]: (e.currentTarget as HTMLInputElement).checked })} />
-						{:else}
-							<span class="incl" aria-hidden="true">✓</span>
-						{/if}
-						<span class="m-meta">
-							<span class="m-label">{it.label}</span>
-							<span class="m-sub">{it.sub}</span>
-						</span>
-						<span class="m-size">{it.included ? 'included' : it.installed ? 'installed' : `~${it.sizeGb} GB`}</span>
-					</label>
+					{#if it.key === 'search' && it.embedder?.retryable}
+						<!-- The bundled Search model (Nomic) downloads from HuggingFace at first load; that
+						     failed here. Show the TRUE state + a Retry (→ /portal/embed/retry) — NEVER a fake ✓
+						     that would strand the user at "Processing 0/N" with nothing embedding. -->
+						<div class="mrow disabled" data-testid="wiz-search-row" data-embedder="retry">
+							<span class="warn" aria-hidden="true">!</span>
+							<span class="m-meta">
+								<span class="m-label">{it.label}</span>
+								<span class="m-sub">{it.embedder?.message || 'The search engine didn’t finish setting up.'}</span>
+							</span>
+							<button class="retry-btn" data-testid="wiz-search-retry" disabled={embedderRetrying} onclick={retryEmbedder}>
+								{embedderRetrying ? 'Retrying…' : 'Retry'}
+							</button>
+						</div>
+					{:else if it.key === 'search' && it.embedder?.loading}
+						<!-- First-run download in flight — an honest "setting up", never a premature ✓. -->
+						<div class="mrow disabled" data-testid="wiz-search-row" data-embedder="loading">
+							<span class="spin" aria-hidden="true"></span>
+							<span class="m-meta">
+								<span class="m-label">{it.label}</span>
+								<span class="m-sub">{it.embedder?.message || `Setting up on your ${machineNoun}…`}</span>
+							</span>
+							<span class="m-size">setting up…</span>
+						</div>
+					{:else}
+						<label class="mrow" class:disabled={!it.downloadable} data-testid={it.key === 'search' ? 'wiz-search-row' : undefined} data-embedder={it.key === 'search' ? 'ok' : undefined}>
+							{#if it.downloadable}
+								<input type="checkbox" checked={checked[it.key] !== false} onchange={(e) => (checked = { ...checked, [it.key]: (e.currentTarget as HTMLInputElement).checked })} />
+							{:else}
+								<span class="incl" aria-hidden="true">✓</span>
+							{/if}
+							<span class="m-meta">
+								<span class="m-label">{it.label}</span>
+								<span class="m-sub">{it.sub}</span>
+							</span>
+							<span class="m-size">{it.included ? 'included' : it.installed ? 'installed' : `~${it.sizeGb} GB`}</span>
+						</label>
+					{/if}
 				{/each}
 			</div>
 			<div class="dl-row">
@@ -431,6 +479,12 @@
 	.mrow.disabled { cursor: default; opacity: 0.9; }
 	.mrow input[type=checkbox] { accent-color: var(--color-accent-aurum, #e5b84c); }
 	.incl { color: var(--color-accent-jade, #4ade80); font-size: 0.85rem; width: 1rem; text-align: center; }
+	.warn { color: var(--color-coral, #e5736b); font-size: 0.9rem; font-weight: 700; width: 1rem; text-align: center; }
+	.spin { width: 0.85rem; height: 0.85rem; margin: 0 0.075rem; border-radius: 50%; border: 2px solid var(--glass-border, rgba(255,255,255,0.25)); border-top-color: var(--color-accent-aurum, #e5b84c); animation: wiz-spin 0.8s linear infinite; box-sizing: border-box; }
+	@keyframes wiz-spin { to { transform: rotate(360deg); } }
+	.retry-btn { font-size: 0.72rem; padding: 0.25rem 0.7rem; border-radius: 7px; border: 1px solid var(--color-coral, #e5736b); background: transparent; color: var(--color-coral, #e5736b); font-family: inherit; cursor: pointer; white-space: nowrap; }
+	.retry-btn:hover:not(:disabled) { background: rgba(229,115,107,0.1); }
+	.retry-btn:disabled { opacity: 0.55; cursor: default; }
 	.m-meta { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
 	.m-label { font-size: 0.82rem; color: var(--color-text-primary); }
 	.m-sub { font-size: 0.7rem; color: var(--color-text-tertiary); }

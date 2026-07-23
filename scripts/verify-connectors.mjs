@@ -12,6 +12,11 @@
 //   C6 dedupe            reconnect (cursor reset) → re-pull dedupes (created 0)
 //   C7 disconnect        disconnect → status disconnected, tokens gone
 //   C8 scheduler cycle   startConnectorScheduler().cycle() drains a connected connector
+//   C10 unavailable     a vault that never opened reports a FAILED revoke, not a
+//                        clean zero (destroy is mounted pre-boot)
+//   C9 revokeAll        factory-reset upstream OAuth revoke: honest per-connector
+//                        outcome (missing/throwing/hanging revoke → failed, never
+//                        "revoked"), bounded so an offline box can't stall a wipe
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
@@ -23,7 +28,8 @@ import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startRestServer } from '../src/server-rest.js';
 import { createPkce, buildAuthUrl } from '../src/connectors/oauth.js';
-import { createConnectorRunner, startConnectorScheduler } from '../src/connectors/index.js';
+import { createConnectorRunner, startConnectorScheduler, connectorsUnavailable } from '../src/connectors/index.js';
+import { getAdapter, registerAdapter } from '../src/connectors/registry.js';
 
 const DB = 'data/verify-connectors.db';
 const KCV = 'data/verify-connectors-kcv.json';
@@ -104,6 +110,46 @@ async function main() {
     const st8 = await runner.store.getState('mock');
     sched.stop();
     rec('C8. scheduler.cycle() drains connected connector', st8?.status === 'connected' && !!st8?.lastSyncAt && (await countMock()) === 3, `status=${st8?.status} lastSyncAt=${!!st8?.lastSyncAt}`);
+
+    // ── C9 revokeAll(): the factory-reset hook (QA P0.9) ──
+    // Before this, destroyVault had NO connectors hook at all: after a factory
+    // reset the provider still held a LIVE OAuth grant. revokeAll must (a) call
+    // the adapter's revoke with the stored tokens, (b) report an unreachable
+    // provider as FAILED — never as revoked — and (c) never throw or hang.
+    const r9 = createConnectorRunner({ db, userId: uid, enqueueEnrichment: () => {} });
+    await r9.connect('mock', { token: TOKEN_MARKER });
+    // 1. adapter WITHOUT revoke → reported as a failure (nothing was revoked upstream)
+    const noRevoke = await r9.revokeAll();
+    // 2. adapter WITH a working revoke → reported revoked, called with the tokens
+    const mockAdapter = getAdapter('mock');
+    let sawToken = null;
+    registerAdapter({ ...mockAdapter, revoke: async (t) => { sawToken = t?.access_token; } });
+    const ok9 = await r9.revokeAll();
+    // 3. adapter whose revoke THROWS → failed with a reason, never revoked
+    registerAdapter({ ...mockAdapter, revoke: async () => { throw new Error('ENETDOWN'); } });
+    const bad9 = await r9.revokeAll();
+    // 4. adapter whose revoke HANGS → bounded, reported as a failure, no hang
+    registerAdapter({ ...mockAdapter, revoke: () => new Promise(() => {}) });
+    const t0 = Date.now();
+    const hang9 = await r9.revokeAll({ timeoutMs: 200, totalTimeoutMs: 1000 });
+    const elapsed = Date.now() - t0;
+    registerAdapter(mockAdapter); // restore
+    rec('C9. revokeAll(): missing/throwing/hanging revoke → FAILED (never "revoked"); a working revoke gets the real token; bounded',
+      noRevoke.attempted === 1 && noRevoke.revoked.length === 0 && noRevoke.failed[0]?.reason === 'no-revoke-endpoint'
+      && ok9.revoked.length === 1 && ok9.failed.length === 0 && sawToken === TOKEN_MARKER
+      && bad9.revoked.length === 0 && bad9.failed[0]?.reason === 'ENETDOWN'
+      && hang9.revoked.length === 0 && hang9.failed[0]?.reason === 'revoke-timeout' && elapsed < 900,
+      `noRevoke=${JSON.stringify(noRevoke)} ok=${JSON.stringify(ok9)} bad=${JSON.stringify(bad9)} hang=${JSON.stringify(hang9)} elapsed=${elapsed}ms`);
+    // ── C10 "vault never opened" is a FAILURE, not a clean zero (review F3) ──
+    // The destroy route is mounted pre-boot; with no runner there is no way to
+    // read the encrypted connector tokens, so nothing was revoked upstream. That
+    // must not render as the innocent {attempted:0, revoked:[], failed:[]}.
+    const unavailable = connectorsUnavailable();
+    rec('C10. connectorsUnavailable(): a vault that never opened reports a FAILED revoke with a reason, never a clean zero',
+      unavailable.revoked.length === 0 && unavailable.failed.length === 1
+      && unavailable.failed[0].reason === 'vault-not-open'
+      && JSON.stringify(unavailable.failed) !== '[]',
+      JSON.stringify(unavailable));
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}
   }

@@ -30,6 +30,7 @@ import { restoreTable } from './vault-import.js';
 import { putBlob, isUserNamespacedBlobPath } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { encodeVectorRaw } from '../search/ann/decode.js';
+import { POLICY_DENY_TABLES, isImportAllowed } from './import-credential-policy.js';
 
 const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_IMPORT_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
@@ -37,7 +38,29 @@ const BATCH = 500;
 
 // Operational / platform / shadow tables: NEVER import (cross-tenant data,
 // session/credential material, or FTS shadow tables maintained by triggers).
+//
+// ⚠️ THIS LIST IS NO LONGER THE SECURITY BOUNDARY — it is the EXPLICIT half of a
+// deny-by-DEFAULT decision. The import gate below is:
+//
+//     import <table>  IFF  isImportAllowed(<table>)   (an explicit `allow` verdict
+//                                                      in import-credential-policy.js)
+//
+// so a table that is in neither this literal nor the policy is refused anyway
+// (`skipped:'not-classified'`), and `verify:import-credential-deny` RED-fails until
+// someone classifies it. That inversion exists because the previous shape —
+// a DENY list whose completeness was policed by a credential-shaped REGEX — was
+// fail-closed only within the regex's reach: a table named
+// `device_login_blobs(id, user_id, data)` matched nothing, was classified by
+// nothing, and imported silently.
+//
+// The list rotted once already: `device_tokens` (migration 0052) was never added,
+// so a bundle's `db/device_tokens.ndjson` landed an attacker-chosen token_hash as a
+// LIVE owner-authority device token (restoreTable forces user_id to the importing
+// owner; foreign_keys are OFF during the restore). The credential half is now
+// composed from POLICY_DENY_TABLES — add tables to the POLICY, not to this
+// literal, which is operational/platform only.
 const DENY = new Set([
+  ...POLICY_DENY_TABLES,
   'audit_log', 'background_jobs', 'batch_jobs', 'import_jobs', 'sessions', 'oauth_states',
   'email_otp_challenges', 'registration_tokens', 'passkey_credentials', 'agent_tokens',
   'secrets', 'federation_keys', 'fleet_attest_keys', 'fleet_registry', 'fleet_health_reports',
@@ -162,6 +185,14 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
     // the DENY comparison meaningful.)
     if (!/^[a-z_][a-z0-9_]*$/.test(table)) { stats[rawName] = { skipped: 'invalid_table_name' }; continue; }
     if (DENY.has(table)) { stats[table] = { skipped: 'denied' }; continue; }
+    // ⚠️ DENY-BY-DEFAULT — the actual boundary. A table is importable ONLY with an
+    // explicit `allow` verdict in import-credential-policy.js. A table nobody has
+    // classified (a new migration, a table the credential regex never matched) is
+    // refused here rather than trusted, and reported (fail-loud) so the skip is
+    // visible in the reconciliation report instead of looking like an empty table.
+    // `verify:import-credential-deny` RED-fails on the same condition, so the
+    // omission cannot ship quietly either.
+    if (!isImportAllowed(table)) { stats[table] = { skipped: 'not-classified' }; continue; }
     // attachments are owned by the blob pass (§3): it INSERTs the row WITH
     // local_path. Importing it here first would win the INSERT and leave
     // local_path null (the blob-pass INSERT OR IGNORE would then dedupe).

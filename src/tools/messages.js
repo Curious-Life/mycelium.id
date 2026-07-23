@@ -21,6 +21,8 @@
  * @property {() => boolean} isScoped — true when MEMORY_SCOPE === 'company'
  */
 
+import { attachmentLineResolver, TRANSCRIPT_BUDGET_DAILY } from '../agent/attachment-context.js';
+
 export function createMessagesDomain(deps) {
   if (!deps) throw new TypeError('createMessagesDomain: deps required');
   const { db, userId, agentLabels, isScoped } = deps;
@@ -75,13 +77,23 @@ export function createMessagesDomain(deps) {
       }
 
       const totalPages = Math.ceil(result.total / pageSize);
+      // Join attachment-derived text (voice-note transcript / image caption /
+      // extracted file text) so a day review shows what was SAID in a voice note,
+      // not just "[Voice note attached]" — src/agent/attachment-context.js.
+      // A day review is user-initiated and can afford a larger transcript budget than a
+      // turn preamble, but it is still bounded (a busy day of voice notes must not blow
+      // the tool result to tens of thousands of tokens); newest render full, older point.
+      const lineFor = await attachmentLineResolver(result.messages, {
+        db, userId, budget: TRANSCRIPT_BUDGET_DAILY,
+      });
       const formatted = result.messages.map(m => {
         const time = m.created_at
           ? new Date(m.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
           : '??:??';
         const src = m.source || 'unknown';
         const label = m.role === 'user' ? 'Human' : (agentLabels[m.agent_id] || m.agent_id || 'Assistant');
-        return `[${time}] (${src}) ${label}: ${m.content}`;
+        const att = lineFor(m);
+        return `[${time}] (${src}) ${label}: ${m.content}${att ? `\n${att}` : ''}`;
       }).join('\n\n');
 
       const remaining = result.total - offset - result.messages.length;

@@ -30,12 +30,20 @@ Phase 3 hardening (platform-agnostic — Discord reuses these):
   (`CHANNEL_COALESCE_MS`, 0 disables). **Rate-limit** (`ratelimit.js`) —
   per-target fixed-window cap, chokepoint gate
   (`CHANNEL_RATELIMIT_MAX`/`_WINDOW_MS`). Poller backoff jitter.
-- **Voice (TTS) replies** — the canonical hardened TTS module harvested verbatim
-  into `tts/` (openai + elevenlabs, markdown strip, chunking, ffmpeg remux to
-  Telegram opus, per-chunk errors, timeouts, cleanup). `voice-pipeline.js` +
-  multipart `sendVoice`; fail-soft after the text send. Enabled when a provider
-  key is set (`OPENAI_API_KEY` / `ELEVENLABS_API_KEY`+`ELEVENLABS_VOICE_ID`).
-  **Requires `ffmpeg` on PATH.**
+- **Voice (TTS) replies** — the canonical hardened TTS module harvested into
+  `tts/` (qwen local-MLX + openai + elevenlabs, markdown strip, chunking,
+  pure-JS OGG/Opus encode with an ffmpeg fallback, per-chunk errors, timeouts,
+  cleanup). The **voice toggle is consulted at reply time** in the chokepoint
+  (`egress/send-handler.js` — `voiceReplyDefault` / `createVoiceReplyPolicy`):
+  when the owner turns voice on in Settings, every agent reply is also spoken
+  through `voice-pipeline.js` → multipart `sendVoice`, with no need for the model
+  to opt in per message (`CHANNEL_VOICE_REPLIES` = `always` | `auto` | `off`
+  refines it). Fail-soft **but never silent**: a render/upload failure delivers
+  the text and posts one throttled "🔇 voice unavailable" notice through the
+  SAME chokepoint (honest reason code, no plaintext). Trusted command-acks are
+  never auto-voiced. Enabled when a provider is configured (`QWEN_TTS_ENABLED`
+  + a frozen per-agent sample, or `OPENAI_API_KEY` /
+  `ELEVENLABS_API_KEY`+`ELEVENLABS_VOICE_ID`).
 - **Group binding** — `/allow` · `/disallow` · `/channels` (owner-only,
   `commands.js`); groups respond only after `/allow` (fail-closed); vault
   `telegram_groups` via the internal router.

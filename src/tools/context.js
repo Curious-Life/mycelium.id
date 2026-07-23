@@ -20,6 +20,7 @@
 // @property {string} userId
 
 import { toConfidence } from '../claims/confidence.js';
+import { attachmentLineResolver, TRANSCRIPT_BUDGET_BRIEFING } from '../agent/attachment-context.js';
 import { trimToTokenBudget } from '../inference/token-budget.js';
 import { humanSchedule, humanNextRun } from '../agent/scheduler-time.js';
 import { CYCLE_CREATED_BY } from '../agent/cycle-prompts.js';
@@ -189,13 +190,28 @@ export function createContextDomain(deps) {
           const limit = Math.min(Math.max(args.recentMessages || 10, 1), 40);
           const rows = await db.messages.selectRecent(userId, { limit, scope: 'personal' });
           if (rows?.length) {
+            // Attachment-derived text (voice-note transcript / image caption /
+            // extracted document text) is joined in HERE, not folded into content:
+            // the 500-char clamp below applies to what the human wrote, and the
+            // transcript rides after it with its own clamp — so a long message can
+            // never truncate the transcript out of the briefing. Fail-soft +
+            // honest: an unreadable attachment says so (agent/attachment-context.js).
+            // An aggregate budget keeps 40 transcripts from crowding out the rest of
+            // the brief (newest render in full, older degrade to a pointer). contentLimit
+            // 500 matches the content slice rendered below, so the dedup never suppresses
+            // a transcript that the slice cut off (MINOR-1: channel-inbound folds the
+            // untruncated transcript into content, which the 500-slice would then drop).
+            const lineFor = await attachmentLineResolver(rows, {
+              db, userId, budget: TRANSCRIPT_BUDGET_BRIEFING, contentLimit: 500,
+            });
             const lines = rows
               .slice()
               .reverse()
               .map((m) => {
                 const who = m.role === 'user' ? 'Human' : 'You';
                 const when = (m.created_at || '').replace('T', ' ').slice(0, 16);
-                return `${m.pinned ? '📌 ' : ''}**${who}** _${when}_: ${(m.content || '').slice(0, 500)}`;
+                const att = lineFor(m);
+                return `${m.pinned ? '📌 ' : ''}**${who}** _${when}_: ${(m.content || '').slice(0, 500)}${att ? `\n${att}` : ''}`;
               })
               .join('\n');
             sections.push(`---\n# RECENT MESSAGES (last ${rows.length})\n\n${lines}`);

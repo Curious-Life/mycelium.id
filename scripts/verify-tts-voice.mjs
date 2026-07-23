@@ -282,11 +282,16 @@ const plain = await import('../src/tts/qwen3-tts-model.js');
   rec('V7. TOP-LINE HONESTY (server) — ready + opted-in + NO sample ⇒ enabled:false + samplePending:true',
     ready && j.enabled === false && j.qwen?.samplePending === true && j.qwen?.model?.phase === 'ready',
     `ready=${ready} enabled=${j.enabled} samplePending=${j.qwen?.samplePending} phase=${j.qwen?.model?.phase}`);
-  // V7b — CHANNEL DEFERRAL (voice-panel audit): channel qwen voice can't be
-  // delivered (the confined daemon has no sample), so the top-line must never
-  // claim it. The response carries channelDeferred so the UI can say so honestly.
-  rec('V7b. CHANNEL DEFERRAL — qwen.channelDeferred:true (channel voice not deliverable yet)',
-    j.qwen?.channelDeferred === true, `channelDeferred=${j.qwen?.channelDeferred}`);
+  // V7b — CHANNEL VOICE NO LONGER DEFERRED (QA6-VOICE): the confined daemon POSTs
+  // the line to the vault's loopback /internal/voice-render, which decrypts the
+  // frozen sample in-memory and renders on the MLX service it owns — so channel
+  // qwen voice IS deliverable. The honesty coupling MOVED off the deferral flag
+  // onto the SAMPLE gate: with the model ready + opted-in but NO frozen sample,
+  // `enabled` must STILL be false (proven by V7 above) — a render would 501. This
+  // asserts the deferral is gone AND that removing it did not make the top-line lie.
+  rec('V7b. CHANNEL VOICE undeferred — channelDeferred:false, yet enabled stays honest via the sample gate',
+    j.qwen?.channelDeferred === false && j.enabled === false && j.qwen?.samplePending === true,
+    `channelDeferred=${j.qwen?.channelDeferred} enabled=${j.enabled} samplePending=${j.qwen?.samplePending}`);
 
   const put = await fetch(`${base}/portal/settings/tts`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },

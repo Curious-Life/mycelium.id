@@ -6,7 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { boot } from './index.js';
-import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath, mindDestroyRoots } from './paths.js';
+import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath, destroyExtraRoots, vaultFileFamily } from './paths.js';
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
 import { precompressedStatic, setStaticHeaders, compressionMiddleware } from './serving.js';
@@ -48,7 +48,7 @@ import { ensureTranscribeSupervisor } from './transcribe/supervisor.js';
 import { detectHardware } from './hardware/detect.js';
 import { portalChannelsRouter } from './portal-channels.js';
 import { portalConnectorsRouter } from './portal-connectors.js';
-import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler } from './connectors/index.js';
+import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler, connectorsUnavailable } from './connectors/index.js';
 import { authShimRouter } from './auth-shim.js';
 import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
@@ -81,6 +81,7 @@ import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
 import { readRemoteConfig, passkeyEnrolled } from './remote/config.js';
 import { isValidHandle, createIdentity } from './identity/identity.js';
+import { currentHandle, firstLabel } from './identity/handle-service.js';
 import { createRelayClient } from './remote/relay-client.js';
 import { setSessionKeys } from './account/session-keys.js';
 import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
@@ -370,7 +371,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // function, not nested in it) and passed in. See the creation note there.
   // db+userId: deleting a model from disk also CLEARS its approval (settings.taskModels), so
   // the decline survives a restart and "re-approve it in Settings" is a real remedy (§3.10d).
-  v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon, db, userId }));
+  v.use('/api/v1/portal', portalHardwareRouter({ daemon: hwOllamaDaemon, db, userId, authenticatePortalRequest: portalOwnerGate }));
   // The first-run bundle orchestrator (Intelligence redesign Part I §4.3): the proposed
   // set with sizes + free-disk headroom, and the one-tap apply that fans out the FUNCTION
   // writes through the one task-model write path. Downloads stay on the client via the
@@ -539,6 +540,10 @@ export async function startRestServer({
   let dbHandle = null;
   let closeHandle = null;
   let booting = false;
+  // The live connector runner, hoisted OUT of completeBoot so the always-mounted
+  // destroy route can reach it (factory reset must revoke each provider's OAuth
+  // grant upstream — QA P0.9). null until the vault opens ⇒ nothing to revoke.
+  let connectorRunnerRef = null;
   // Why the vault didn't open, for transparent UX (else every failure looks like
   // "not set up yet"). null = no failure. Classified so the UI can route to the
   // right recovery (re-enter key vs. disable at-rest) instead of a dead-end setup.
@@ -680,7 +685,7 @@ export async function startRestServer({
         try {
           const _rc = readRemoteConfig();
           const _relayBase = (_rc.remoteMode === 'managed' || _rc.remoteMode === 'own-relay') ? _rc.controlPlaneUrl : null;
-          const _fedHandle = (_rc.publicHost || '').split('.')[0];
+          const _fedHandle = firstLabel(_rc.publicHost);
           if (_relayBase && publicHost && identity?.publicKeyB64 && isValidHandle(_fedHandle)) {
             const _fedClient = createRelayQueueClient({ relayBaseUrl: _relayBase, handle: _fedHandle, publicKeyB64: identity.publicKeyB64, sign: (b) => identity.sign(b) });
             fedPull = createFederationPullLoop({
@@ -786,7 +791,7 @@ export async function startRestServer({
         if (process.env.MYCELIUM_RELAY_DIALOUT === '1') {
           try {
             const rc = readRemoteConfig();
-            const relayHandle = String(rc.publicHost || '').split('.')[0];
+            const relayHandle = firstLabel(rc.publicHost);
             if (isValidHandle(relayHandle) && rc.controlPlaneUrl) {
               const relayIdentity = createIdentity({ masterHex: opts.userHex || process.env.ENCRYPTION_MASTER_KEY });
               relayClient = createRelayClient({ relayBase: rc.controlPlaneUrl, handle: relayHandle, identity: relayIdentity, restPort: port, log: (m) => console.error(`[relay] ${m}`) });
@@ -827,6 +832,7 @@ export async function startRestServer({
       // (injected keys) never sync a connector against a deterministic test vault.
       registerBuiltinAdapters();
       const connectorRunner = createConnectorRunner({ db, userId: bootUserId, enqueueEnrichment });
+      connectorRunnerRef = connectorRunner;
       // One-time migration of pre-2b `connector:<id>:state` secret blobs into the
       // dedicated connectors table (migration 0008). Idempotent; safe every boot.
       await connectorRunner.store.backfillLegacyState().catch((e) => {
@@ -944,16 +950,49 @@ export async function startRestServer({
     isTrustedLoopback,
     readMaster: () => { try { return readUserMaster(); } catch { return null; } },
     dataDir: () => dataDir(),
-    // The mind tree lives OUTSIDE the app-data dir's db set, so the wipe needs it
-    // explicitly — BOTH the durable dir and the legacy dir. That coverage is the
-    // single source of truth in paths.js mindDestroyRoots(), which the migration
-    // gate (verify-mind-root-migration.mjs) asserts against, so the real wipe and
-    // the gate can never diverge.
-    extraRoots: () => mindDestroyRoots(),
+    // Everything the recursive dataDir wipe cannot reach, from ONE resolver
+    // (paths.js destroyExtraRoots — the migration gate verify-mind-root-migration
+    // asserts against its mindDestroyRoots half, so the real wipe and the gate
+    // can never diverge):
+    //   · the mind trees (durable <dataDir>/mind + the legacy <cwd>/data/mind/mind)
+    //   · every artifact a per-item env override RELOCATED out of dataDir —
+    //     MYCELIUM_DB (+ its -wal/-shm and .search.db sidecar family),
+    //     MYCELIUM_AUTH_DB (the PASSKEY store), MYCELIUM_KCV,
+    //     MYCELIUM_UPLOADS_ROOT, MYCELIUM_VAULT_LOCK, MYCELIUM_REMOTE_CONFIG,
+    //     MYCELIUM_VOICE_SAMPLES_ROOT. Those used to survive a factory reset
+    //     while the Keychain was destroyed around them (QA P0.6).
+    // Injected-path boots (verify scripts) resolve the vault from an explicit
+    // ARGUMENT rather than the env, so the effective paths this process actually
+    // opened are appended — the two resolvers can never disagree in one process.
+    extraRoots: () => {
+      const roots = destroyExtraRoots();
+      if (dbPath !== undefined || kcvPath !== undefined) {
+        roots.push(...vaultFileFamily(effectiveDbPath), effectiveKcvPath, effectiveLockPath,
+          effectiveUploadsRoot, effectiveRemoteConfigPath);
+      }
+      return [...new Set(roots)];
+    },
     deleteKeychain,
     readPulledModels: () => readPulledModels(),
     deleteOllamaModels: makeDeleteOllamaModels(createOllamaClient()),
-    revokeRelay: () => releaseManagedHandle({ log: console.info }),
+    // The route hands over the master that just passed the recovery-key gate:
+    // env.ENCRYPTION_MASTER_KEY is set only by boot(), and this router is mounted
+    // pre-boot, so without it a managed user resetting an unbooted/broken vault
+    // could not sign the release claim at all.
+    revokeRelay: (masterHex) => releaseManagedHandle({ log: console.info, masterHex }),
+    // Best-effort UPSTREAM OAuth revoke for every connected connector, so a
+    // factory reset does not leave Google/Notion/… holding a live grant. Bounded
+    // + never blocking; the per-connector outcome is reported, never assumed.
+    // Read the ref LAZILY (per request): this router is mounted before
+    // completeBoot runs, so capturing the value here would pin `null` forever.
+    // NO RUNNER ⇒ the vault never opened, so its connector tokens are unreadable
+    // and NOTHING was revoked upstream — report that as a FAILURE, not as the
+    // clean "0 connectors" it looks like. Destroying an unbooted vault is a real
+    // path (see revokeRelay above), and live OAuth grants may be sitting in the
+    // encrypted rows about to be wiped.
+    revokeConnectors: async () => (
+      connectorRunnerRef ? connectorRunnerRef.revokeAll() : connectorsUnavailable()
+    ),
     // Daemon teardown is done by the Tauri relaunch's reap() (kills every child
     // process group). A node-only caller relies on that; quiesce stays a no-op.
     quiesce: async () => {},
@@ -963,7 +1002,14 @@ export async function startRestServer({
   // Remote-access control surface (loopback-only): set the operator password
   // (the OAuth gate) + read/patch the non-secret remote config. Mounted before
   // the vault guard so it works in setup mode AND post-boot.
-  app.use('/api/v1/remote', remoteRouter());
+  // getDb/getUserId are LAZY: this mounts before the vault is open (setup mode),
+  // and the ONE handle setter uses them only to write the DERIVED
+  // user_profiles.handle mirror after a successful claim (best-effort by design —
+  // publicHost is the authority, the row is a cache).
+  app.use('/api/v1/remote', remoteRouter({
+    getDb: () => dbHandle,
+    getUserId: () => resolvedUserId,
+  }));
 
   // Local "always signed in" shim so the canonical portal's session check
   // (/auth/session) succeeds and the app opens instead of bouncing to /login.
@@ -974,7 +1020,7 @@ export async function startRestServer({
     // is set → the login UI brands generically instead of with a placeholder.
     // This is the IDENTITY the login surfaces show — the operator account's
     // internal email is never surfaced (single-user: there is one account).
-    getHandle: () => { const h = (readRemoteConfig().publicHost || '').split('.')[0]; return isValidHandle(h) ? h : null; },
+    getHandle: () => currentHandle(),
     // Effective "web sign-in needs a passkey" policy (enabled AND a passkey enrolled),
     // surfaced to the relay browser via /auth/setup-status so the SPA renders passkey-only.
     getRequirePasskey: () => { try { return readRemoteConfig().requirePasskeyForWeb === true && passkeyEnrolled(); } catch { return false; } },

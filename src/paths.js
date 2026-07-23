@@ -154,3 +154,66 @@ export function mindDestroyRoots({ env = process.env, cwd = process.cwd() } = {}
 // Frozen TTS voice sample(s): <dataDir>/voice-samples/<agentId>.mvs (encrypted,
 // "the identity" — not re-rollable). Carried by backup like uploads/.
 export function voiceSamplesRoot(opts = {}) { return under('voice-samples', 'MYCELIUM_VOICE_SAMPLES_ROOT', opts); }
+
+// ── Factory-reset coverage: the EFFECTIVE artifact paths ────────────────────
+// `under()` lets EVERY artifact be relocated independently of dataDir(), so a
+// factory reset that wipes dataDir() alone leaves any relocated artifact behind
+// — the vault (MYCELIUM_DB), the PASSKEY store (MYCELIUM_AUTH_DB), the key-check
+// value, the uploaded blobs, the passphrase seal, the remote config, the frozen
+// voice sample. Worse, the Keychain is destroyed AROUND them, so the user is
+// told "everything is gone" while decryptable content survives on disk.
+//
+// The destroy engine therefore wipes the EFFECTIVE paths (the same resolvers the
+// app boots with), not a bare dataDir(). Anything that already resolves INSIDE
+// dataDir is omitted here — the recursive dir wipe covers it — so this list is
+// exactly "what the dir wipe cannot reach".
+const RELOCATABLE_RESOLVERS = [dbPath, kcvPath, authDbPath, uploadsRoot, lockPath, remoteConfigPath, voiceSamplesRoot];
+
+/** true iff `p` is `root` itself or lives under it. */
+function isInside(root, p) {
+  return p === root || p.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+}
+
+/**
+ * SQLite writes its journal + shared-memory companions NEXT TO the db file, and
+ * the regenerable FTS/vec index lives in a `<name>.search.db` sidecar beside it
+ * (src/search/sqlite/sidecar.js sidecarPath — the rule is mirrored here rather
+ * than imported so paths.js stays a dependency-free leaf; verify:destroy-paths
+ * asserts the two agree). All of them hold decryptable content or its structure,
+ * so a relocated vault must take its whole file family with it.
+ */
+export function vaultFileFamily(db) {
+  const sidecar = /\.db$/i.test(db) ? db.replace(/\.db$/i, '.search.db') : `${db}.search.db`;
+  return [db, `${db}-wal`, `${db}-shm`, sidecar, `${sidecar}-wal`, `${sidecar}-shm`];
+}
+
+/**
+ * The absolute artifact paths that live OUTSIDE dataDir() because a per-item env
+ * override relocated them. Empty in the default install (everything is under
+ * dataDir). `:memory:` and non-absolute values are dropped (nothing on disk).
+ */
+export function relocatedArtifactPaths({ env = process.env, cwd = process.cwd() } = {}) {
+  const root = dataDir({ env, cwd });
+  const out = [];
+  const add = (p) => {
+    if (typeof p !== 'string' || !p || p === ':memory:') return;
+    if (!path.isAbsolute(p) || isInside(root, p)) return;
+    out.push(p);
+  };
+  for (const resolve of RELOCATABLE_RESOLVERS) add(resolve({ env }));
+  const db = dbPath({ env });
+  if (typeof db === 'string' && db !== ':memory:' && path.isAbsolute(db) && !isInside(root, db)) {
+    for (const f of vaultFileFamily(db)) add(f);
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * EVERY absolute root a factory reset must wipe on top of the recursive dataDir()
+ * wipe: the mind trees (mindDestroyRoots) PLUS any artifact an env override moved
+ * out of dataDir (relocatedArtifactPaths). SINGLE SOURCE OF TRUTH for the destroy
+ * route's `extraRoots` — the engine still fail-closed refuses an unsafe root.
+ */
+export function destroyExtraRoots({ env = process.env, cwd = process.cwd() } = {}) {
+  return [...new Set([...mindDestroyRoots({ env, cwd }), ...relocatedArtifactPaths({ env, cwd })])];
+}

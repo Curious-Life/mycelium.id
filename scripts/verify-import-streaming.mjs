@@ -86,13 +86,21 @@ const rec = (name, ok, detail = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  $
   let mycRouted = false;
   try { await runImport({ kind: 'archive', buffer: await mkZip({ 'manifest.json': JSON.stringify({ format: 'mycelium-vault-export' }) }) }, ctx()); }
   catch (e) { mycRouted = /rawQuery|importMyceliumVault|vault/i.test(e.message); }
-  const unk = await runImport({ kind: 'archive', buffer: await mkZip({ 'random.txt': 'hi' }) }, ctx());
+  // A genuinely unrecognized archive: no export manifest AND no bundle-allowlisted
+  // entry (a `.txt` would now import as a bundle — QA6 P7). `.bin` is neither.
+  const unk = await runImport({ kind: 'archive', buffer: await mkZip({ 'random.bin': 'hi' }) }, ctx());
+  // QA6 P7 — the STREAMING detector matches signature basenames AT ANY DEPTH.
+  cap = []; const nested = await runImport({ kind: 'archive', buffer: await mkZip({ 'export-2026/conversations.json': JSON.stringify(claude), 'export-2026/media/x.png': Buffer.alloc(64) }) }, ctx()); const nestedN = cap.length;
+  // …and refuses to guess between two same-named signature files.
+  const ambiguous = await runImport({ kind: 'archive', buffer: await mkZip({ 'a/conversations.json': JSON.stringify(claude), 'b/conversations.json': JSON.stringify(claude) }) }, ctx());
   await fs.rm(tmp, { recursive: true, force: true });
   rec('C1. ChatGPT export streamed from buffer', a.importResult?.type === 'chatgpt' && aN === 60, `type=${a.importResult?.type} msgs=${aN}`);
   rec('C2. Claude export streamed from buffer', b.importResult?.type === 'claude' && bN === 40, `type=${b.importResult?.type} msgs=${bN}`);
   rec('C3. ChatGPT export streamed from disk filePath', c.importResult?.type === 'chatgpt' && cN === 60, `type=${c.importResult?.type} msgs=${cN}`);
   rec('C4. mycelium manifest routes to the JSZip vault importer', mycRouted);
   rec('C5. unrecognized archive → honest error', !!unk.error);
+  rec('C6. nested/one-folder-deep export detects via the streaming path', nested.importResult?.type === 'claude' && nestedN === 40, `type=${nested.importResult?.type} msgs=${nestedN}`);
+  rec('C7. two same-named signature files → honest ambiguity error (no guess), content-free', typeof ambiguous.error === 'string' && /2 files named conversations\.json/.test(ambiguous.error) && !/\ba\/|\bb\//.test(ambiguous.error) && ambiguous.importResult === undefined, JSON.stringify(ambiguous.error?.slice(0, 50)));
 }
 
 console.log('\n' + '='.repeat(64));

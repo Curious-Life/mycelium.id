@@ -321,10 +321,19 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
   // about it (independent review, 2026-07-16).
   //
   // ⚠️ The four are NOT symmetrical, and the UI must not pretend they are (§3.10d-c):
-  //   • embedder    — BUNDLED with the app. Cannot be declined, cannot be downloaded,
-  //                   ~always 'ok'. Render as "included", never as an approvable choice —
-  //                   presenting a non-choice as consent is the dishonesty §3.10 exists
-  //                   to remove.
+  //   • embedder    — SHIPS WITH the app but is NOT infallible: the Nomic weights are
+  //                   DOWNLOADED from HuggingFace at first load (embed-service.py
+  //                   _load_model → hf_hub_download), so this member CAN be 'loading'
+  //                   (first-run download), 'error'/'down' (that download failed, or the
+  //                   governor halted), or 'deps_missing' (dev box, no venv). It is not a
+  //                   CONSENTED choice (there is nothing to approve/decline), so it renders
+  //                   as "included" WHEN HEALTHY — but a failed/loading embedder must show its
+  //                   TRUE state and a Download/Retry (→ POST /portal/embed/retry, which
+  //                   nudges the supervisor + drainer to re-attempt the HF download), NEVER a
+  //                   fake green ✓. Presenting a broken embedder as "included" was the exact
+  //                   fresh-install hang §3.10 exists to remove: Search reads ✓ while nothing
+  //                   ever embeds → Generate 409s forever → "Processing 0/N" with no escape.
+  //                   The status here is the REAL getEmbedderHealth(); the UI keys off it.
   //   • labeler     — consented: 'no_model' until the owner approves one; 'paused' when the
   //                   owner stopped the churn. Both are CHOICES, not faults.
   //   • enricher    — consented via its OWN setting (`taskModels.enrich`), which is why it
@@ -665,6 +674,12 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       let embedPaused = false; try { embedPaused = Boolean(embedPausedFn?.()); } catch { embedPaused = false; }
       let categorizePaused = false; try { categorizePaused = Boolean(categorizePausedFn?.()); } catch { categorizePaused = false; }
       const st = (() => { try { return drainerStatus?.(); } catch { return null; } })();
+      // QA6: the drainer's own scheduling decision (in-memory, free — status() is a plain object
+      // read). NOT re-derived from the backlog counts here: the drainer is the only thing that knows
+      // whether its embed loop hit the cap while still progressing, and a second derivation would
+      // drift from the first. Absent (an older/stopped drainer, or no drainer) ⇒ false, i.e. the
+      // pre-QA6 rendering — fail-soft, never a fabricated block.
+      const catWaitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
       const hstat = (fn) => { try { return fn?.()?.status || 'unknown'; } catch { return 'unknown'; } };
       const embStatus = hstat(embedderHealth);
       const labStatus = hstat(labelerHealth);
@@ -700,6 +715,20 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       if (embedded === 0) stages.push({ key: 'categorize', state: 'pending', paused: categorizePaused });
       else if (labStatus === 'no_model') stages.push({ key: 'categorize', state: 'blocked', reason: 'no_model', action: approveModel, paused: categorizePaused });
       else if (categorizePaused && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'paused', action: resume, paused: true });
+      // ⚠️ QA6 — THE STAGE IS DEFERRED, NOT IDLE, AND NOT RUNNING. The drainer serializes the two
+      // on-box stages: while embedding still has a backlog it is actively draining, categorize +
+      // enrich do not run at all (drainer.js, `waitOnEmbed`). Without this arm the stage rendered
+      // `running` with a categorizeEta counting down against a loop that is not executing — the
+      // plausible-wrong-number class §3.9 exists to delete — or `done` the moment catPending hit 0
+      // from a previous run. Read from the drainer's OWN in-memory decision (free), never re-derived
+      // from counts here: a second derivation would be a second opinion, and the two would drift.
+      // ABOVE ollama_down on purpose: while deferred the drainer does not touch Ollama at all, so
+      // "waiting for embedding" is the true immediate cause; the ollama_down remedy re-appears the
+      // moment embedding is caught up and the stage is actually trying to run.
+      // Carries NO action — a deferral has no remedy for the user to apply, and the design forbids a
+      // named block without one only where a remedy EXISTS. `paused` is still carried so the
+      // co-located Stop control stays reachable during a long import.
+      else if (catWaitingOnEmbed && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_embed', paused: categorizePaused });
       else if (DOWN.has(labStatus)) stages.push({ key: 'categorize', state: 'blocked', reason: 'ollama_down', action: checkLabeler, paused: categorizePaused });
       else if (catPending > 0) stages.push({ key: 'categorize', state: 'running', count: { done: catTagged, total: catTotal }, etaSeconds: categorizeEta(st, catPending, categorizePaused, false), paused: false });
       else stages.push({ key: 'categorize', state: 'done', count: { done: catTagged, total: catTotal }, paused: categorizePaused });
@@ -724,7 +753,19 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // overall + blockedOn — a block anywhere dominates (the pipeline cannot advance past it);
       // else running if any stage is; else done iff EVERY stage is done; else still running
       // (pending stages remain, work is progressing). An empty vault is `idle`, not `running`.
-      const firstBlocked = stages.find((s) => s.state === 'blocked');
+      // ⚠️ QA6 — `waiting_embed` IS EXCLUDED FROM DOMINANCE, AND THAT IS NOT A LOOPHOLE. `overall:
+      // blocked` renders "Waiting on you — …" (PipelineStatus.svelte) and drives every consumer's
+      // needs-attention treatment. A categorize stage deferred behind a HEALTHY, PROGRESSING embed
+      // stage is the pipeline working exactly as designed: nothing is waiting on the user, there is
+      // no remedy to offer, and letting it dominate would paint a normal large import as broken —
+      // the false alarm that teaches people to ignore the indicator. The STAGE still says
+      // blocked/waiting_embed (the per-stage truth); the AGGREGATE stays `running`, because embed
+      // is running. The predicate keys on the STAGE + reason, so every actionable block still dominates.
+      // Keyed on the STAGE + reason, not the reason alone: only the categorize deferral behind a
+      // progressing embed is exempt from dominance. Any other stage that ever reports
+      // `waiting_embed` (e.g. cluster's own pending `waiting_embed`) is a different, real state and
+      // must not be silently swept in by a bare reason match.
+      const firstBlocked = stages.find((s) => s.state === 'blocked' && !(s.key === 'categorize' && s.reason === 'waiting_embed'));
       let overall;
       if (total === 0) overall = 'idle';
       else if (firstBlocked) overall = 'blocked';

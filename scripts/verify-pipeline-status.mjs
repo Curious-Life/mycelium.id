@@ -32,7 +32,11 @@ import { createReadiness } from '../src/readiness.js';
 
 const U = 'local-user';
 const STATES = new Set(['pending', 'running', 'blocked', 'done']);
-const REASONS = new Set(['no_model', 'embedder_down', 'ollama_down', 'disk_low', 'paused', 'needs_generate', 'too_few_embedded']);
+const REASONS = new Set(['no_model', 'embedder_down', 'ollama_down', 'disk_low', 'paused', 'needs_generate', 'too_few_embedded', 'waiting_embed']);
+// QA6: the ONE blocked reason with no user remedy — categorize DEFERRED behind a draining embed
+// stage is scheduled work, not a fault, so it carries a reason but no action (the design forbids a
+// named block WITHOUT an action only where a remedy exists). Every OTHER blocked reason must carry one.
+const ACTIONLESS_BLOCK = new Set(['waiting_embed']);
 const OVERALL = new Set(['running', 'blocked', 'done', 'idle']);
 const ORDER = ['import', 'embed', 'categorize', 'cluster', 'describe', 'measure'];
 
@@ -83,8 +87,12 @@ function invariants(p, where) {
     assert.ok(STATES.has(s.state), `${where}/${s.key}: '${s.state}' is not a legal state`);
     if (s.state === 'blocked') {
       assert.ok(REASONS.has(s.reason), `${where}/${s.key}: a blocked stage must carry an enum reason — got '${s.reason}'`);
-      assert.ok(s.action && typeof s.action.label === 'string' && typeof s.action.target === 'string',
-        `${where}/${s.key}: a blocked stage must carry an action {label,target} — got ${JSON.stringify(s.action)}`);
+      if (!ACTIONLESS_BLOCK.has(s.reason)) {
+        assert.ok(s.action && typeof s.action.label === 'string' && typeof s.action.target === 'string',
+          `${where}/${s.key}: a blocked stage must carry an action {label,target} — got ${JSON.stringify(s.action)}`);
+      } else {
+        assert.ok(!s.action, `${where}/${s.key}: a ${s.reason} block has no user remedy — it must NOT carry an action`);
+      }
     }
   }
   assert.ok(OVERALL.has(p.overall), `${where}: overall '${p.overall}' is not a legal enum`);
@@ -184,6 +192,43 @@ await t('PS5c. categorizePaused only ⇒ categorize blocked/paused, embed still 
   assert.equal(s.categorize.reason, 'paused');
   assert.equal(s.categorize.paused, true, 'categorize carries paused:true');
   assert.equal(p.blockedOn, 'paused', 'the paused categorize is the surfaced block');
+});
+
+// ── PS5d) QA6: categorize DEFERRED behind a draining embed stage ──────────────
+await t('PS5d. QA6: drainer reports categorizeWaitingOnEmbed ⇒ categorize blocked/waiting_embed, NO action, overall stays running', async () => {
+  // Embed is mid-drain (pending > 0) AND the drainer says the categorize stage is deferred behind it.
+  // categorize has its own pending work and a healthy model — the ONLY reason it is not running is the
+  // scheduler. It must render as a NAMED, ACTIONLESS block, and must NOT dominate `overall` (embed is
+  // healthily running — nothing is waiting on the user).
+  const p = await pipe({
+    emb: { total: 1000, embedded: 400, pending: 600 }, cat: { total: 1000, tagged: 100, pending: 900 },
+    points: 0, labHealth: 'ok', st: { categorizeWaitingOnEmbed: true },
+  });
+  invariants(p, 'PS5d');
+  const s = byKey(p);
+  assert.equal(s.embed.state, 'running', 'embed is the stage actually working');
+  assert.equal(s.categorize.state, 'blocked', 'categorize is deferred ⇒ blocked, never a lying running/done');
+  assert.equal(s.categorize.reason, 'waiting_embed', 'and it says WHY — waiting for embedding');
+  assert.ok(!s.categorize.action, 'a deferral has no user remedy ⇒ NO action button (nothing for the user to do)');
+  assert.deepEqual(s.categorize.count, { done: 100, total: 1000 }, 'it still carries its own counts');
+  assert.equal(s.categorize.paused, false, 'not paused — the Stop control stays a Pause');
+  assert.equal(p.overall, 'running', 'a deferral behind a HEALTHY embed is the pipeline working — it must NOT read as blocked-on-you');
+  assert.notEqual(p.blockedOn, 'waiting_embed', 'and waiting_embed must never surface as the aggregate block');
+});
+
+// ── PS5e) QA6: the deferral OUTRANKS ollama_down (the true immediate cause) but yields to no_model/paused ──
+await t('PS5e. QA6: waiting_embed outranks ollama_down; no_model + paused still outrank waiting_embed', async () => {
+  // While deferred the drainer does not touch Ollama, so "waiting for embedding" is the true cause,
+  // not "ollama down". But a MISSING MODEL (no consent) and an owner PAUSE are both states the user
+  // must still see — they outrank the scheduler.
+  const down = await pipe({ emb: { total: 1000, embedded: 400, pending: 600 }, cat: { total: 1000, tagged: 100, pending: 900 }, points: 0, labHealth: 'down', st: { categorizeWaitingOnEmbed: true } });
+  assert.equal(byKey(down).categorize.reason, 'waiting_embed', 'ollama_down must NOT mask the real immediate cause');
+
+  const noModel = await pipe({ emb: { total: 1000, embedded: 400, pending: 600 }, cat: { total: 1000, tagged: 100, pending: 900 }, points: 0, labHealth: 'no_model', st: { categorizeWaitingOnEmbed: true } });
+  assert.equal(byKey(noModel).categorize.reason, 'no_model', 'a missing model (no consent) still outranks the deferral');
+
+  const paused = await pipe({ emb: { total: 1000, embedded: 400, pending: 600 }, cat: { total: 1000, tagged: 100, pending: 900 }, points: 0, categorizePaused: true, st: { categorizeWaitingOnEmbed: true } });
+  assert.equal(byKey(paused).categorize.reason, 'paused', 'an owner pause still outranks the deferral');
 });
 
 // ── PS6) the debounce made visible (re-cluster is a deliberate action, not silence) ──

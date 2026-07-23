@@ -20,14 +20,15 @@ export function createDiscordVoicePipeline({ sendVoice, agentId, logPrefix = 'ch
   return {
     isEnabled: () => tts.isEnabled(),
     async deliver({ target, text, replyToMessageId }) {
-      if (!tts.isEnabled()) return { enabled: false, voiceSent: 0, voiceTotal: 0 };
+      if (!tts.isEnabled()) return { enabled: false, ok: false, voiceSent: 0, voiceTotal: 0, code: 'voice-disabled' };
       try {
         const { buffer, waveform, durationSecs } = await tts.synthesizeForDiscord(text, { agentId });
         await sendVoice({ channelId: target, audio: buffer, waveform, durationSecs, replyToMessageId });
-        return { enabled: true, voiceSent: 1, voiceTotal: 1 };
+        return { enabled: true, ok: true, voiceSent: 1, voiceTotal: 1, code: null };
       } catch (e) {
-        console.warn(`[${logPrefix}] discord voice synthesis failed (text delivered): ${e.message}`);
-        return { enabled: true, voiceSent: 0, voiceTotal: 1 };
+        // Codes only (§1) — a provider message can quote the synthesized line.
+        console.warn(`[${logPrefix}] discord voice synthesis failed (text delivered): ${e?.code || e?.name || 'error'}`);
+        return { enabled: true, ok: false, voiceSent: 0, voiceTotal: 1, code: e?.code === 'voice-sample-pending' ? 'voice-sample-pending' : 'render-failed' };
       }
     },
   };

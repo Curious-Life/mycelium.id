@@ -69,13 +69,14 @@ export function portalSettingsRouter({ db, userId }) {
       // Honest signal: hasVoiceSample now decrypt-validates (a corrupt/re-keyed
       // sample reads pending, never "active" over a 501 render). Async.
       const qwenSamplePending = !(await hasVoiceSample());
-      // ⚠️ CHANNEL voice for qwen is DEFERRED — the confined channel daemon can't
-      // reach the vault-encrypted sample, so a channel voice message can never be
-      // delivered in the cloned voice yet. The settings top-line `enabled` MEANS
-      // "a channel voice message will be delivered", so it must NEVER claim qwen
-      // (voice-panel honesty audit). Local voice is available via the character-
-      // page audition, a separate surface. Flip this when channel threading ships.
-      const QWEN_CHANNEL_DEFERRED = true;
+      // CHANNEL voice for qwen is NO LONGER deferred: the confined daemon does not
+      // touch the encrypted sample — it POSTs the line to the vault's loopback
+      // /api/v1/internal/voice-render, which decrypts in-memory and renders on the
+      // MLX service it owns (src/internal-router.js, packages/channel-daemon/tts/
+      // providers/qwen.js). The remaining honest gates are the ones below: the model
+      // must be installed AND a frozen sample must exist, or every render 501s.
+      // (Kept as a named constant so the honesty coupling stays greppable.)
+      const QWEN_CHANNEL_DEFERRED = false;
       res.json({
         enabled: !!(provider && (
           (provider === 'openai' && openaiHasKey) ||
@@ -83,6 +84,9 @@ export function portalSettingsRouter({ db, userId }) {
           (provider === 'qwen' && qwenEnabled && model.phase === 'ready' && !qwenSamplePending && !QWEN_CHANNEL_DEFERRED)
         )),
         provider: provider || null,
+        // Channel voice-reply policy: 'always' (default — voice on means replies are
+        // spoken) | 'auto' (only when the inbound was a voice note) | 'off'.
+        voiceReplies: (await getS('CHANNEL_VOICE_REPLIES')) || 'always',
         qwen: { enabled: qwenEnabled, samplePending: qwenSamplePending, channelDeferred: QWEN_CHANNEL_DEFERRED, variant: (await getS('QWEN_TTS_VARIANT')) || model.variant, variants: QWEN_VARIANTS, model },
         openai: { hasKey: openaiHasKey, voice: (await getS('OPENAI_TTS_VOICE')) || 'onyx', model: (await getS('OPENAI_TTS_MODEL')) || 'tts-1-hd', voices: OPENAI_VOICES, models: OPENAI_MODELS },
         elevenlabs: { hasKey: elevenHasKey, voiceId: (await getS('ELEVENLABS_VOICE_ID')) || null, model: (await getS('ELEVENLABS_MODEL_ID')) || 'eleven_turbo_v2_5', models: ELEVENLABS_MODELS },
@@ -92,7 +96,12 @@ export function portalSettingsRouter({ db, userId }) {
 
   router.put('/settings/tts', async (req, res) => {
     try {
-      const { provider, openai, elevenlabs, qwen } = req.body || {};
+      const { provider, openai, elevenlabs, qwen, voiceReplies } = req.body || {};
+      if (voiceReplies !== undefined) {
+        const v = String(voiceReplies || '').trim().toLowerCase();
+        if (v && !['always', 'auto', 'off'].includes(v)) return res.status(400).json({ error: 'invalid voiceReplies' });
+        if (v && v !== 'always') await setS('CHANNEL_VOICE_REPLIES', v); else await delS('CHANNEL_VOICE_REPLIES');
+      }
       if (provider !== undefined) {
         if (provider && !['openai', 'elevenlabs', 'qwen'].includes(provider)) return res.status(400).json({ error: 'invalid provider' });
         if (provider) await setS('TTS_PROVIDER', provider); else await delS('TTS_PROVIDER');

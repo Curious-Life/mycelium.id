@@ -26,6 +26,7 @@ import { createEgressAuditSink } from './inference/egress.js';
 import { createUsageSink } from './inference/usage.js';
 import { captureMessage } from './ingest/capture.js';
 import { hydrateHistoryBlock } from './agent/history.js';
+import { withAttachmentContext, TRANSCRIPT_BUDGET_HISTORY } from './agent/attachment-context.js';
 import { AGENT_NATURE, MYCELIUM_ORIENTATION } from './agent/identity.js';
 import { resolveCustomPersona } from './skills/store.js';
 
@@ -469,7 +470,12 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       if (conversationId && harnessMode !== 'cli') {
         try {
           const rows = await db.messages.selectByConversation(userId, conversationId, { limit: 50 });
-          const history = (rows || []).reverse().map((r) => ({ role: r.role, content: r.content })).filter((m) => typeof m.content === 'string' && m.content.trim());
+          // Attachment-derived text (transcript / caption / extracted file text) is
+          // joined onto each row here — an uploaded voice memo is captured as
+          // "File: memo.m4a" and transcribed fire-and-forget AFTERWARDS, so without
+          // this join the finished transcript never reaches the agent's context.
+          const withAtt = await withAttachmentContext(rows || [], { db, userId, budget: TRANSCRIPT_BUDGET_HISTORY });
+          const history = withAtt.reverse().map((r) => ({ role: r.role, content: r.content })).filter((m) => typeof m.content === 'string' && m.content.trim());
           if (history.length) {
             const contextWindow = plan ? (plan.inputBudget + (plan.maxTokens || 1024)) : 8192;
             const maxOutputTokens = plan?.maxTokens || 1024;

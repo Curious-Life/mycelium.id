@@ -39,7 +39,7 @@ import { matchStaticBearer } from './gateway/static-bearer.js';
 import { createPathThrottle } from './http/rate-limit.js';
 import { createFederationRouter } from './federation/router.js';
 import { readRemoteConfig, resolveMcpBearer, passkeyEnrolled } from './remote/config.js';
-import { isValidHandle } from './identity/identity.js';
+import { currentHandle as handleServiceCurrentHandle, firstLabel } from './identity/handle-service.js';
 
 /**
  * Build the Express app (no listen). Returns { app, auth, baseURL, transports }.
@@ -319,7 +319,7 @@ export async function createHttpApp(opts = {}) {
   // The vault's tag (first label of publicHost), or null when no remote handle is
   // configured → the form brands generically. This is the IDENTITY the user sees;
   // the single operator account's internal email is never asked for or shown.
-  const currentHandle = () => { const h = (readRemoteConfig().publicHost || '').split('.')[0]; return isValidHandle(h) ? h : null; };
+  const currentHandle = () => handleServiceCurrentHandle();
   // Is this /login visit an enrolment flow? `?enroll=1` — the desktop Settings
   // "Set up a passkey" action opens THIS relay page (the WebAuthn ceremony must run
   // on the relay origin, whose rpID = <handle>.mycelium.id; the loopback webview
@@ -529,10 +529,7 @@ export async function createHttpApp(opts = {}) {
     userId: ingest.userId,
     identity: ingest.identity,
     getHost: () => readRemoteConfig().publicHost || '',
-    getHandle: () => {
-      const h = (readRemoteConfig().publicHost || '').split('.')[0];
-      return h || null;
-    },
+    getHandle: () => firstLabel(readRemoteConfig().publicHost),
     // Phase B: advertise the box MXID as a #matrix service so connected peers can
     // discover where to invite us for shared-space Megolm rooms. Read per-request
     // (like getHost/getHandle); null until a homeserver is configured.

@@ -214,8 +214,10 @@
 		if (!connectHandle.trim()) return;
 		connecting = true; error = null;
 		try {
-			let target = connectHandle.trim().replace(/^@/, '');
-			if (target && !target.includes('@')) target = `${target}@${target}.mycelium.id`;
+			// Send exactly what was typed (minus a leading @). The SERVER owns bare-handle
+			// resolution now: `bob` → bob.mycelium.id over WebFinger, `bob@other.org` stays
+			// federated — one resolver, so every caller (portal, MCP, channel) behaves alike.
+			const target = connectHandle.trim().replace(/^@/, '');
 			await apiPost('/portal/connections/request', { toHandle: target });
 			connectHandle = ''; composerOpen = false;
 			showSuccess('Request sent'); loadSent();

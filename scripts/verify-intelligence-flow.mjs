@@ -30,8 +30,11 @@ let subSplit = {}, subOk = {}, subUnknown = {};
 try { cold = drive('test/mount-intelligence-flow.mjs'); } catch (e) { cold = { error: String(e?.message || e) }; }
 try { returning = drive('test/mount-intelligence-flow.mjs', 'returning'); } catch (e) { returning = { error: String(e?.message || e) }; }
 try { voiceSample = drive('test/mount-intelligence-flow.mjs', 'voice-sample'); } catch (e) { voiceSample = { error: String(e?.message || e) }; }
-let embedderAbsent = {}, voiceError = {}, voiceRuntime = {};
+let embedderAbsent = {}, embedderDown = {}, voiceError = {}, voiceRuntime = {};
 try { embedderAbsent = drive('test/mount-intelligence-flow.mjs', 'embedder-absent'); } catch (e) { embedderAbsent = { error: String(e?.message || e) }; }
+try { embedderDown = drive('test/mount-intelligence-flow.mjs', 'embedder-down'); } catch (e) { embedderDown = { error: String(e?.message || e) }; }
+let runtimeDown; try { runtimeDown = drive('test/mount-intelligence-flow.mjs', 'runtime-down'); } catch (e) { runtimeDown = { error: String(e?.message || e) }; }
+let ollamaStrand; try { ollamaStrand = drive('test/mount-intelligence-flow.mjs', 'ollama-strand'); } catch (e) { ollamaStrand = { error: String(e?.message || e) }; }
 try { voiceError = drive('test/mount-intelligence-flow.mjs', 'voice-error'); } catch (e) { voiceError = { error: String(e?.message || e) }; }
 try { voiceRuntime = drive('test/mount-intelligence-flow.mjs', 'voice-needs-runtime'); } catch (e) { voiceRuntime = { error: String(e?.message || e) }; }
 try { fault = drive('test/mount-intelligence-flow.mjs', 'fault'); } catch (e) { fault = { error: String(e?.message || e) }; }
@@ -238,6 +241,65 @@ t('F20. a FAILED voice download reads red AND offers a retry (F3 dead-branch, no
   assert.ok(ve, `the voice row must render in the voice-error probe — got ${JSON.stringify(voiceError.before?.odmRows)}`);
   assert.equal(ve.badDot, true, 'a failed voice download reads red (a genuine fault), not muted or green');
   assert.equal(ve.hasDownload, true, 'and offers a retry — a failed download IS re-fetchable, unlike an installed model');
+});
+
+t('F22. ⭐ a FAILED embedder (bundled Nomic download failed) reads red AND offers a Retry that pokes /portal/embed/retry — never a fake "Included" ✓ (the fresh-install hang)', () => {
+  // The P0: the embedder is NOT infallibly "bundled + ok" — its ONNX weights download from
+  // HuggingFace at first load, and that can fail. When it does, the Search row must show the TRUE
+  // state (red) and a Retry wired to the ONE resume path (POST /portal/embed/retry → nudge the
+  // supervisor + drainer to re-attempt the download), NOT a green "Included" that strands the user
+  // at "Processing 0/N" with nothing embedding and no escape.
+  assert.equal(embedderDown.ok, true, String(embedderDown.error || '').slice(0, 200));
+  const s = (embedderDown.before?.odmRows || []).find((r) => r.key === 'search');
+  assert.ok(s, `the search row must render in the embedder-down probe — got ${JSON.stringify(embedderDown.before?.odmRows)}`);
+  assert.equal(s.okDot, false, 'a failed embedder must NOT paint the green "Included" dot — that is the fresh-install lie');
+  assert.equal(s.badDot, true, 'a down embedder is a genuine fault — red, not muted, not green');
+  assert.equal(s.hasRetry, true, 'and it must offer a Retry — the bundled model can re-attempt its HF download');
+  assert.match(String(s.retryText), /retry/i, `the button reads "Retry" (a re-attempt, not a fresh download) — got "${s.retryText}"`);
+  assert.equal(s.hasDownload, false, 'never a "Download" over a bundled model — it ships in the app, it just did not finish loading');
+  // …and the click reaches the retry endpoint — never a forked /hardware/pull or /transcription path.
+  const r = embedderDown.odmRetry;
+  assert.ok(r?.hadButton, 'the Retry button must be present for the click-drive');
+  assert.ok(r.sent.some((x) => x.path === '/portal/embed/retry' && x.method === 'POST'),
+    `the Retry must POST /portal/embed/retry (the nudge-supervisor path). Sent: ${JSON.stringify(r.sent)}`);
+  assert.ok(!r.sent.some((x) => /\/hardware\/pull|\/transcription\/download/.test(x.path)),
+    `and NEVER a fresh model download — Search is bundled. Sent: ${JSON.stringify(r.sent)}`);
+});
+
+t('F23. ⭐ QA6 §1 — a RUNTIME-down Understanding offers "Retry connection" → /portal/hardware/retry, never a Download', () => {
+  // The operator-reported strand: the categorize (Understanding) model runs on Ollama, so a
+  // daemon that isn't answering reads 'down' with the runtime-unreachable line — and there was
+  // NOTHING to press. The panel must now offer "Retry connection" (the daemon's OWN ensureUp via
+  // POST /portal/hardware/retry), and NEVER a Download (the model file is fine, the daemon isn't).
+  assert.equal(runtimeDown.ok, true, String(runtimeDown.error || '').slice(0, 200));
+  const u = (runtimeDown.before?.odmRows || []).find((r) => r.key === 'understanding');
+  assert.ok(u, `the understanding row must render — got ${JSON.stringify(runtimeDown.before?.odmRows)}`);
+  assert.equal(u.badDot, true, 'a runtime-down model is a genuine fault — red');
+  assert.equal(u.hasRetryRuntime, true, 'it must offer "Retry connection"');
+  assert.match(String(u.retryRuntimeText), /retry connection/i, `the button reads "Retry connection" — got "${u.retryRuntimeText}"`);
+  assert.equal(u.hasDownload, false, 'never a Download over a model whose RUNTIME is the blocker');
+  const rr = runtimeDown.odmRetryRuntime;
+  assert.ok(rr?.understandingHasRetryRuntime, 'the retry-runtime button must be present for the click-drive');
+  assert.equal(rr.understandingHasDownload, false, 'and no Download button beside it');
+  assert.equal(rr.ollamaRetryHits, 1, `clicking it must POST /portal/hardware/retry exactly once — got ${rr.ollamaRetryHits}`);
+  // The Transcription row (whisper engine down) gets the same affordance, routed to its own service.
+  assert.equal(rr.transcriptionHasRetryRuntime, true, 'a down transcription engine also offers "Retry connection"');
+  assert.equal(rr.transRetryHits, 1, `and it POSTs /portal/transcription/retry once — got ${rr.transRetryHits}`);
+});
+
+t('F24. ⭐ QA6 §1 (LOW-5) — the Understanding row reads the DAEMON health, not a stale slice "ok"', () => {
+  // The strand this closes: the categorize/Understanding model runs on the Ollama daemon, but the row
+  // derived only from the readiness `models` slice. When that slice reports a STALE labeler 'ok' while
+  // the daemon is genuinely down (GET /portal/hardware/ollama), the row painted a false green. The
+  // client now MERGES the daemon's true health (withOllama) so the panel reads the fault + offers
+  // "Retry connection". A reverted merge would read the slice's 'ok' → okDot, no retry → this REDs.
+  assert.equal(ollamaStrand.ok, true, String(ollamaStrand.error || '').slice(0, 200));
+  const u = (ollamaStrand.before?.odmRows || []).find((r) => r.key === 'understanding');
+  assert.ok(u, `the understanding row must render — got ${JSON.stringify(ollamaStrand.before?.odmRows)}`);
+  assert.equal(u.okDot, false, 'a down DAEMON must not read green just because the slice cached an "ok" labeler');
+  assert.equal(u.badDot, true, 'the daemon fault is the truer state — red');
+  assert.equal(u.hasRetryRuntime, true, 'and it offers "Retry connection" (the daemon\'s own bring-up path)');
+  assert.equal(u.hasDownload, false, 'never a Download — the model file is fine, the daemon is the blocker');
 });
 
 t('F10. A8 — a genuine fault gets a red line WITH a control; a choice renders muted, never red', () => {
