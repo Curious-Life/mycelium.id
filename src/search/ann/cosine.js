@@ -1,7 +1,7 @@
 /**
  * Cosine similarity over Float32Array.
  *
- * Ported verbatim from reference/mind-search/ann/cosine.js. Pure, zero-dep,
+ * Ported verbatim from the canonical mind-search module. Pure, zero-dep,
  * deterministic. cosine() computes norms; cosineUnit() assumes unit vectors
  * (embed-service produces unit vectors by convention).
  *

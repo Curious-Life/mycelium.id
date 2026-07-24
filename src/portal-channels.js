@@ -10,6 +10,7 @@
 // same posture as portal-settings.js.
 import express from 'express';
 import { createPairingStore } from './channels/pairing-store.js';
+import { honestChannelConnection } from './channels/supervisor.js';
 
 export function portalChannelsRouter({ db, userId, channelSup }) {
   const router = express.Router();
@@ -32,10 +33,20 @@ export function portalChannelsRouter({ db, userId, channelSup }) {
       const discordChannels = db.identityChannels?.listByKind
         ? await Promise.all((await db.identityChannels.listByKind('discord')).map(async (c) => ({ id: c.channel_value, name: c.display_name || null, access: await accessOf('discord', c.channel_value) })))
         : [];
+      const enabled = (await getS('CHANNEL_ENABLED')) === '1';
+      const tgToken = await hasS('TELEGRAM_BOT_TOKEN');
+      const dcToken = await hasS('DISCORD_BOT_TOKEN');
+      // D-014 — an HONEST per-channel connection state, not the stored-token flag.
+      // `hasToken` stays in the payload (the connect form needs "a token is saved"),
+      // but it is NO LONGER the thing the UI may call "Connected": `connection.state`
+      // is, and it is `connected` only when the daemon reports a LIVE gateway for
+      // that platform. Derived here, once, so the UI cannot re-invent the rule.
+      const health = channelSup ? channelSup.getHealth() : { status: 'unknown', message: null, detail: null, transports: {} };
+      const connectionOf = (platform, hasToken) => honestChannelConnection({ platform, hasToken, enabled, health });
       res.json({
-        enabled: (await getS('CHANNEL_ENABLED')) === '1',
-        telegram: { hasToken: await hasS('TELEGRAM_BOT_TOKEN'), ownerId: (await getS('OWNER_TELEGRAM_ID')) || null },
-        discord: { hasToken: await hasS('DISCORD_BOT_TOKEN'), ownerId: (await getS('OWNER_DISCORD_ID')) || null },
+        enabled,
+        telegram: { hasToken: tgToken, ownerId: (await getS('OWNER_TELEGRAM_ID')) || null, connection: connectionOf('telegram', tgToken) },
+        discord: { hasToken: dcToken, ownerId: (await getS('OWNER_DISCORD_ID')) || null, connection: connectionOf('discord', dcToken) },
         agent: { hasKey: await hasS('ANTHROPIC_API_KEY'), model: (await getS('CHANNEL_AGENT_MODEL')) || null },
         routing: {
           router: (await getS('CHANNEL_ROUTER')) || '',
@@ -49,8 +60,8 @@ export function portalChannelsRouter({ db, userId, channelSup }) {
         groups,
         discordChannels,
         // Live daemon state so the UI shows whether the bridge is actually running
-        // (not just whether a token is stored). { status, message, detail }.
-        daemon: channelSup ? channelSup.getHealth() : { status: 'unknown', message: null, detail: null },
+        // (not just whether a token is stored). { status, message, detail, transports }.
+        daemon: health,
       });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }
   });

@@ -1,7 +1,7 @@
 /**
  * Temporal-proximity boost.
  *
- * Ported verbatim from reference/mind-search/fusion/temporal.js.
+ * Ported verbatim from the canonical mind-search module.
  *
  *   boosted = score · exp(−Δt / τ)     Δt = max(0, queryTs − itemTs)
  *

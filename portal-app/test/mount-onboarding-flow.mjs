@@ -92,6 +92,14 @@ export async function api(path) {
 }
 `);
 writeFileSync(`${GEN}/nav-stub.js`, `import { writable } from 'svelte/store';\nexport const navigationState = writable({});\n`);
+// D-016 (U9): OnboardingFlow now imports the chat store for the onboarding first-message
+// (auto-open chat after a model connects). Stub it exactly like nav/api — this harness
+// proves the RAIL's liveness, not the greeting, so a no-op chat store is all it needs.
+writeFileSync(`${GEN}/chat-stub.js`, `export const chatMessages = { getConversationId: () => 'test-conv', loadHistory: async () => [] };\n`);
+// D-010 (U5): OnboardingFlow now imports openExternal for the Claude sign-in "open a
+// browser" path. This harness proves the RAIL's liveness, not the browser open — a
+// no-op that resolves the specifier is all it needs (stub it like nav/api/chat).
+writeFileSync(`${GEN}/open-external-stub.js`, `export async function openExternal() { return false; }\n`);
 writeFileSync(`${GEN}/env-stub.js`, 'export const browser = true;\n');
 writeFileSync(`${GEN}/goto-stub.js`, 'export function goto() {}\n');
 writeFileSync(`${GEN}/canvas.js`, "export default function () { return { $$: {} }; }\n");
@@ -103,6 +111,8 @@ let js = out.js.code
   .replace(/from ['"]\$lib\/stores\/onboarding-guidance\.svelte['"]/g, `from './store.js'`)
   .replace(/from ['"]\$lib\/api['"]/g, `from './api-stub.js'`)
   .replace(/from ['"]\$lib\/stores\/navigation['"]/g, `from './nav-stub.js'`)
+  .replace(/from ['"]\$lib\/stores\/chat['"]/g, `from './chat-stub.js'`)
+  .replace(/from ['"]\$lib\/open-external['"]/g, `from './open-external-stub.js'`)
   .replace(/from ['"]\$app\/environment['"]/g, `from './env-stub.js'`)
   .replace(/from ['"]\$app\/navigation['"]/g, `from './goto-stub.js'`)
   .replace(/from ['"]\.\/MyceliumCanvas\.svelte['"]/g, `from './canvas.js'`)

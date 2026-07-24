@@ -54,6 +54,8 @@ import { accountRouter } from './account/router.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
+import { startTranscribeRetry } from './enrich/transcribe-retry.js';
+import { _setHardwareProbe as _setGovernorHardwareProbe } from './core/compute-governor.js';
 import { createRelayQueueClient } from './federation/relay-queue-client.js';
 import { createFederationPullLoop } from './federation/pull-loop.js';
 import { resolveDidKey } from './federation/did.js';
@@ -75,6 +77,7 @@ import { makeDeleteOllamaModels, readPulledModels } from './hardware/ollama-mani
 import { releaseManagedHandle } from './remote/release-handle.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning, startClusteringJob, shouldAutoGenerate } from './jobs.js';
+import { readGenerateStats } from './generate-stats.js';
 import { startEmbedSupervisor } from './embed/supervisor.js';
 import { startQwenTtsSupervisor } from './tts/qwen3-tts-supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
@@ -84,7 +87,7 @@ import { isValidHandle, createIdentity } from './identity/identity.js';
 import { currentHandle, firstLabel } from './identity/handle-service.js';
 import { createRelayClient } from './remote/relay-client.js';
 import { setSessionKeys } from './account/session-keys.js';
-import { createVaultAuthMiddleware, csrfCookieMiddleware, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
+import { createVaultAuthMiddleware, csrfCookieMiddleware, defaultValidateSession, isAuthorized, makePortalOwnerGate } from './http/require-vault-auth.js';
 import { createPairRouters } from './portal-pair.js';
 import { createE2ERouter } from './portal-e2e.js';
 import { createPathThrottle } from './http/rate-limit.js';
@@ -299,7 +302,10 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
   // the completeBoot call site) so a paired phone reaches both. Optional-chained:
   // absent namespace ⇒ null ⇒ device path disabled (strictly more restrictive).
   const deviceTokenMatch = db?.deviceTokens ? (t) => db.deviceTokens.matchSync(t) : null;
-  const portalOwnerGate = makePortalOwnerGate({ userId, deviceTokenMatch });
+  // Device SESSION cookie matcher (U7). Bound to a device token; matchSync dies with
+  // the token. Same optional-chain fail-closed shape as deviceTokenMatch.
+  const deviceSessionMatch = db?.deviceSessions ? (s) => db.deviceSessions.matchSync(s) : null;
+  const portalOwnerGate = makePortalOwnerGate({ userId, deviceTokenMatch, deviceSessionMatch });
 
   // QR device-pairing (Unit B). ownerRouter = the LOOPBACK-ONLY ceremony
   // (start/pending/approve/deny/devices/revoke); publicRouter = the unauthenticated
@@ -510,6 +516,20 @@ export async function startRestServer({
     autoInstall: process.env.MYCELIUM_AUTO_OLLAMA !== '0',
   });
 
+  // ── D-001 COMPUTE GOVERNOR: give the global broker the REAL hardware budget (§3.1) ──────────
+  // Without this it falls back to a conservative cold budget (8 GB); with it, BULK sum-admission is
+  // sized to this box (min(totalRam × unifiedFrac, totalRam − reserveGb)). Read at boot + on a 60s
+  // cadence inside the governor. The memory-pressure probe (the REAL-TIME signal) needs no wiring —
+  // it defaults to the per-platform observed probe (NEVER os.freemem() on darwin — design §3.6).
+  //
+  // NOTE — the §3.7 post-drain model unload (POST /api/generate {model, keep_alive:0}) is
+  // DELIBERATELY NOT wired here. Whether keep_alive:0 reliably evicts on the pinned Ollama version
+  // is UNVERIFIED (design §6), and the governor cannot name which model a describe CHILD loaded in
+  // another process. The unload TRIGGER + debounce + injectable seam are built and unit-tested; the
+  // live HTTP call waits on the §6 spike against a running daemon rather than shipping an
+  // unverified eviction (the "reasoning about Ollama semantics without dialing it" trap §6 names).
+  try { _setGovernorHardwareProbe(() => detectHardware()); } catch { /* governor budget stays at the cold fallback */ }
+
   // boot() reads keys from env by default; forward overrides when given
   // (verify scripts inject ephemeral keys) so undefined doesn't clobber env.
   const bootOpts = {};
@@ -666,8 +686,19 @@ export async function startRestServer({
             const { embedded } = await db.messages.embedBacklogCached(bootUserId); // boot: warms the SWR cache so the first activity poll is instant (not a 6s cold scan)
             const pr = await db.rawQuery('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ?', [bootUserId]);
             const points = Number(pr?.results?.[0]?.c ?? 0);
-            if (!shouldAutoGenerate({ embedded, points, clusteringRunning: isClusteringRunning(), min: AUTO_GEN_MIN })) return;
-            console.error('[mycelium] auto-generating first topology — embedding settled');
+            // `builtAtEmbedded` opts this caller into the D-004 auto-REBUILD: once a map
+            // exists, a drift past the freshness threshold re-clusters here too, not only
+            // when someone opens the mindscape view. Embedding has just SETTLED, so the
+            // embed lane is idle — the one moment a heavy re-cluster does not contend with
+            // it. Null baseline (a map from a build before the baseline existed) still
+            // rebuilds once via the mapped-count fallback, then self-zeroes.
+            if (!shouldAutoGenerate({
+              embedded, points, clusteringRunning: isClusteringRunning(), min: AUTO_GEN_MIN,
+              builtAtEmbedded: readGenerateStats()?.lastEmbedded ?? null,
+            })) return;
+            console.error(points > 0
+              ? '[mycelium] auto-rebuilding topology — the map fell behind the embedded set'
+              : '[mycelium] auto-generating first topology — embedding settled');
             startClusteringJob({ dbPath: effectiveDbPath, userId: bootUserId, db });
           } catch { /* non-fatal; manual Generate still works */ }
         };
@@ -675,6 +706,11 @@ export async function startRestServer({
         // categorization (in scope via the buildVaultSubApp closure). Without this the
         // enrich path never starts Ollama and every message stays untagged (CE dormancy).
         const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate, daemon: hwOllamaDaemon });
+        // D-001 (round-2 review #1): the background transcription drain. A voice note whose decode
+        // is refused `compute-busy` under the governor (or fails transiently) is fire-and-forget on
+        // the import path and would otherwise be saved untranscribed forever. This loop re-attempts
+        // pending audio once whisper capacity frees. No-op on a vault with no transcriber configured.
+        try { startTranscribeRetry({ db, userId: bootUserId }); } catch { /* best-effort background loop */ }
 
         // Federation RECEIVE loop (P4): pull THIS box's relay inbox, open + dedup + dispatch
         // (receiveRemote/receiveResponse/receiveMessage). This is what makes an offline peer's
@@ -852,7 +888,7 @@ export async function startRestServer({
       let boxIdentity = null;
       try { boxIdentity = createIdentity({ masterHex: opts.userHex || process.env.ENCRYPTION_MASTER_KEY }); }
       catch { /* identity underivable (no key) → pairing omits the key, E2E disabled; back-compat */ }
-      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId, deviceTokenMatch: db?.deviceTokens ? (t) => db.deviceTokens.matchSync(t) : null }), channelSup, hwOllamaDaemon, restPort: port, searchHelpers, boxIdentity });
+      vaultSubApp = buildVaultSubApp({ db, tools, handlers, userId: bootUserId, effectiveDbPath, enqueueEnrichment, connectorRunner, vaultAuth: createVaultAuthMiddleware({ userId: bootUserId, deviceTokenMatch: db?.deviceTokens ? (t) => db.deviceTokens.matchSync(t) : null, deviceSessionMatch: db?.deviceSessions ? (s) => db.deviceSessions.matchSync(s) : null }), channelSup, hwOllamaDaemon, restPort: port, searchHelpers, boxIdentity });
       bootError = null; // opened cleanly → clear any prior failure
       // Fire-and-forget warm: embedBacklogCached awaits the FIRST scan on a cold process,
       // so without this the first consumer (getContext — the agent's latency-sensitive
@@ -1043,7 +1079,14 @@ export async function startRestServer({
     resolveAuthorized: (req) => isAuthorized(req, {
       userId: resolvedUserId,
       deviceTokenMatch: dbHandle?.deviceTokens ? (t) => dbHandle.deviceTokens.matchSync(t) : null,
+      deviceSessionMatch: dbHandle?.deviceSessions ? (s) => dbHandle.deviceSessions.matchSync(s) : null,
     }),
+    // Device-session on-ramps (U7): POST/DELETE /auth/device-session (mobile, device-
+    // token header) + POST /auth/device-session/web (web, owner better-auth session +
+    // CSRF) + the GET landing hop. getDb is read lazily (handle populated at boot);
+    // validateSession is the SAME owner-pinned better-auth check the cookie path uses.
+    getDb: () => dbHandle,
+    validateSession: defaultValidateSession,
   }));
 
   // Vault-dependent routes: delegate to the sub-app once the vault is open. Until

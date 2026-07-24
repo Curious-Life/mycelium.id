@@ -10,6 +10,8 @@ import { isTrustedLoopback } from './http/loopback.js';
 // The naming surface's shared facts: the pipeline's OWN placeholder predicate + per-unit token
 // bound (one module, no duplicated predicate/constant — II.2a/II.3), and the narrator authority
 // createNarrator itself consumes (the served §4g fact, never re-derived).
+import { evaluateFreshness, countMappedPoints } from './mindscape-freshness.js';
+import { readGenerateStats } from './generate-stats.js';
 import { isPlaceholderName, perUnitTokenBound } from '../pipeline/lib/naming-facts.js';
 import { resolveNarratorAuthority } from '../pipeline/lib/narrate-infer.js';
 
@@ -192,7 +194,7 @@ export function expandBackfillTargets(names, targets = BACKFILL_TARGETS) {
  * Mindscape screen. Mounted under `/api/v1/portal` (alongside portalCompatRouter)
  * so the UI's `/portal/mindscape*` calls (rewritten by api.ts) resolve here.
  *
- * Ported faithfully from reference/server-routes/portal-mindscape-reads.js: the
+ * Ported faithfully from the canonical portal route: the
  * aggregator (`GET /mindscape` → { nodes, themes, territories, realms,
  * semanticThemes, meta }) drives the 3D scene; the per-panel reads
  * (/territories, /realms, /noise-stats, /activations) drive the side panels.
@@ -586,6 +588,38 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
     } catch { res.json({ unknown: true, embedder }); }
   });
 
+  // GET /mycelium/map-status → { embedded, mapped, drift, driftPct, stale, basis, built }
+  // POINT-COUNT HONESTY as a FIRST-CLASS STATE (defect D-004, symptom 1: "i have 2510 points
+  // byt the mycelium and map that is shown ... only has 369 points"). Before this, the
+  // embedded-vs-mapped gap existed nowhere in the product: it could only be inferred by
+  // POSTing generate and reading a note buried in a skip response — which the user could
+  // neither trigger deliberately nor act on. A number the user can see about their own vault
+  // must be a served fact with its own route, not a side effect of trying to start a job.
+  //
+  // COST: the CACHED readiness slice (never getFresh — this is a mount/poll surface, and the
+  // fresh scan is the multi-second SQLCipher decrypt reserved for the /generate preflight)
+  // plus ONE indexed COUNT over clustering_points.
+  //
+  // `unknown` rather than zeros on a counting failure — the §3.2a rule this file already
+  // enforces twice above: a failed COUNT must never impersonate an empty vault, or the UI
+  // would tell a user with a full map that nothing is mapped and offer them a rebuild.
+  router.get('/mycelium/map-status', async (_req, res) => {
+    try {
+      const { data } = await readiness.get({ slices: ['data'] });
+      if (data?.unknown) return res.json({ unknown: true });
+      const mapped = await countMappedPoints(db, userId);
+      const stats = readGenerateStats();
+      res.json({
+        ...evaluateFreshness({
+          embedded: data.embedded,
+          mapped,
+          builtAtEmbedded: stats?.lastEmbedded ?? null,
+        }),
+        builtAt: stats?.at ?? null,
+      });
+    } catch { res.json({ unknown: true }); }
+  });
+
   // ── Generate the mindscape (Phase G) — spawn the clustering pipeline ────────
   // POST /mycelium/generate → { jobId, status }. Single-flight; keys re-resolved
   // at spawn into the child env (never logged/args). The real run needs the
@@ -630,18 +664,43 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
         return res.status(409).json({ error, reason: 'not_embedded', embedded, total });
       }
 
-      // DEBOUNCE: the mindscape view re-POSTs generate on every load, re-clustering
-      // the full point set each app launch and blanking the map for minutes while it
-      // runs (the points cache doesn't recover cleanly mid-run). Skip the rebuild when
-      // topology already exists so the existing map stays stable. First-run (0 points)
-      // still auto-generates; an intentional full rebuild passes ?force=1.
-      if (!_req.query?.force) {
-        try {
-          const pr = await db.rawQuery('SELECT COUNT(*) AS c FROM clustering_points WHERE user_id = ? AND landscape_x IS NOT NULL', [userId]);
-          if (Number(pr?.results?.[0]?.c ?? 0) > 0) {
-            return res.json({ jobId: null, status: 'skipped', reason: 'topology_exists', note: 'Map already built; pass ?force=1 to rebuild.' });
-          }
-        } catch { /* counting failed — fall through and generate */ }
+      // ── STALENESS-AWARE DEBOUNCE (defect D-004 ↻1) ────────────────────────────────
+      // The debounce EXISTS FOR A REAL REASON and is preserved: the mindscape view
+      // auto-POSTs generate on every load (MindscapeView.svelte's autoGen effect), so an
+      // unconditional rebuild re-clusters the full set on every app launch and blanks the
+      // map for minutes (the points cache doesn't recover cleanly mid-run). What it lacked
+      // was an UPPER BOUND: the old predicate skipped whenever ANY point row existed, with
+      // no staleness condition, so once a map existed it could never catch up. The operator
+      // ran 2510 embedded messages against a 369-point map and was told "Map already built;
+      // pass ?force=1 to rebuild" — a query parameter no user can type.
+      //
+      // Now the skip is conditional on the map being FRESH (src/mindscape-freshness.js owns
+      // the predicate — one definition, shared with GET /mycelium/map-status and the gate).
+      // A STALE map falls through and rebuilds: that IS the auto-rebuild-past-a-drift-
+      // threshold requirement, because this route is what the view already calls on load.
+      // It self-terminates — the run records a new baseline, drift returns to 0, and every
+      // subsequent load skips again exactly as before.
+      //
+      // ⚠️ The counts are NOT re-queried: `embedded` above came from readiness.getFresh(),
+      // a multi-second SQLCipher scan this route is the only caller allowed to pay. Reusing
+      // it keeps this fix at ONE extra indexed COUNT (the point count).
+      let freshness = null;
+      try {
+        freshness = evaluateFreshness({
+          embedded,
+          mapped: await countMappedPoints(db, userId),
+          builtAtEmbedded: readGenerateStats()?.lastEmbedded ?? null,
+        });
+      } catch { /* counting failed — fall through and generate (unchanged fail-open) */ }
+
+      if (!_req.query?.force && freshness?.built && !freshness.stale) {
+        // The counts ride the skip response so the client can render the honest state
+        // ("2,510 embedded · 2,498 on the map") instead of a bare "already built" note.
+        return res.json({
+          jobId: null, status: 'skipped', reason: 'topology_fresh',
+          note: 'Your map is up to date.',
+          map: freshness,
+        });
       }
 
       const r = startClusteringJob({ dbPath, userId, db });

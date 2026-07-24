@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { stripCommentsFor } from './lib/strip-comments.mjs';
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
@@ -155,13 +156,12 @@ t('S8. ⭐ MindscapeInvite hosts THE screen and hand-rolls no second connect-AI'
   // satisfied the "is it rendered?" assert, and the gate went GREEN with the render commented
   // OUT. That is P6e verbatim: I wrote the warning about comment-satisfied gates INTO this
   // function and then shipped the bug three lines below it (mutation sweep, 2026-07-16).
-  // Strip block comments as REGIONS, not as line prefixes.
-  const code = src
-    .replace(/<!--[\s\S]*?-->/g, '')   // html block comments (multi-line)
-    .replace(/\/\*[\s\S]*?\*\//g, '')  // css/js block comments (multi-line)
-    .split('\n')
-    .filter((l) => !/^\s*\/\//.test(l))  // line comments
-    .join('\n');
+  // Strip block comments as REGIONS, not as line prefixes — and do it LEXICALLY. The
+  // regex-chain version of exactly this code had the same class of hole one layer deeper:
+  // it could not tell a comment from a string, so `const s = "x"// <IntelligenceScreen …`
+  // survived it intact (proven against verify:handle §15) and a `/*` inside a string
+  // literal deleted live code. ONE stripper now, gated by verify:strip-comments.
+  const code = stripCommentsFor('MindscapeInvite.svelte', src);
 
   assert.ok(/import\s+IntelligenceScreen\s+from/.test(code), 'it must IMPORT the shared screen…');
   // Anchored to line-start: a real ELEMENT, not the token appearing in prose.

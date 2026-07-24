@@ -182,7 +182,7 @@ export function createTelegramApi({ botToken, fetch: fetchImpl = globalThis.fetc
           throw err;
         }
         // Formatting rejected (400) → retry this chunk as plain text so the message
-        // is never lost (mirrors reference/bots/telegram-bot.js:298).
+        // is never lost (mirrors the canonical bot transport).
         if (useHtml && res.status === 400) {
           try {
             res = await post({ ...common, text: raw.slice(0, TELEGRAM_MAX_LEN) });

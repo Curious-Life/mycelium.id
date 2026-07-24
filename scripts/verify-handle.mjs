@@ -6,6 +6,11 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// THE ONE comment stripper (scripts/lib/strip-comments.mjs) — a lexical scanner, not a
+// regex chain. Source asserts must read CODE: a gate COMMENT must never be able to launder
+// the bug it describes (§11, §15 below). See that file's header for the two false-green
+// directions the regex chain had, and verify:strip-comments for the proofs.
+import { stripCommentsFor } from './lib/strip-comments.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { isValidHandle } = await import('../src/identity/identity.js');
@@ -60,7 +65,7 @@ ok(RESERVED_HANDLES.has('www') && RESERVED_HANDLES.has('connections'), 'ONE rese
 //    NEITHER writes user_profiles.handle directly anymore.
 ok(/from '\.\/identity\/handle-service\.js'/.test(compat), 'PUT /portal/profile imports the handle setter (handle-service)');
 ok(/setHandle\(/.test(compat), 'PUT /portal/profile delegates to setHandle');
-ok(!/sets\.push\('handle/.test(compat) && !/'handle = \?'/.test(compat) && !/SET handle\s*=\s*\?/.test(compat.replace(/\/\/.*$/gm, '')),
+ok(!/sets\.push\('handle/.test(compat) && !/'handle = \?'/.test(compat) && !/SET handle\s*=\s*\?/.test(stripCommentsFor('portal-compat.js', compat)),
   'portal-compat no longer writes user_profiles.handle with a bare UPDATE (cosmetic-handle bug)');
 ok(/from '\.\.\/identity\/handle-service\.js'/.test(router) && /setHandle\(/.test(router),
   'connect-managed is a thin wrapper over the SAME setHandle');
@@ -120,8 +125,11 @@ ok(!/fetchImpl\([^)]*resolve-handle/.test(connsSrc.replace(/\n/g, ' ')) && !/wor
 // Assert the PROPERTY, PER CALL SITE instead: EVERY `from_handle:` in the file is
 // `from_handle: requireSelfHandle()` — counted, so a single divergent site fails.
 {
-  // strip comments so a doc-comment mentioning `from_handle` can't inflate either side
-  const code = connsSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  // strip comments so a doc-comment mentioning `from_handle` can't inflate either side.
+  // The stripper is LEXICAL, so it cuts BOTH ways here: a comment can no longer inflate
+  // `assigns`, and (the direction the old regex chain got wrong) a `/*` inside a string
+  // literal can no longer DELETE a live call site and quietly rebalance the counts.
+  const code = stripCommentsFor('connections.js', connsSrc);
   // MATCH `from_handle` AS AN OBJECT KEY IN ANY FORM — bare (`from_handle:`), quoted
   // (`'from_handle':`), OR computed (`['from_handle']: userId`). ⚠️ The prior regex
   // `/from_handle\s*:/` only saw the bare form: rewriting a call site to the computed
@@ -338,15 +346,24 @@ ok(!/\[a-z0-9_\]\{2,29\}/.test(profilesDb), 'db/profiles.js divergent underscore
   // deleted the live `data?.unreachable ||` test stayed GREEN — satisfied by the
   // explanatory COMMENT I had written directly above it. A gate comment can launder
   // the bug it describes; assert against CODE only.
-  const strip = (s) => s
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:"'`\\])\/\/.*$/gm, '$1');
+  //
+  // ⚠️ …AND THE STRIPPER ITSELF MUST NOT BE FOOLABLE. The regex chain that lived here
+  // (`.replace(/(^|[^:"'\`\\])\/\/.*$/gm, '$1')` and friends) could not tell a comment
+  // from a string, so the SAME laundering worked one character further along: a line
+  // comment whose preceding character is a quote — `const _hint = "handle check"// …` —
+  // was left fully intact. Deleting the live `else if (data?.unreachable)` from
+  // ProfileView.svelte and leaving that one comment behind kept this gate at
+  // `85 pass · 0 fail · VERDICT: GO`. Comment-stripping is now ONE lexical scanner
+  // (scripts/lib/strip-comments.mjs), gated by verify:strip-comments.
   for (const [name, rel] of Object.entries(files)) {
-    const src = strip(readFileSync(path.join(ROOT, rel), 'utf8'));
+    const src = stripCommentsFor(rel, readFileSync(path.join(ROOT, rel), 'utf8'));
     ok(/(?:data|d)\s*\??\.\s*unreachable/.test(src),
       `${name} reads the server's \`unreachable\` flag in CODE (not only status/error strings)`);
-    ok(/=\s*'unreachable'/.test(src),
+    // ASSIGNMENT, not comparison. `/=\s*'unreachable'/` also matched the RENDER-side
+    // `{:else if handleState === 'unreachable'}` (the final `=` of `===`), so the mutation
+    // that deleted BOTH live assignments still passed this line while the branch it renders
+    // had become unreachable-in-fact. Exclude a preceding =/!/</> so only a real write counts.
+    ok(/(?<![=!<>])=\s*'unreachable'/.test(src),
       `${name} ASSIGNS a distinct 'unreachable' state (not folded into 'taken')`);
   }
   // The server still SENDS it (the flag the clients now depend on).

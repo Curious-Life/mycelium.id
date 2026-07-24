@@ -680,6 +680,12 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // drift from the first. Absent (an older/stopped drainer, or no drainer) ⇒ false, i.e. the
       // pre-QA6 rendering — fail-soft, never a fabricated block.
       const catWaitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
+      // D-001: the compute governor is holding the model slot for another resident lane. Same
+      // rendering as waiting_embed — a `blocked`/`waiting` scheduling state with no user remedy —
+      // so a governor deferral never looks like a broken labeler (design §5).
+      const catWaitingOnCompute = Boolean(st?.categorizeWaitingOnCompute);
+      // D-001 (finding #2): the embed drain itself deferred by the BULK governor this cycle.
+      const embedWaitingOnCompute = Boolean(st?.embedWaitingOnCompute);
       const hstat = (fn) => { try { return fn?.()?.status || 'unknown'; } catch { return 'unknown'; } };
       const embStatus = hstat(embedderHealth);
       const labStatus = hstat(labelerHealth);
@@ -706,6 +712,7 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       else if (embedPending <= 0) stages.push({ key: 'embed', state: 'done', count: { done: embedded, total }, paused: embedPaused });
       else if (embedPaused) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'paused', action: resume, paused: true });
       else if (DOWN.has(embStatus)) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'embedder_down', action: checkEmbedder, paused: false });
+      else if (embedWaitingOnCompute) stages.push({ key: 'embed', state: 'blocked', count: { done: embedded, total }, reason: 'waiting_compute', paused: false });
       else stages.push({ key: 'embed', state: 'running', count: { done: embedded, total }, etaSeconds: embedEta(st, embedPending, embedPaused), paused: false });
 
       // categorize — the on-box labels. no_model is a CHOICE, surfaced whenever data exists (the
@@ -729,6 +736,7 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // named block without one only where a remedy EXISTS. `paused` is still carried so the
       // co-located Stop control stays reachable during a long import.
       else if (catWaitingOnEmbed && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_embed', paused: categorizePaused });
+      else if (catWaitingOnCompute && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_compute', paused: categorizePaused });
       else if (DOWN.has(labStatus)) stages.push({ key: 'categorize', state: 'blocked', reason: 'ollama_down', action: checkLabeler, paused: categorizePaused });
       else if (catPending > 0) stages.push({ key: 'categorize', state: 'running', count: { done: catTagged, total: catTotal }, etaSeconds: categorizeEta(st, catPending, categorizePaused, false), paused: false });
       else stages.push({ key: 'categorize', state: 'done', count: { done: catTagged, total: catTotal }, paused: categorizePaused });
@@ -765,7 +773,7 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // progressing embed is exempt from dominance. Any other stage that ever reports
       // `waiting_embed` (e.g. cluster's own pending `waiting_embed`) is a different, real state and
       // must not be silently swept in by a bare reason match.
-      const firstBlocked = stages.find((s) => s.state === 'blocked' && !(s.key === 'categorize' && s.reason === 'waiting_embed'));
+      const firstBlocked = stages.find((s) => s.state === 'blocked' && s.reason !== 'waiting_compute' && !(s.key === 'categorize' && s.reason === 'waiting_embed'));
       let overall;
       if (total === 0) overall = 'idle';
       else if (firstBlocked) overall = 'blocked';

@@ -4,6 +4,11 @@
 	//
 	//   Welcome / hero  →  Step 1 Claim your handle  →  Step 2 recovery key (GATE)
 	//                   →  Step 3 Connect intelligence  →  Step 4 Bring your world in
+	//                   →  Step 5 Name your agent + connect a messenger
+	//
+	// ── Step 5 (D-031 / QA7 U9). The "How will you call your personal agent?" prompt
+	// was misplaced inside Step 3; it moves here alongside the Telegram/Discord
+	// connect, which REUSES the settings <ChannelsSection> verbatim (no fork).
 	//
 	// ── Entry (U1.3). A FRESH vault is created SILENTLY at the hero: /setup shows the
 	// hero, "Get started" fires POST /api/v1/account/setup (mints the key, completeBoot
@@ -27,12 +32,13 @@
 	import RecoveryKeyStep from './RecoveryKeyStep.svelte';
 	import IntelligenceStep from './IntelligenceStep.svelte';
 	import ImportStep from './ImportStep.svelte';
+	import AgentStep from './AgentStep.svelte';
 
 	let { onFinish, onOpenImport }: { onFinish: () => void; onOpenImport: (source?: string) => void } = $props();
 
-	// The full locked flow. `of` = 4 so the indicator reads the design's numbering.
-	const STEPS = [1, 2, 3, 4] as const;
-	const TOTAL = 4;
+	// The full locked flow. `of` = 5 so the indicator reads the design's numbering.
+	const STEPS = [1, 2, 3, 4, 5] as const;
+	const TOTAL = 5;
 
 	type Stage = 'boot' | 'hero' | (typeof STEPS)[number];
 	// 'boot' until we know whether the recovery key is already backed up — the
@@ -129,6 +135,10 @@
 					<IntelligenceStep onNext={advance} />
 				{:else if stage === 4}
 					<ImportStep onNext={advance} onOpenImport={handleOpenImport} />
+				{:else if stage === 5}
+					<!-- Name the agent + connect Telegram/Discord (reusing the settings
+					     ChannelsSection). advance() past the last step finishes the wizard. -->
+					<AgentStep onNext={advance} />
 				{/if}
 			</div>
 		{/if}

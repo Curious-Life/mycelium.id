@@ -87,6 +87,14 @@ export async function withFreshSubscriptionToken(cfg, read) {
   return cfg;
 }
 
+/**
+ * Drop the short-lived subscription-token cache so the NEXT resolve reads the live token fresh.
+ * Called on an EXPLICIT reconnect (persistSubscription) so the new credential takes effect at once
+ * rather than after the TTL — otherwise a token cached moments before the reconnect could keep
+ * serving the native path for up to TOKEN_TTL_MS (D-021: reconnect must be immediate on BOTH the
+ * native and CLI paths). Same effect as the test seam, production-named for a non-test caller. */
+export function invalidateSubscriptionTokenCache() { _tokCache = { token: null, at: 0 }; _negAt = 0; }
+
 /** Test seams — clear the cache / swap the live-token reader between cases. */
 export function _resetTokenCacheForTests() { _tokCache = { token: null, at: 0 }; _negAt = 0; }
 export function _setSubscriptionTokenReaderForTests(fn) { _reader = fn || _defaultReader; _resetTokenCacheForTests(); }

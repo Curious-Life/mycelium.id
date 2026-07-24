@@ -51,6 +51,7 @@ import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
+import { stripCommentsFor } from './lib/strip-comments.mjs';
 
 const DB = 'data/verify-icd.db';
 const KCV = 'data/verify-icd-kcv.json';
@@ -529,9 +530,12 @@ async function main() {
     // src/ingest/ must be either the restoreTable chokepoint itself or an ENUMERATED,
     // NAMED exception below. A new write of ANY table fails the build until someone
     // writes down what it is and why.
-    const stripSql = (src) => String(src || '')
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .split('\n').map((ln) => (/^\s*(\/\/|\*)/.test(ln) ? '' : ln.replace(/\s\/\/.*$/, ''))).join('\n');
+    // Comments out, CODE in — via the one lexical stripper (scripts/lib/strip-comments.mjs,
+    // gated by verify:strip-comments). The regex version here cut a line at the first ` //`
+    // even inside a string literal (so a URL in a query string truncated the rest of the
+    // line, hiding whatever followed from WRITE_RX) and a `/*` inside a string deleted live
+    // code up to the next `*/` — both of which silently SHRINK the enumeration this gate is.
+    const stripSql = (src) => stripCommentsFor('x.js', String(src || ''));
     const WRITE_RX = /\b(insert\s+or\s+\w+\s+into|insert\s+into|replace\s+into|update)\s+([`"'[]?[\w${}.]+)/gi;
     // file basename :: normalized target ⇒ what it is. THE ENUMERATION.
     const INGEST_WRITES = {
@@ -541,11 +545,26 @@ async function main() {
       'full-export-import.js::documents': 'the same durable import-report document on the other route.',
       'full-export-import.js::${table}': 'EXCEPTION 4 (round-5): `vectorPass` — six raw `UPDATE <t> SET <embedding col> = ? WHERE id = ? AND user_id = ?` from embeddings/*.ndjson. The ONLY import write that MUTATES A PRE-EXISTING ROW, selected by a bundle-supplied id. All six tables are `allow` and each declares `update:` in IMPORT_TABLE_POLICY. LOW but real (attacker vectors displace messages.embedding_768 and `nlp_processed = 1` stops re-embedding ⇒ durable retrieval poisoning).',
     };
+    // ⚠️ ONE EXEMPT FILE, AND IT PAYS FOR ITSELF (C7j0 below). import-credential-policy.js
+    // is the POLICY DOCUMENT: it exports frozen tables + static-analysis helpers and executes
+    // no SQL at all, but its `why:` strings QUOTE the very statements they are reasoning about
+    // ("…raw `UPDATE messages SET embedding_768 = ?`…"). WRITE_RX cannot tell a quoted
+    // statement from an issued one, so scanning this file reports prose as an ungated write.
+    // (It went unnoticed only because the old regex stripper was MANGLING this file: the
+    // `embeddings/*.ndjson` inside its doc block opened a bogus `/*` region that ran to a
+    // later `*/`, deleting real lines. The lexical stripper stopped deleting them, which is
+    // how these two "writes" surfaced — an over-strip that had been hiding file content.)
+    // Exempting a file from an enumeration is how enumerations rot, so the exemption is
+    // BOUNDED by C7j0: this file must contain NO SQL-executing call whatsoever. Add one and
+    // the gate reds, exemption or not.
+    const POLICY_DOC = 'import-credential-policy.js';
+    const SQL_EXEC_RX = /\bd1Query(?:Admin)?\s*\(|\.prepare\s*\(/;
     const collectIngestWrites = (fileList) => {
       const seen = [];
       for (const f of fileList) {
         const rel = String(f.file).replace(/\\/g, '/');
         if (!/(^|\/)src\/ingest\//.test(rel)) continue;
+        if (rel.endsWith(`/${POLICY_DOC}`)) continue;
         const base = rel.split('/').pop();
         const src = stripSql(f.source);
         WRITE_RX.lastIndex = 0;
@@ -567,6 +586,18 @@ async function main() {
       unenumerated.length || staleEnum.length
         ? `UNENUMERATED: ${unenumerated.join(' · ') || '(none)'}\n      STALE (enumerated but gone — drop it): ${staleEnum.join(' · ') || '(none)'}`
         : `${ingestWrites.length} write sites, all named:\n      ${ingestWrites.map((k) => `${k} → ${INGEST_WRITES[k].slice(0, 96)}…`).join('\n      ')}`);
+    // C7j0 — THE PRICE OF THE ONE EXEMPTION. import-credential-policy.js is skipped by the
+    // write scan ONLY because it issues no SQL. Prove that, rather than assuming it: no
+    // d1Query / d1QueryAdmin / .prepare( anywhere in the file (comments and strings stripped
+    // out of the question — this one is about executed CODE). The day it grows a query, this
+    // reds and the exemption has to be re-argued.
+    const policySrc = files.find((f) => String(f.file).replace(/\\/g, '/').endsWith(`/${POLICY_DOC}`))?.source;
+    rec(`C7j0 the one file exempt from the write scan (${POLICY_DOC}) executes NO SQL — the exemption is bounded, not assumed`,
+      typeof policySrc === 'string' && policySrc.length > 0 && !SQL_EXEC_RX.test(stripSql(policySrc)),
+      policySrc === undefined
+        ? `${POLICY_DOC} was not among the scanned files — the exemption is unanchored`
+        : `${SQL_EXEC_RX.test(stripSql(policySrc)) ? 'FOUND a SQL-executing call' : 'no SQL-executing call'} in ${policySrc.length}B`);
+
     // …and it REDs on a NEW, unenumerated write of a table nobody thought about.
     const M8 = [{ file: 'src/ingest/new-importer.js', source: "await db.rawQuery('UPDATE ai_providers SET credentials = ? WHERE id = ?', [c, id]);" }];
     rec('C7j2 MUTATION: a NEW unenumerated write under src/ingest/ (of a table that is not `users`) → RED — proving the generalization, not just the old users check',

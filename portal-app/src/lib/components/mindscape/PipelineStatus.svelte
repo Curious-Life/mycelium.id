@@ -122,6 +122,39 @@
 	const hasControls = (stage: Stage) =>
 		CONTROLLED.has(stage.key)
 		&& (stage.state === 'running' || stage.paused === true || stage.reason === 'waiting_embed');
+
+	// ── D-025: COLLAPSE WHEN SETTLED ────────────────────────────────────────────────────
+	// The operator's words: "your pipeline is up to date. when it is up to date, it should
+	// collapse the same way as it does in the activity monitor. it should only expand when
+	// it is either out of date or when there is an issue."
+	//
+	// The "activity monitor" is the header vault-pill (StatusPopover.svelte:291-348): it
+	// derives a pillState, stays QUIET on `healthy` (done / up-to-date / skipped / idle) with
+	// its detail collapsed behind `pipeExpanded`, and only goes loud on error/blocked. This
+	// block now REUSES that exact predicate rather than inventing a second notion of "fine" —
+	// `settled` below is the same set the pill calls healthy, minus `idle` (an empty vault is
+	// not "up to date"; it still shows its Waiting rows so a fresh user sees the pipeline).
+	//
+	// FAIL-OPEN-TO-VISIBLE: collapse is allowed ONLY when there is nothing to act on. Any
+	// blocked stage, any running stage, any error, or an unknown read forces the stage list
+	// open and removes the toggle entirely — a user must never be able to hide a problem, and
+	// the component must never hide one on its own. That asymmetry is the whole safety
+	// property, and it is what scripts/verify-pipeline-status-render.mjs C1-C4 assert.
+	const SETTLED_OVERALL = new Set(['done', 'up-to-date', 'skipped']);
+	const settled = $derived(
+		!$pipeline.unknown
+		&& SETTLED_OVERALL.has(String($pipeline.overall))
+		&& $pipeline.stages.every((s) => s.state !== 'blocked' && s.state !== 'running'),
+	);
+
+	// The user's own disclosure choice, honoured ONLY while settled. Reset the moment the
+	// pipeline settles again, so a card opened during an import does not stay open forever
+	// once the work finishes (the "up to date but still expanded" state the operator saw).
+	let userExpanded = $state(false);
+	$effect(() => { if (settled) return; userExpanded = false; });
+
+	// Expanded = anything not settled (forced), or a settled card the user opened.
+	const expanded = $derived(!settled || userExpanded);
 </script>
 
 <!-- ⚠️ ALWAYS MOUNTED, and it must SAY SOMETHING for every overall — the design's core fix is that
@@ -129,8 +162,8 @@
      not read yet" (held, never a fabricated state). Every other overall has an explicit arm, and a
      DEFAULT arm catches any value a later unit folds in (up-to-date/error/skipped from the generate
      store) so it renders rather than falling through to nothing. -->
-<div class="pipe" role="status" aria-label="Pipeline status">
-	<div class="pipe-overall" class:err={$pipeline.overall === 'error'} class:done={$pipeline.overall === 'done' || $pipeline.overall === 'up-to-date' || $pipeline.overall === 'skipped'}>
+<div class="pipe" role="status" aria-label="Pipeline status" data-settled={settled ? '1' : '0'} data-expanded={expanded ? '1' : '0'}>
+	<div class="pipe-overall" class:err={$pipeline.overall === 'error'} class:done={$pipeline.overall === 'done' || $pipeline.overall === 'up-to-date' || $pipeline.overall === 'skipped'} class:collapsible={settled}>
 		{#if $pipeline.unknown}
 			<span class="pipe-dot"></span>
 			<span class="pipe-overall-text">Checking your pipeline…</span>
@@ -157,9 +190,27 @@
 			<span class="pipe-dot"></span>
 			<span class="pipe-overall-text">Working…</span>
 		{/if}
+
+		<!-- D-025: the disclosure. Rendered ONLY when settled — an unsettled pipeline has no
+		     toggle at all, so its stage list cannot be dismissed. Mirrors the vault-pill's
+		     caret (StatusPopover.svelte:332). -->
+		{#if settled}
+			<button
+				type="button"
+				class="pipe-toggle"
+				data-testid="pipe-toggle"
+				aria-expanded={userExpanded}
+				aria-label={userExpanded ? 'Hide pipeline stages' : 'Show pipeline stages'}
+				onclick={() => (userExpanded = !userExpanded)}
+			>{userExpanded ? '▴' : '▾'}</button>
+		{/if}
 	</div>
 
-	<!-- The ordered stages, top-to-bottom, exactly as the server emits them. -->
+	<!-- The ordered stages, top-to-bottom, exactly as the server emits them.
+	     D-025: hidden while COLLAPSED (settled + not user-opened). Not rendered at all rather
+	     than display:none, so a collapsed card carries no stale stage text for a screen reader
+	     or a text scrape to read as current. -->
+	{#if expanded}
 	<ol class="pipe-stages">
 		{#each $pipeline.stages as stage (stage.key)}
 			{@const state = stage.state}
@@ -221,6 +272,7 @@
 			</li>
 		{/each}
 	</ol>
+	{/if}
 </div>
 
 <style>
@@ -230,8 +282,21 @@
 		border: 1px solid var(--glass-border); background: var(--glass-card-bg);
 	}
 
+	/* D-025: a collapsed card is ONE line — drop the column gap so it does not reserve
+	   the space the (absent) stage list used to occupy. */
+	.pipe[data-expanded='0'] { gap: 0; }
+
 	/* ── The overall summary line ─────────────────────────────────────────────── */
 	.pipe-overall { display: flex; align-items: center; gap: 0.5rem; }
+	/* The settled card's disclosure caret — quiet, aligned right, matching the
+	   vault-pill's `.pill-caret`. Only rendered when settled (see the markup). */
+	.pipe-overall.collapsible { cursor: default; }
+	.pipe-toggle {
+		margin-left: auto; padding: 0 0.2rem;
+		border: 0; background: transparent; cursor: pointer;
+		font-size: 0.6rem; line-height: 1; color: var(--color-text-tertiary);
+	}
+	.pipe-toggle:hover { color: var(--color-text-secondary); }
 	.pipe-overall-text { font-size: 0.74rem; color: var(--color-text-secondary); line-height: 1.4; }
 	.pipe-overall.err .pipe-overall-text { color: var(--color-accent-coral, #f87171); }
 	.pipe-overall.done .pipe-overall-text { color: var(--color-text-secondary); }

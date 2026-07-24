@@ -17,6 +17,7 @@
 	import { setSensitiveExempt, seedSensitiveExempt } from '$lib/stores/sensitive-exempt.svelte';
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
+	import { openExternal } from '$lib/open-external';
 
 	type Preset = { id: string; label: string; kind: 'openai' | 'anthropic'; baseUrl: string; jurisdiction: string; defaultModel: string };
 	// `on_this_device` / `jurisdiction` are computed SERVER-side (publicRow in
@@ -125,15 +126,16 @@
 	// text with a Copy button. There is no state in which the user cannot reach the link.
 	let subOpenFailed = $state(false);
 	let subUrlCopied = $state(false);
-	function openSignIn() {
+	async function openSignIn() {
 		if (!subWebUrl) return;
 		subOpenFailed = false;
-		try {
-			const w = window.open(subWebUrl, '_blank', 'noopener,noreferrer');
-			// A null handle means the browser/webview refused (popup blocker, Tauri's
-			// _blank policy). Fail VISIBLY — never a silent no-op.
-			if (!w) subOpenFailed = true;
-		} catch { subOpenFailed = true; }
+		// D-010: window.open('_blank') is swallowed by the Tauri webview, so the OS
+		// browser never opened and this always fell to the copy-paste path. openExternal
+		// hands the URL to the native opener plugin first (the real system browser), then
+		// window.open, and only reports failure when BOTH are unavailable — the copyable
+		// link below is then the guaranteed path.
+		const opened = await openExternal(subWebUrl);
+		if (!opened) subOpenFailed = true;
 	}
 	async function copySignInUrl() {
 		if (!subWebUrl) return;

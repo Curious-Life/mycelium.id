@@ -107,6 +107,24 @@ rec('U11. install_update uses the plugin verified download+restart, no signature
   /download_and_install\(/.test(installBody) && /\.restart\(\)/.test(installBody) &&
   !/(insecure|skip[_-]?sign|no[_-]?verify|dangerous)/i.test(installBody));
 
+// U12 — D-022 regression guard: check_for_update must never yield a MESSAGE-LESS rejection
+//        (the operator saw a bare "check failed" = the client fallback for an empty reason).
+//        Its error branches must be STAGE-LABELLED + EMPTY-GUARDED so a down endpoint or a
+//        missing plugin surfaces an actual reason, and the shared-state lock must be
+//        POISON-TOLERANT — a `.lock().unwrap()` panic would turn a *successful* check into
+//        exactly that message-less rejection. Assert the shape, not just the tokens.
+// MUTATION-TESTED: reverted the check() Err arm to `e.to_string()` (dropped the "update check
+//   failed:" label + empty-guard) → U12 REDs; reintroduced `.lock().unwrap()` → U12 REDs.
+//   Both restored; the suite returns GREEN on the restored tree.
+rec('U12. check_for_update error branches are labelled + non-empty, state lock is poison-tolerant',
+  checkBody.length > 0 &&
+  /is_empty\(\)/.test(checkBody) &&
+  /updater unavailable:/.test(checkBody) &&
+  /update check failed:/.test(checkBody) &&
+  /\.lock\(\)\.unwrap_or_else\(/.test(checkBody) &&
+  !/\.lock\(\)\.unwrap\(\)/.test(checkBody),
+  'error strings stage-labelled + guarded against empty; no panicking lock');
+
 console.log('\n' + '='.repeat(60));
 console.log(fail ? 'VERDICT: NO-GO — updater wiring incomplete' : 'VERDICT: GO — auto-updater wiring intact (real-key + on-Mac smoke = operator)');
 console.log('='.repeat(60));

@@ -49,6 +49,11 @@ writeFileSync(`${GEN}/sensitive-exempt.gen.js`, compileModule(storeSrc, { genera
 const out = compile(readFileSync(SRC, 'utf8'), { generate: 'client', name: 'AISettings', css: 'injected' });
 writeFileSync(`${GEN}/AISettings.gen.js`, out.js.code
   .replace(/import\s+\{\s*api\s*\}\s+from\s+['"]\$lib\/api['"];?/, 'const api = (...a) => globalThis.__apiStub(...a);')
+  // D-010 (U5): AISettings imports openExternal for the Claude sign-in "open a browser"
+  // path. This harness proves the DEMOTED surface, not the browser open — rewrite the
+  // specifier to an inert no-op (inline, matching the $lib/api rewrite above) so the
+  // compiled AISettings.gen.js has no unresolvable $lib import.
+  .replace(/import\s+\{\s*openExternal\s*\}\s+from\s+['"]\$lib\/open-external['"];?/, 'const openExternal = async () => false;')
   .replace(/from\s+['"]\$lib\/stores\/sensitive-exempt\.svelte['"]/, `from './sensitive-exempt.gen.js'`));
 
 const emit = (o) => console.log(JSON.stringify(o));

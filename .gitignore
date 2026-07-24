@@ -105,6 +105,12 @@ portal-app/.gen-mount-generate/
 portal-app/.gen-mount-illuminate/
 portal-app/.gen-mount-pipeline/
 
+# D-020 chat-error surface gate (mounts ChatFloat + drives the real secure-channel dispatch).
+portal-app/.gen-mount-chat-error/
+portal-app/.gen-drive-channel/
+# D-028 part 2 — the MindscapeView loading-jitter measurement harness (verify:mindscape-loading).
+portal-app/.gen-mount-mindscape-loading/
+
 # Worktree symlinks (regenerable; machine-specific absolute paths — never commit)
 /.build-cache
 /pipeline/.venv

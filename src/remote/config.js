@@ -45,7 +45,7 @@ function normalizeBaseUrl(value) {
 // The control-plane API edge is published on :8443 by design — frps owns :443
 // on the managed box for tenant SNI-passthrough, so the Caddy edge that fronts
 // /v1/* (provision/challenge/handle/release) listens on :8443 (see
-// mycelium-managed/relay/deploy/Caddyfile.edge). Pointing at :443 lands on frps,
+// the managed relay edge config). Pointing at :443 lands on frps,
 // which serves no cert for connect.mycelium.id → TLS "unrecognized_name", so
 // every availability check failed and the claim UI showed "taken". Verified
 // 2026-06-15: :8443 returns a valid LE cert + working /v1/challenge + /v1/handle.

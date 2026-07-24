@@ -154,7 +154,7 @@ export async function detectExportType(zip) {
   const names = Object.keys(zip?.files || {});
 
   // Canonical-Mycelium vault export: one manifest.json carrying the whole vault
-  // (format marker per reference/server-routes/portal-export-import.js:997).
+  // (format marker per the canonical portal route).
   //
   // IMPORTING is DELIBERATELY ROOT-ANCHORED (exact `manifest.json`), NOT
   // basename-at-any-depth like the other kinds: the vault importer resolves the

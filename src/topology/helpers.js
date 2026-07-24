@@ -1,7 +1,7 @@
 /**
  * topologyHelpers — the resolver + fetchers the topology MCP tools depend on.
  *
- * BUILD-NEW (V1): not present in reference/. The topology MCP domain
+ * BUILD-NEW (V1): not present in the canonical tree. The topology MCP domain
  * (src/tools/topology-tools.js) consumes `topologyHelpers` with this exact
  * shape:
  *

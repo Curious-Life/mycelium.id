@@ -345,7 +345,24 @@ export async function buildDaemon(cfg, { runTurn, runtime: injectedRuntime, dedu
     gateway = createDiscordGateway({ botToken: cfg.discordBotToken, handleInbound: handleDiscordInbound });
   }
 
-  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getLastTurn: () => (lane && typeof lane.lastTurn === "function" ? lane.lastTurn() : null) /* lane may be built AFTER boot (re-probe) */ });
+  // D-014: report each platform's LIVE connection state on /healthz. Discord's comes
+  // from the gateway itself (the only holder of the socket); Telegram's from the poller,
+  // which is long-poll based and is genuinely connected once running. Read lazily at
+  // request time — a snapshot taken at boot would freeze at 'connecting' forever.
+  const getTransports = () => {
+    const out = {};
+    if (poller) out.telegram = { state: 'ready', connected: true, reason: null, message: null };
+    // A configured Discord with NO gateway object (discord.js never even constructed)
+    // is reported explicitly rather than omitted — silence is what the UI misread.
+    if (cfg.discordBotToken) {
+      out.discord = gateway && typeof gateway.state === 'function'
+        ? gateway.state()
+        : { state: 'failed', connected: false, reason: 'no_gateway', message: 'Discord inbound gateway was never created' };
+    }
+    return out;
+  };
+
+  const app = createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getTransports, getLastTurn: () => (lane && typeof lane.lastTurn === "function" ? lane.lastTurn() : null) /* lane may be built AFTER boot (re-probe) */ });
   // `lane` is the BOOT-time value (null on a capture-only boot); getLane() reads the
   // live one across a re-probe upgrade. Kept both for compatibility.
   return { app, poller, gateway, telegram, discord, lane, getLane: () => lane, vault, replies };

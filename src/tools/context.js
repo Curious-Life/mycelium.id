@@ -2,7 +2,7 @@
 // pulls at turn start to load preloaded mind state — so the client (Claude/etc.)
 // acts as the agent without a server-side loop.
 //
-// This is the V1 single-user distillation of reference/core/context-assembly.js
+// This is the V1 single-user distillation of the canonical core module
 // (the canonical version carries multi-agent/autonomous/cross-channel branches
 // V1 doesn't need). It assembles, in one markdown blob:
 //   - current date/time (prevents day-of-week hallucination)

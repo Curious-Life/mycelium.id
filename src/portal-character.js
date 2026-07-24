@@ -22,6 +22,7 @@
  *    is their own self.md over the gated channel and is never logged.
  */
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import fsp from 'node:fs/promises';
 import nodePath from 'node:path';
 import { createMindFiles } from './mindfiles/mind-files.js';
@@ -103,6 +104,7 @@ export function portalCharacterRouter({
   const jsonLarge = express.json({ limit: '12mb' });
   const auth = (req, res) => {
     const u = authenticatePortalRequest(req);
+    if (isCsrfDeny(u)) { res.status(403).json({ ok: false, error: 'csrf' }); return null; }
     if (!u) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return null; }
     return u;
   };

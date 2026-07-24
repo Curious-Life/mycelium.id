@@ -10,7 +10,7 @@
 import { seedClaudeConfigDir, readClaudeConfigDirToken, claudeConfigCredsPath,
   claudeKeychainService, readClaudeConfigDirLiveToken, refreshClaudeConfigDirToken,
   startProactiveTokenRefresh, stopProactiveTokenRefresh, claudeSpawnEnv,
-  _resetClaudeRefreshForTests } from '../src/inference/claude-config-dir.js';
+  clearNamespacedKeychain, _resetClaudeRefreshForTests } from '../src/inference/claude-config-dir.js';
 import { createClaudeCliLoop } from '../src/agent/loop-claude-cli.js';
 import { rmSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -243,8 +243,56 @@ clean();
     `scopes=${JSON.stringify(j.claudeAiOauth.scopes)}`);
 }
 
+// ── CD17 ⭐ D-021: a reconnect must INVALIDATE the stale namespaced Keychain that `claude` reads ──
+// The bug: after a successful reconnect, portal chat on the Claude Code (cli) engine stayed broken
+// while Telegram/native worked on the SAME new credential. Root cause: the forced re-seed replaced
+// the seed FILE + DB row, but on macOS `claude` reads/refreshes its OWN credential from the config-
+// dir-namespaced Keychain item (`Claude Code-credentials-<hash>`), which STILL held the old, now-
+// revoked token. Native merges file+keychain and prefers the freshest (the new file) → it recovered;
+// the CLI harness reads ONLY the Keychain → it kept authenticating as the stale session. The fix
+// clears that Keychain item on the forced (explicit-reconnect) seed so `claude` re-adopts the new
+// creds. MUTATION-TESTED: drop `if (force) clearKeychainImpl(...)` from seedClaudeConfigDir → CD17c
+// REDs (force seed no longer clears the keychain); make clearNamespacedKeychain skip the delete
+// (return false without calling execSyncImpl) → CD17a REDs (no `security delete-generic-password`).
+clean();
+{
+  // CD17a: darwin — clearNamespacedKeychain issues `security delete-generic-password -s <namespaced
+  // service>` (the EXACT item `claude` uses for THIS isolated dir).
+  let delArgs = null, delCmd = null;
+  const delSpy = (cmd, args) => { delCmd = cmd; delArgs = args; return ''; };
+  const cleared = clearNamespacedKeychain({ platform: 'darwin', execSyncImpl: delSpy });
+  rec('CD17a darwin: clears the namespaced Keychain item claude reads (security delete-generic-password -s <service>)',
+    cleared === true && delCmd === 'security' && Array.isArray(delArgs)
+      && delArgs[0] === 'delete-generic-password' && delArgs[delArgs.indexOf('-s') + 1] === claudeKeychainService(),
+    `cmd=${delCmd} svc=${delArgs?.[delArgs.indexOf('-s') + 1]}`);
+
+  // CD17b: fail-soft — a MISSING item (security exits non-zero → throws) is the benign common case
+  // (first connect / claude never migrated the seed): returns false, never throws.
+  let threw = false, ret;
+  try { ret = clearNamespacedKeychain({ platform: 'darwin', execSyncImpl: () => { throw new Error('could not be found'); } }); }
+  catch { threw = true; }
+  rec('CD17b fail-soft: missing item (delete throws) → false, no throw', threw === false && ret === false, `threw=${threw} ret=${ret}`);
+
+  // CD17b2: non-darwin → no-op, execSyncImpl is NEVER invoked (no `security` on Linux).
+  let called = false;
+  const r2 = clearNamespacedKeychain({ platform: 'linux', execSyncImpl: () => { called = true; return ''; } });
+  rec('CD17b2 non-darwin: no-op, security never invoked', r2 === false && called === false, `r=${r2} called=${called}`);
+
+  // CD17c ⭐ the CHOKEPOINT: a FORCED seed (the explicit-reconnect path, portal-providers.js) clears
+  // the Keychain; a DEFAULT (boot re-seed) seed does NOT (it must not disturb claude's live refresh).
+  clean();
+  let forceClears = 0, plainClears = 0;
+  seedClaudeConfigDir({ claudeOAuthToken: 'sk-reconnect-NEW', expiresAt: now + 3_600_000, scopes: ['user:inference'] },
+    { force: true, clearKeychainImpl: () => { forceClears++; return true; } });
+  clean();
+  seedClaudeConfigDir({ claudeOAuthToken: 'sk-boot-reseed', expiresAt: now + 3_600_000, scopes: ['user:inference'] },
+    { clearKeychainImpl: () => { plainClears++; return true; } });
+  rec('CD17c ⭐ reconnect (force) clears the stale Keychain · boot re-seed (default) does NOT',
+    forceClears === 1 && plainClears === 0, `force=${forceClears} plain=${plainClears}`);
+}
+
 const allPass = ledger.every(Boolean);
 console.log('\n' + '='.repeat(64));
-console.log(`VERDICT: ${allPass ? 'GO — isolated claude config-dir: seeds connected-subscription creds · non-clobbering (force replaces) · no fabricated scopes · read round-trips · CLI spawns with CLAUDE_CONFIG_DIR' : 'NO-GO — see FAIL rows'}`);
+console.log(`VERDICT: ${allPass ? 'GO — isolated claude config-dir: seeds connected-subscription creds · non-clobbering (force replaces + clears stale keychain) · no fabricated scopes · read round-trips · CLI spawns with CLAUDE_CONFIG_DIR' : 'NO-GO — see FAIL rows'}`);
 console.log('='.repeat(64));
 process.exit(allPass ? 0 : 1);

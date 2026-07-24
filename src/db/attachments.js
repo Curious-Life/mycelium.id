@@ -72,6 +72,25 @@ export function createAttachmentsNamespace(deps) {
       return firstRow(result);
     },
 
+    // D-001 (round-2 review #1): audio attachments still awaiting a transcript — the work-set for
+    // the background transcription drain (src/enrich/transcribe-retry.js), so a `compute-busy`
+    // refusal (or any transient failure) during import is eventually retried instead of silently
+    // dropped. SELECTS ONLY ids (no transcript, no filename — §1 content-free) and REQUIRES user_id
+    // in the WHERE (SQL-layer tenant enforcement). Audio predicate mirrors isAudio()/mediaTypeOf().
+    async listPendingTranscription(userId, { limit = 10 } = {}) {
+      const result = await d1Query(
+        `SELECT id FROM attachments
+           WHERE user_id = ?
+             AND local_path IS NOT NULL
+             AND (transcript IS NULL OR transcript = '')
+             AND (file_type LIKE 'audio/%' OR file_type IN ('voice', 'audio'))
+           ORDER BY created_at ASC
+           LIMIT ?`,
+        [userId, limit],
+      );
+      return (result.results || []).map((r) => r.id);
+    },
+
     async getByIds(ids, userId) {
       if (!ids.length) return [];
       // Worker safety guard: SELECT on user-data tables requires

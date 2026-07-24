@@ -8,7 +8,7 @@
 // explicit ALLOWLIST (PATH/HOME/USER/LANG + the two keys + DB/user id) so no
 // ambient server secret leaks down. The script path is hardcoded (env-overridable
 // only for tests), never built from request input. Mirrors the canonical
-// reference/server-routes/portal-mindscape-jobs.js.
+// the canonical portal route.
 
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -25,6 +25,18 @@ import { assertVaultDiskHeadroom } from './db/disk-guard.js';
 import { getMasterKey } from './crypto/crypto-local.js';
 import { identityEnv } from './spawn-env.js';
 import { isDeleteRunning } from './core/delete-lane.js';
+import { evaluateFreshness } from './mindscape-freshness.js';
+import { admit, CLASS, queueForResident } from './core/compute-governor.js';
+
+// ── Compute-governor seam (D-001 / QA7 U1) ──────────────────────────────────────────────────
+// Every child spawner below is a heavy lane in the governor's inventory (design §1). Each admits
+// a ticket BEFORE spawning and releases it when the child exits — so an embed drain, a describe
+// pass and a clustering run can never all peg the box at once (the crash). `spawn` is indirected
+// through `_spawn` for ONE reason: verify:compute-lanes C3 injects a counting stub to prove that
+// NO child is spawned while a resident ticket is held — the check that catches the #329-class
+// narrowness (a fixture assertion on the module would not). Production always uses the real spawn.
+let _spawn = spawn;
+export function _setSpawnForTests(fn) { _spawn = fn || spawn; }
 
 /**
  * Kill-switch for the destructive re-cluster. Generate (auto OR manual) rebuilds
@@ -46,6 +58,15 @@ const MAX_MS = Number(process.env.MYCELIUM_GEN_MAX_MS) || 45 * 60 * 1000; // 45 
 // say "still working on <stage> — taking longer than usual" + offer Cancel (instead
 // of a frozen bar). Flag only — the MAX_MS cap still backstops a true runaway.
 const STALL_MS = Number(process.env.MYCELIUM_GEN_STALL_MS) || 5 * 60 * 1000;
+
+// Governor lease TTLs are BACKSTOPS, not the primary crash-release. For a spawned child the
+// reliable mechanism is child-binding (the governor binds close+error, first wins — design §3.5.2);
+// the lease only frees a ticket whose child somehow detached without emitting either. So the lease
+// is deliberately GENEROUS — a per-territory-sized lease would reclaim mid-run and re-open the slot
+// while the child still runs (the double-admission window the red-team flagged, design §5).
+const CLUSTERING_LEASE_MS = 2 * MAX_MS;          // 90 min — bounds a truly wedged clustering child
+const DESCRIBE_LEASE_MS = 60 * 60 * 1000;        // 60 min — chronicles/naming gap-fill passes
+const CLAIM_LEASE_MS = 30 * 60 * 1000;           // 30 min — claim discovery cadence
 const STAGE_LABELS = {
   1: 'Syncing content…',
   2: 'Clustering (k-means + Ward HAC)…',
@@ -149,36 +170,18 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
     }
   }
 
-  // Resolve both master keys at spawn time to hand to the child via env. In
-  // passphrase-lock mode the keys aren't in the Keychain, so prefer the in-memory
-  // session keys (pinned at boot); otherwise re-resolve from the key source.
-  // Throws if unavailable — the caller maps that to a 503.
+  // Resolve both master keys at REQUEST time (before any job/feed row exists), to hand to the child
+  // via env. In passphrase-lock mode the keys aren't in the Keychain, so prefer the in-memory
+  // session keys (pinned at boot); otherwise re-resolve from the key source. THROWS if unavailable —
+  // the caller maps that to a 503. Kept BEFORE the job is created (as the original did) so a key
+  // failure propagates cleanly with NO phantom job/feed row — and so the spawn's OWN failure (a
+  // dead cwd → ENOENT) is the ONLY thing launch() has to handle internally, never re-thrown (the
+  // activity-feed contract A7: a spawn that cannot start still returns a job, no throw to the caller).
   const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
 
-  const scriptPath = process.env.MYCELIUM_CLUSTER_SCRIPT || 'pipeline/run-clustering.sh';
-  const childEnv = {
-    PATH: process.env.PATH,
-    // USER/LOGNAME/HOME, filled from os.userInfo() when a Finder/launchd launch omits them.
-    ...identityEnv(),
-    LANG: process.env.LANG,
-    USER_MASTER: userHex,
-    SYSTEM_KEY: systemHex,
-    MYCELIUM_DB: dbPath || resolveDbPath(),
-    MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
-    // Forward the vault writer-lock family token so this pipeline child is recognized
-    // as same-family (not a foreign writer) when it opens the vault. See db/writer-lock.js.
-    ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
-    // Packaged self-contained build: use the bundled python + offline model for the
-    // clustering child. Unset in dev → run-clustering.sh's $PYTHON seam auto-picks the
-    // venv. (PATH already carries the bundled node dir, injected by main.rs.)
-    ...(process.env.MYCELIUM_PYTHON ? { PYTHON: process.env.MYCELIUM_PYTHON } : {}),
-    ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
-    ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
-    // Measure-only: run-clustering.sh skips Steps 1-3 (sync/cluster/describe) and
-    // refreshes the metric tables on the existing mindscape (Steps 4-16 only).
-    ...(measureOnly ? { MYCELIUM_MEASURE_ONLY: '1' } : {}),
-  };
-
+  // Create the job id + state UP FRONT, so a QUEUED job (refused for capacity) still has a pollable
+  // id and a feed row. `state.status` stays 'running' throughout the queued sub-state (the request
+  // is accepted + in-flight — the user will get their map); `stageLabel` tells the finer story.
   const jobId = `${measureOnly ? 'measure' : 'gen'}_${crypto.randomBytes(6).toString('hex')}`;
   const state = {
     id: jobId, status: 'running', step: 0, totalSteps: 5,
@@ -199,24 +202,7 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
 
   // begin() has now written a 'running' row, so EVERY exit path below owes the feed a
   // terminal row. Miss one and the reaper (activity-feed.js STALE_MS) flips it to
-  // 'abandoned' 45s later: the header shows a phantom running job for those 45s, and
-  // the history then reads 'abandoned' — a startup failure made indistinguishable from
-  // a killed child.
-  //
-  // FIRST write wins, for two reasons. Node documents 'close' as "may or may not" fire
-  // after a spawn 'error' (child_process docs, the 'error' event), so the error handler
-  // cannot delegate to close — but when close DOES follow, the earlier handler already
-  // named the more specific reason and close must not overwrite it.
-  //
-  // CHAINED off begin() rather than fired independently: finish() is an UPDATE by id,
-  // so if it were to land BEFORE begin()'s INSERT it would match no row and the INSERT
-  // would then leave 'running' behind forever. Both go through the adapter's async
-  // query() (it awaits autoEncryptParams before the synchronous write), so ordering
-  // would otherwise rest on microtask FIFO — and the spawn-failure path fires the two
-  // back-to-back with nothing in between.
-  //
-  // `error` here is only ever a CONSTANT or a classified string — background_jobs is
-  // content-free by contract. See classifyPipelineFailure.
+  // 'abandoned' 45s later. See classifyPipelineFailure — `error` here is only ever a CONSTANT.
   let feedPublished = false;
   const publishTerminal = (status, error = null) => {
     if (feedPublished || !db?.activityFeed) return;
@@ -224,116 +210,158 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
     feedBegun.then(() => db.activityFeed.finish(jobId, { status, error })).catch(() => {});
   };
 
-  let child;
-  try {
-    child = spawn('bash', [scriptPath], {
-      cwd: process.cwd(),
-      env: childEnv,                       // allowlist only — no ambient secrets
-      stdio: ['ignore', 'pipe', 'pipe'], // stdout parsed for progress; stderr captured (bounded) to surface the REAL failure reason
-    });
-  } catch {
-    // Reachable: `cwd: process.cwd()` throws ENOENT when the app's working directory
-    // has been deleted or unmounted underneath it. No child ⇒ no 'close' ⇒ this is the
-    // ONLY chance to close the feed row out.
-    state.status = 'error'; state.error = 'failed to start clustering'; state.finishedAt = Date.now();
-    runningJobId = null;
-    publishTerminal('error', 'failed to start clustering');
-    return { jobId, status: 'running' }; // job created; status will read 'error'
-  }
-  state.child = child; // expose for cancelJob (never surfaced via getJob)
+  // LAUNCH — spawn the child with an ALREADY-ADMITTED governor ticket, using the keys resolved
+  // above. Called immediately when admit succeeds, or later from the queue waiter when the resident
+  // slot frees. A spawn failure (dead cwd → ENOENT) is handled INTERNALLY here (job → error, feed →
+  // constant, ticket released) and NEVER re-thrown — the caller already got its job id (A7 contract).
+  const launch = (genAdm) => {
+    if (state.status !== 'running') { genAdm.release(); return; }   // canceled while queued
+    try {
+      const scriptPath = process.env.MYCELIUM_CLUSTER_SCRIPT || 'pipeline/run-clustering.sh';
+      const childEnv = {
+        PATH: process.env.PATH,
+        ...identityEnv(),  // USER/LOGNAME/HOME, filled when a Finder/launchd launch omits them
+        LANG: process.env.LANG,
+        USER_MASTER: userHex,
+        SYSTEM_KEY: systemHex,
+        MYCELIUM_DB: dbPath || resolveDbPath(),
+        MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
+        ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
+        ...(process.env.MYCELIUM_PYTHON ? { PYTHON: process.env.MYCELIUM_PYTHON } : {}),
+        ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
+        ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
+        ...(measureOnly ? { MYCELIUM_MEASURE_ONLY: '1' } : {}),
+      };
 
-  let buf = '';
-  child.stdout.on('data', (d) => {
-    state.lastOutputAt = Date.now();
-    if (state.stalled) state.stalled = false; // output resumed → no longer stalled
-    buf += d.toString();
-    const lines = buf.split('\n');
-    buf = lines.pop() || ''; // keep the partial last line
-    for (const line of lines) {
-      const m = line.match(/^Step\s+(\d+)\/(\d+):\s*(.*)$/);
-      if (m) {
-        state.step = parseInt(m[1], 10);
-        state.totalSteps = parseInt(m[2], 10);
-        state.stageLabel = STAGE_LABELS[state.step] || m[3].trim();
-        if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: feedLabel, stalled: false }).catch(() => {});
-      }
-    }
-  });
+      state.startedAt = Date.now();
+      state.stageLabel = 'Starting…';
+      const child = _spawn('bash', [scriptPath], {
+        cwd: process.cwd(),
+        env: childEnv,                       // allowlist only — no ambient secrets
+        stdio: ['ignore', 'pipe', 'pipe'], // stdout parsed for progress; stderr captured (bounded)
+      });
+      state.child = child; // expose for cancelJob (never surfaced via getJob)
+      genAdm.bindChild(child);              // governor releases on close/error (first wins) — crash-release #2
 
-  // Capture the child's stderr in a BOUNDED ring buffer (last ~4 KB) so a
-  // failure surfaces its real reason, not just an exit code. The pipeline never
-  // prints secrets; we still only ever surface a single trimmed line.
-  let errBuf = '';
-  child.stderr?.on('data', (d) => {
-    errBuf = (errBuf + d.toString()).slice(-4096);
-  });
-  const lastErrLine = () => errBuf.split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
+      let buf = '';
+      child.stdout.on('data', (d) => {
+        state.lastOutputAt = Date.now();
+        if (state.stalled) state.stalled = false; // output resumed → no longer stalled
+        buf += d.toString();
+        const lines = buf.split('\n');
+        buf = lines.pop() || ''; // keep the partial last line
+        for (const line of lines) {
+          const m = line.match(/^Step\s+(\d+)\/(\d+):\s*(.*)$/);
+          if (m) {
+            state.step = parseInt(m[1], 10);
+            state.totalSteps = parseInt(m[2], 10);
+            state.stageLabel = STAGE_LABELS[state.step] || m[3].trim();
+            if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: feedLabel, stalled: false }).catch(() => {});
+          }
+        }
+      });
 
-  const timer = setTimeout(() => {
-    try { child.kill('SIGTERM'); } catch { /* noop */ }
-    setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* noop */ } }, 5000);
-  }, MAX_MS);
+      let errBuf = '';
+      child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
+      const lastErrLine = () => errBuf.split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
 
-  // Inactivity watchdog: flag (don't kill) a run that's gone quiet so the UI can
-  // surface "taking longer than usual" + Cancel. Cleared when the child closes.
-  // It ALSO sends a keep-alive heartbeat carrying `stalled` — this both refreshes
-  // last_heartbeat (so the feed's 45s freshness gate doesn't FALSE-REAP a heavy
-  // stage that's quiet on Step lines but still alive) and propagates the stalled
-  // flag to the header chip (the feed, not getJob, drives the chip). Gap #4.
-  const stallTimer = setInterval(() => {
-    if (state.status !== 'running') return;
-    if (Date.now() - state.lastOutputAt > STALL_MS) state.stalled = true;
-    if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { stalled: state.stalled }).catch(() => {});
-  }, 15000);
-  if (stallTimer.unref) stallTimer.unref();
+      const timer = setTimeout(() => {
+        try { child.kill('SIGTERM'); } catch { /* noop */ }
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* noop */ } }, 5000);
+      }, MAX_MS);
+      const stallTimer = setInterval(() => {
+        if (state.status !== 'running') return;
+        if (Date.now() - state.lastOutputAt > STALL_MS) state.stalled = true;
+        if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { stalled: state.stalled }).catch(() => {});
+      }, 15000);
+      if (stallTimer.unref) stallTimer.unref();
 
-  const finish = () => { clearTimeout(timer); clearInterval(stallTimer); state.child = null; if (runningJobId === jobId) runningJobId = null; };
+      const finish = () => { clearTimeout(timer); clearInterval(stallTimer); state.child = null; if (runningJobId === jobId) runningJobId = null; genAdm.release(); };
 
-  child.on('close', (code) => {
-    state.finishedAt = Date.now();
-    if (state.status === 'canceled') {
-      state.stageLabel = 'Canceled'; // user-initiated stop → keep, don't mark error
-    } else if (code === 0) {
-      state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete'; state.stalled = false;
-      writeGenerateStats({ durationMs: state.finishedAt - state.startedAt });
-      // Chronicle narration runs ASYNC, after the foreground Generate is done, so a
-      // slow local-LLM never stalls the run. Fire-and-forget; territories fill in
-      // their chronicles as the background pass writes them (the UI polls). Fail-soft.
-      // SKIP for measure-only: it never re-described, so there is nothing new to narrate.
-      if (!measureOnly) { try { startChronicleNarrationJob({ dbPath, userId }); } catch { /* never block completion */ } }
-      // Describe renamed territories/realms — the in-RAM search corpus indexes
-      // name+essence and otherwise stays stale for the whole session (it builds
-      // once on first query). Best-effort: rehydrates stored vectors, so no
-      // message re-embeds; only profile texts re-embed.
-      refreshSearchIndex();
-      bustMindscapePoints(userId); // clustering re-ran → points changed → drop BOTH points + full caches
-    } else if (state.status !== 'error') {
-      state.status = 'error';
-      const detail = lastErrLine();
-      // Name the STAGE that was running so the user (and the activity feed) sees
-      // "Step 7/16 (Fisher trajectory) failed: …" instead of a bare exit code.
-      const stage = state.step > 0 ? `Step ${state.step}/${state.totalSteps} (${state.stageLabel}) failed` : 'pipeline failed';
-      state.error = detail ? `${stage}: ${detail} (exit ${code})` : `${stage} (exit ${code})`;
-      state.failedStep = state.step || null;
-    }
-    // The feed gets a CLASSIFIED reason, never state.error — that carries the
-    // child's stderr (paths / quoted rows / model output). See classifyPipelineFailure.
-    publishTerminal(state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error', state.status === 'error' ? classifyPipelineFailure(state) : null);
-    finish();
-  });
-  child.on('error', () => {
-    if (state.status !== 'canceled') {
-      state.status = 'error'; state.error = 'failed to start clustering';
-      // Publish here rather than leaving it to 'close': close is not guaranteed to
-      // follow a spawn error, and when it does it can only say 'pipeline failed'
-      // (no step was ever reached). 'failed to start clustering' is a constant.
+      child.on('close', (code) => {
+        state.finishedAt = Date.now();
+        if (state.status === 'canceled') {
+          state.stageLabel = 'Canceled'; // user-initiated stop → keep, don't mark error
+        } else if (code === 0) {
+          state.status = 'done'; state.step = state.totalSteps; state.stageLabel = 'Complete'; state.stalled = false;
+          writeGenerateStats({ durationMs: state.finishedAt - state.startedAt });
+          if (!measureOnly && db?.messages?.embedBacklog) {
+            db.messages.embedBacklog(userId)
+              .then((b) => writeGenerateStats({ durationMs: state.finishedAt - state.startedAt, embedded: Number(b?.embedded || 0) }))
+              .catch(() => { /* count failed — leave the previous baseline; the fallback still governs */ });
+          }
+          if (!measureOnly) { try { startChronicleNarrationJob({ dbPath, userId }); } catch { /* never block completion */ } }
+          refreshSearchIndex();
+          bustMindscapePoints(userId); // clustering re-ran → points changed → drop BOTH points + full caches
+        } else if (state.status !== 'error') {
+          state.status = 'error';
+          const detail = lastErrLine();
+          const stage = state.step > 0 ? `Step ${state.step}/${state.totalSteps} (${state.stageLabel}) failed` : 'pipeline failed';
+          state.error = detail ? `${stage}: ${detail} (exit ${code})` : `${stage} (exit ${code})`;
+          state.failedStep = state.step || null;
+        }
+        publishTerminal(state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error', state.status === 'error' ? classifyPipelineFailure(state) : null);
+        finish();
+      });
+      child.on('error', () => {
+        if (state.status !== 'canceled') {
+          state.status = 'error'; state.error = 'failed to start clustering';
+          publishTerminal('error', 'failed to start clustering');
+        }
+        state.finishedAt = Date.now();
+        finish();
+      });
+    } catch {
+      // The SPAWN threw — reachable when `cwd: process.cwd()` hits ENOENT because the app's working
+      // directory was deleted/unmounted underneath it. No child ⇒ no 'close' ⇒ close the job + feed
+      // row HERE (terminal 'error' with the content-free constant), free the ticket, and NEVER
+      // re-throw: the caller already holds this job's id and must not receive a 500 for a start
+      // failure (activity-feed contract A7). Keys were resolved at REQUEST time, above, so a key
+      // failure has already propagated before this job existed — it cannot reach here.
+      state.status = 'error'; state.error = 'failed to start clustering'; state.finishedAt = Date.now();
+      if (runningJobId === jobId) runningJobId = null;
+      genAdm.release();
       publishTerminal('error', 'failed to start clustering');
     }
-    state.finishedAt = Date.now();
-    finish();
-  });
+  };
 
-  return { jobId, status: 'running' };
+  // COMPUTE GOVERNOR (D-001): a real re-cluster loads Ollama models in step 3 (describe) — a
+  // RESIDENT lane; measure-only is python metrics with no model — a BULK lane. Reserve BEFORE any
+  // child is created.
+  const genAdm = admit(measureOnly
+    ? { lane: 'measure', klass: CLASS.BULK, estimateGb: 2, timeoutMs: CLUSTERING_LEASE_MS }
+    : { lane: 'clustering', klass: CLASS.RESIDENT, timeoutMs: CLUSTERING_LEASE_MS });
+  if (genAdm.ok) { launch(genAdm); return { jobId, status: 'running' }; }
+
+  // ── REFUSED ──────────────────────────────────────────────────────────────────────────────────
+  // Measure (BULK) is a non-critical metric refresh refused by memory/budget → busy-return; the
+  // caller retries. Clean up the job + feed row so no phantom 'running' remains.
+  if (measureOnly) {
+    jobs.delete(jobId); if (runningJobId === jobId) runningJobId = null;
+    publishTerminal('abandoned', null);
+    return { jobId: null, status: 'busy', retryAfterMs: genAdm.retryAfterMs };
+  }
+
+  // Clustering is a QUEUE lane (design §3.3): a user-initiated Generate MUST eventually run — the
+  // D-004 map-rebuild control must complete, never silently die. Enqueue a retry that launches when
+  // the resident slot frees (e.g. a background chronicle pass finishes). The job stays 'running'
+  // (accepted + in-flight) with a queued stageLabel; the POST returns status:'queued' so the client
+  // knows. Coalesced by lane + bounded depth (RESIDENT_QUEUE_MAX) inside the governor.
+  state.stageLabel = 'Queued — waiting for compute…';
+  const retry = () => {
+    if (state.status !== 'running') return; // canceled while queued
+    const adm2 = admit({ lane: 'clustering', klass: CLASS.RESIDENT, timeoutMs: CLUSTERING_LEASE_MS });
+    if (adm2.ok) { launch(adm2); return; }
+    queueForResident('clustering', retry); // still refused (e.g. memory pressure) → wait for the next release
+  };
+  const q = queueForResident('clustering', retry);
+  if (!q.queued) {
+    // Queue is full (depth cap) — honest busy with a retry hint rather than an unbounded backlog.
+    jobs.delete(jobId); if (runningJobId === jobId) runningJobId = null;
+    publishTerminal('abandoned', null);
+    return { jobId: null, status: 'busy', retryAfterMs: genAdm.retryAfterMs };
+  }
+  return { jobId, status: 'queued' };
 }
 
 /** Refresh the analysis/measurement layer on the existing mindscape — NO re-cluster,
@@ -502,8 +530,22 @@ export function isClusteringRunning() {
  * (cluster.blocked/too_few_embedded + a Generate button), never stranded.
  * @returns {boolean}
  */
-export function shouldAutoGenerate({ embedded, points, clusteringRunning, min = 25 } = {}) {
-  return !clusteringRunning && Number(embedded) >= Number(min) && Number(points) === 0;
+export function shouldAutoGenerate({ embedded, points, clusteringRunning, min = 25, builtAtEmbedded = undefined } = {}) {
+  if (clusteringRunning || Number(embedded) < Number(min)) return false;
+  if (Number(points) === 0) return true;                       // first run — unchanged
+  // ── D-004: AUTO-REBUILD PAST A DRIFT THRESHOLD ────────────────────────────────────
+  // `points === 0` alone meant "auto-generate exactly once, ever". Combined with the
+  // route's unconditional skip, a map built on day one stayed on day one forever — the
+  // operator's 369-point map under a 2510-message vault. This hook fires from the enrich
+  // drainer's onSettled, i.e. AFTER embedding has drained, which is precisely when a large
+  // import has just made the map stale and precisely when the embed lane is idle.
+  //
+  // ⚠️ Callers that do not pass `builtAtEmbedded` keep the OLD behaviour exactly
+  // (`undefined` ⇒ never auto-rebuild). Opt-in, so no existing caller silently starts
+  // spawning heavy re-clusters — the D-001 compute-governor work (QA7 U1) is not built yet
+  // and this is a resident-model lane.
+  if (builtAtEmbedded === undefined) return false;
+  return evaluateFreshness({ embedded, mapped: Number(points), builtAtEmbedded }).stale;
 }
 
 /**
@@ -526,6 +568,11 @@ export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
   // near-full disk (ENOSPC storm is a corruption co-factor). Fire-and-forget → no pid.
   try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
   catch (e) { if (e.code === 'DISK_LOW') return { pid: null, status: 'disk_low' }; throw e; }
+  // COMPUTE GOVERNOR (D-001, L10): discover-claims.mjs runs an on-box model (design §0) — a
+  // RESIDENT lane, gated conservatively. (Whether it loads a resident model or only reads is
+  // UNCONFIRMED — design §6 — so the safe assignment is RESIDENT; it is off by default anyway.)
+  const adm = admit({ lane: 'claim-discovery', klass: CLASS.RESIDENT, timeoutMs: CLAIM_LEASE_MS });
+  if (!adm.ok) return { pid: null, status: 'busy', retryAfterMs: adm.retryAfterMs };
   const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
   const childEnv = {
     PATH: process.env.PATH,
@@ -542,15 +589,19 @@ export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
   if (cadence) args.push(`--cadence=${cadence}`);
   let child;
   try {
-    child = spawn('node', args, { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+    child = _spawn('node', args, { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
   } catch {
+    adm.release();
     return { pid: null };
   }
+  adm.bindChild(child);          // governor releases on close/error — crash-release #2
   let err = '';
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
   child.on('close', (code) => {
+    adm.release();
     if (code !== 0) process.stderr.write(`[claims] discovery(${cadence}) exited ${code}: ${err.slice(-300)}\n`);
   });
+  child.on('error', () => { adm.release(); });
   return { pid: child.pid ?? null };
 }
 
@@ -588,6 +639,11 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
   // old silent stuck-"Describing…". @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
   try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
   catch (e) { if (e.code === 'DISK_LOW') return { pid: null, status: 'disk_low', detail: e.detail }; throw e; }
+  // COMPUTE GOVERNOR (D-001): describe-chronicles loads an Ollama model — a RESIDENT lane. Reserve
+  // the single model slot BEFORE spawning. Refused while any other resident lane (embed-categorize,
+  // clustering, another describe, chat) holds it. This is P1: the reported symptom (drain × describe).
+  const adm = admit({ lane: 'describe-chronicles', klass: CLASS.RESIDENT, timeoutMs: DESCRIBE_LEASE_MS });
+  if (!adm.ok) return { pid: null, status: 'busy', retryAfterMs: adm.retryAfterMs };
   // territoryId: scoped per-territory "describe more" — describe-chronicles.js narrates
   // just that territory (bypassing the version/drift gate) + rolls up its theme/realm.
   // null = the normal global gap-fill pass. Spawned as a CHILD either way (NEVER in the
@@ -620,20 +676,23 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
   };
   let child;
   try {
-    child = spawn('node', ['pipeline/describe-chronicles.js'], { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+    child = _spawn('node', ['pipeline/describe-chronicles.js'], { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
   } catch {
+    adm.release();               // never leak the ticket when the spawn itself throws
     return { pid: null };
   }
   chronicleChildRunning = true;
+  adm.bindChild(child);          // governor releases on close/error (first wins) — crash-release #2
   let err = '';
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
   child.on('close', (code) => {
     chronicleChildRunning = false;
+    adm.release();               // explicit release (idempotent with the child-binding above)
     if (code !== 0) process.stderr.write(`[chronicles] narration exited ${code}: ${err.slice(-300)}\n`);
     // Chronicles change essence (part of the indexed corpus text) — refresh.
     else { refreshSearchIndex(); bustMindscape(userId); } // narrative changed → drop cache
   });
-  child.on('error', () => { chronicleChildRunning = false; });
+  child.on('error', () => { chronicleChildRunning = false; adm.release(); });
   return { pid: child.pid ?? null };
 }
 
@@ -667,6 +726,13 @@ export function startClusterNamingJob({ dbPath, userId } = {}) {
   // "free N GB" instead of a silent stuck row. Mirrors startChronicleNarrationJob.
   try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
   catch (e) { if (e.code === 'DISK_LOW') return { pid: null, status: 'disk_low', detail: e.detail }; throw e; }
+  // COMPUTE GOVERNOR (D-001, P3/C9): describe-clusters loads the naming model — a RESIDENT lane,
+  // and the SAME lane the in-pipeline copy (run-clustering.sh step 3) runs under a clustering
+  // ticket. Reserving 'describe-clusters' here means a standalone naming pass is refused while a
+  // Generate is clustering (or another describe holds the slot) — closing P3 (two describe-clusters
+  // at once) at the JS spawn boundary.
+  const adm = admit({ lane: 'describe-clusters', klass: CLASS.RESIDENT, timeoutMs: DESCRIBE_LEASE_MS });
+  if (!adm.ok) return { pid: null, status: 'busy', retryAfterMs: adm.retryAfterMs };
   const { userHex, systemHex } = getSessionKeys() ?? resolveKeys();
   const childEnv = {
     PATH: process.env.PATH,
@@ -692,15 +758,18 @@ export function startClusterNamingJob({ dbPath, userId } = {}) {
   const scriptPath = process.env.MYCELIUM_NAMING_SCRIPT || 'pipeline/describe-clusters.js';
   let child;
   try {
-    child = spawn('node', [scriptPath], { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+    child = _spawn('node', [scriptPath], { cwd: process.cwd(), env: childEnv, stdio: ['ignore', 'ignore', 'pipe'] });
   } catch {
+    adm.release();
     return { pid: null };
   }
   namingChildRunning = true;
+  adm.bindChild(child);
   let err = '';
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
   child.on('close', (code) => {
     namingChildRunning = false;
+    adm.release();
     // Content-free classified failure: the exit code + a stderr tail (describe-clusters' own
     // content-free logs), never a realm name. The pipeline owns its describe:name feed row.
     if (code !== 0) process.stderr.write(`[describe:name] naming exited ${code}: ${err.slice(-300)}\n`);
@@ -708,7 +777,7 @@ export function startClusterNamingJob({ dbPath, userId } = {}) {
     // realm/territory labels. Refresh both so the map + search reflect the new names.
     else { refreshSearchIndex(); bustMindscape(userId); }
   });
-  child.on('error', () => { namingChildRunning = false; });
+  child.on('error', () => { namingChildRunning = false; adm.release(); });
   return { pid: child.pid ?? null };
 }
 
@@ -843,6 +912,11 @@ async function finishNarrationFeed(db, runId) {
 export async function startNarrationWalkJob({ db, userId, scope = 'all', runWalk } = {}) {
   if (typeof runWalk !== 'function') throw new TypeError('startNarrationWalkJob: runWalk required');
   if (narrationRunning) { const r = await nrGet(db, narrationRunning); if (r && r.status === 'running') return { runId: r.run_id, status: 'running', already: true }; }
+  // COMPUTE GOVERNOR (D-001, L9/P13): the narration walk runs per-entity LLM turns IN-PROCESS — a
+  // RESIDENT lane. Reserving the model slot here refuses a walk while a describe child / clustering
+  // holds it (and vice-versa), closing P13 (narration walk × chronicles simultaneously).
+  const adm = admit({ lane: 'narration-walk', klass: CLASS.RESIDENT, timeoutMs: 0 });
+  if (!adm.ok) return { runId: null, status: 'busy', retryAfterMs: adm.retryAfterMs };
   const runId = crypto.randomUUID();
   narrationRunning = runId;
   await nrQuery(db,
@@ -875,6 +949,7 @@ export async function startNarrationWalkJob({ db, userId, scope = 'all', runWalk
     } catch (e) {
       await nrUpdate(db, runId, { status: 'error', error: String(e?.message || e).slice(0, 500) }).catch(() => {});
     } finally {
+      adm.release();                 // crash-release #1 (finally) — the model slot is freed on every exit
       narrationRunning = (narrationRunning === runId) ? null : narrationRunning;
       await finishNarrationFeed(db, runId);
     }
@@ -895,6 +970,11 @@ export async function resumeNarration({ db, userId, runId, runWalk }) {
   if (typeof runWalk !== 'function') throw new TypeError('resumeNarration: runWalk required');
   const r = await nrGet(db, runId); if (!r || r.status !== 'paused') return { ok: false, status: r?.status || null };
   if (narrationRunning && narrationRunning !== runId) return { ok: false, status: 'busy' };
+  // COMPUTE GOVERNOR (D-001, L9): resume is the RETRY path and loads the model just like start —
+  // reserve the RESIDENT slot here too, or a resumed walk would run un-governed (the exact "the fix
+  // landed on start only" trap the narration status/feed code documents twice in this file).
+  const adm = admit({ lane: 'narration-walk', klass: CLASS.RESIDENT, timeoutMs: 0 });
+  if (!adm.ok) return { ok: false, status: 'busy', retryAfterMs: adm.retryAfterMs };
   narrationRunning = runId;
   await nrUpdate(db, runId, { status: 'running' });
   // RE-OPEN the global feed row. start's pause left it terminal ('abandoned'), and heartbeat()
@@ -923,6 +1003,7 @@ export async function resumeNarration({ db, userId, runId, runWalk }) {
     } catch (e) {
       await nrUpdate(db, runId, { status: 'error', error: String(e?.message || e).slice(0, 500) }).catch(() => {});
     } finally {
+      adm.release();                 // crash-release #1 (finally) — symmetric with start
       narrationRunning = (narrationRunning === runId) ? null : narrationRunning;
       await finishNarrationFeed(db, runId);   // symmetric with start — resume is the retry path
     }
