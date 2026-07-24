@@ -33,6 +33,9 @@ const rec = (name, pass, detail = '') => {
 // ---- Real migration → in-memory DB + a minimal d1Query/firstRow shim ----------
 const raw = new Database(':memory:');
 raw.exec(fs.readFileSync(path.join(ROOT, 'migrations/0052_device_tokens.sql'), 'utf8'));
+// 0057 generalizes device_tokens to per-client tokens (adds kind + idle_expires_at).
+// Loading the REAL migration keeps the gate honest against schema drift.
+raw.exec(fs.readFileSync(path.join(ROOT, 'migrations/0057_device_token_web.sql'), 'utf8'));
 const d1Query = async (sql, params = []) => {
   const stmt = raw.prepare(sql);
   if (/^\s*select/i.test(sql)) return { results: stmt.all(...params) };

@@ -107,7 +107,10 @@ for (const [entry, out] of [
 }
 
 const STUB = '<script>let { ...rest } = $props();</script><div class="stub-child"></div>';
-for (const name of ['ActivityBars']) {
+// MapFreshness is the D-004 rebuild control — a SIBLING surface in the same panel, with its own
+// served fact and its own gate (verify:portal-mindscape Part S). Stubbed here so this harness
+// keeps asserting the NAMING card only; an unstubbed relative import fails M0 at module resolve.
+for (const name of ['ActivityBars', 'MapFreshness']) {
   const out = compile(STUB, { generate: 'client', name, css: 'injected' });
   writeFileSync(`${GEN}/${name}.gen.js`, out.js.code);
 }
@@ -120,7 +123,8 @@ const rewired = out.js.code
   .replace(/from\s+['"]\$app\/navigation['"]/g, `from './navigation-stub.js'`)
   .replace(/from\s+['"]\$lib\/stores\/mindscape['"]/g, `from './mindscape.js'`)
   .replace(/from\s+['"]\$lib\/stores\/activity['"]/g, `from './activity.js'`)
-  .replace(/from\s+['"]\$lib\/components\/mindscape\/ActivityBars\.svelte['"]/g, `from './ActivityBars.gen.js'`);
+  .replace(/from\s+['"]\$lib\/components\/mindscape\/ActivityBars\.svelte['"]/g, `from './ActivityBars.gen.js'`)
+  .replace(/from\s+['"]\.\/MapFreshness\.svelte['"]/g, `from './MapFreshness.gen.js'`);
 writeFileSync(`${GEN}/Subject.gen.js`, rewired);
 const unresolved = [...rewired.matchAll(/from\s+['"](\$(?:lib|app)\/[^'"]+)['"]/g)].map((m) => m[1]);
 if (unresolved.length) throw new Error(`unrewired specifiers in ${SRC}: ${[...new Set(unresolved)].join(', ')}`);

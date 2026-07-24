@@ -25,7 +25,9 @@
 	import { goto } from '$app/navigation';
 	import { guidanceRestoredSignal } from '$lib/stores/onboarding-guidance.svelte';
 	import { api } from '$lib/api';
+	import { openExternal } from '$lib/open-external';
 	import { navigationState } from '$lib/stores/navigation';
+	import { chatMessages } from '$lib/stores/chat';
 	import OnboardingWizard from './wizard/OnboardingWizard.svelte';
 
 	type StepKey = 'connect-ai' | 'messenger';   // §3.7a: 'import'/'generate' are the INVITE's, pre-generation
@@ -80,6 +82,52 @@
 		markWelcomeSeen();
 		navigationState.setPrimaryView('mindscape');
 		goto('/mindscape');
+		// D-028. markWelcomeSeen() flips `welcomeSeen`, which is one of railVisible's three
+		// conditions - so the rail appears IMMEDIATELY, rendering whatever this component
+		// last read. But the wizard is exactly where the user just connected intelligence
+		// and imported data, and nothing here re-read any of it: the only other caller of
+		// refresh() is the 4s poll (pollTimer). So the rail showed pre-wizard state -
+		// "connect an AI" still open, data not counted - until a poll happened to land,
+		// which the operator saw as the screen "reloading" a moment after finishing setup
+		// and only THEN showing data and intelligence as connected.
+		//
+		// Refresh on completion, so post-wizard state is EVALUATED at the moment it
+		// changes rather than DISCOVERED by a later poll. Deliberately not awaited: the
+		// navigation above must not wait on a readiness read, and refresh() is idempotent
+		// and already reentrancy-safe against the poll.
+		void refresh();
+		// D-016 / QA7 U9 — once a model is connected, auto-open chat with the agent's
+		// first message (introduces itself in the chosen name, shows HONEST awareness of
+		// the vault, asks who the user is). Best-effort, non-blocking.
+		void maybeGreetAndOpenChat();
+	}
+
+	// The onboarding first-message (D-016). Fires ONLY when a model is connected — the
+	// server composes + persists the greeting ONCE (durable stamp), so a second finish is
+	// a no-op. We open chat only on a FRESH send so we never re-pop it on a later run.
+	async function maybeGreetAndOpenChat() {
+		// "after a model connects" — read fresh so we don't miss a provider the 4s poll
+		// (or the not-yet-settled refresh above) hasn't observed yet.
+		let connected = hasProvider;
+		if (!connected) {
+			const r = await getJSON('/portal/readiness?slices=ai');
+			connected = r?.ai?.connected === true;
+		}
+		if (!connected) return;
+		try {
+			// The server persists the greeting under `chat:<conversationId>` — the SAME
+			// thread key ChatFloat loads — so history returns the greeting on open.
+			const conversationId = chatMessages.getConversationId();
+			const res = await api('/portal/onboarding/greeting', {
+				method: 'POST', body: JSON.stringify({ conversationId }),
+			});
+			if (!res.ok) return;
+			const d = await res.json().catch(() => ({}));
+			if (d?.sent === true) {
+				await chatMessages.loadHistory(true);   // pull the just-persisted greeting
+				navigationState.setChatOpen(true);       // open chat so it's the first thing seen
+			}
+		} catch { /* best-effort — chat is still reachable from the header toggle */ }
 	}
 	// A wizard step handed off to the full Import view (an explicit zip/json source).
 	// Stamp welcome-seen so the wizard overlay closes, then navigate ONCE to /import
@@ -303,11 +351,12 @@
 	let subUrlCopied = $state(false);
 	// Same discipline as AISettings: a Tauri webview can swallow a _blank navigation, so
 	// the URL is always on screen and a failed open() says so out loud.
-	function openSubSignIn() {
+	async function openSubSignIn() {
 		if (!subWebUrl) return;
 		subOpenFailed = false;
-		try { if (!window.open(subWebUrl, '_blank', 'noopener,noreferrer')) subOpenFailed = true; }
-		catch { subOpenFailed = true; }
+		// D-010: openExternal tries the native opener plugin (the real system browser)
+		// before window.open, which the Tauri webview swallows — see open-external.ts.
+		if (!(await openExternal(subWebUrl))) subOpenFailed = true;
 	}
 	async function copySubUrl() {
 		if (!subWebUrl) return;
@@ -513,11 +562,10 @@
 	</div>
 {/if}
 
-<!-- The "Your mycelium is ready" reveal MOVED to MindscapeView (§3.7a). It was gated on
-     `justGenerated`, written ONLY by the rail's pollGenerate() — which this increment deletes,
-     since Generate is a pre-generation act and belongs to the invite. Leaving the block here
-     would be dead code: the rail requires `generated`, so it can never watch the false→true
-     flip. MindscapeView already reacts to `phase === 'done'` and genuinely sees the moment. -->
+<!-- The "Your mycelium is ready" reveal popup was REMOVED entirely (D-033): it was inert —
+     clicking it did nothing — so the operator's call was to remove it rather than wire it up.
+     It never lived in this file; the rail's pollGenerate() (deleted earlier) was its only
+     writer, and the block last lived in MindscapeView, which is where the removal landed. -->
 
 <style>
 	/* The welcome/hero + step surface now lives in OnboardingWizard.svelte (S11).

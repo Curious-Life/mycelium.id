@@ -139,7 +139,7 @@ export const IMPORT_TABLE_POLICY = Object.freeze({
   // ══ DENY — authentication / bearer material ═══════════════════════════════
   sessions: { verdict: 'deny', why: 'portal session tokens — a bundle-chosen token authenticates as the owner.' },
   device_tokens: { verdict: 'deny', why: 'per-device owner bearer (0052). token_hash IS the credential; matchSync authorizes the portal + relay, and the session can read the static MCP bearer. The 2026-07-22 P0.' },
-  device_sessions: { verdict: 'deny-future', why: 'planned per-device session rows (design PR #337). Denied before it exists so it cannot ship importable.' },
+  device_sessions: { verdict: 'deny', why: 'per-device/web session rows (0056), bound to a device_tokens row. session_hash IS a credential: a bundle-chosen hash authenticates as the owner at both gates until the token is revoked. Now live (U7 unified auth) — flipped deny-future→deny.' },
   agent_tokens: { verdict: 'deny', why: 'agent bearer tokens (token_hash / parent_token_hash).' },
   passkey_credentials: { verdict: 'deny', why: 'WebAuthn credentials — origin-bound and authority-bearing.' },
   registration_tokens: { verdict: 'deny', why: 'one-shot enrolment tokens.' },
@@ -815,6 +815,11 @@ export const IMPORT_SETTINGS_POLICY = Object.freeze({
     verdict: 'refuse',
     rawSql: true,
     why: 'names an agent-authored HTML document that the portal FETCHES AND RENDERS as the space landing surface (db/spaces.js:87-90; SpaceDetailView.svelte:120,195,644). A bundle-chosen path is a bundle-chosen render target — a selection decision, not preference data.',
+  },
+
+  onboardingGreetingAt: {
+    verdict: 'refuse',
+    why: 'a per-vault timestamp the greeting composer stamps (portal-chat.js) so the agent\'s onboarding first message is generated EXACTLY ONCE. It gates a one-time UI event on THIS install; it is not portable user data and it carries no authority. A bundle setting it would suppress the first-message greeting on the importing vault (mild), or clearing/omitting it is harmless — either way it is per-install state, not content to carry home, so it is refused rather than allowed. Same class as the other local-UI flags above.',
   },
 
   recovery_key_backed_up: {

@@ -13,11 +13,10 @@
 // (2002::/16 → embedded v4), and Teredo (2001:0::/32). Each v4-bearing form is
 // re-checked against the v4 private/metadata ranges.
 //
-// RESIDUALS (tracked as MEDIUM in docs/SECURITY-REVIEW-2026-06-11.md, not closed
-// here): (1) on resolution FAILURE we allow — a non-resolving name can't be
-// fetched, and this keeps the shim-fetch tests working; (2) a TOCTOU window
-// remains without full IP pinning (fetch re-resolves). Both want the undici
-// IP-pinning agent to fully close. `lookup` is injectable for tests.
+// KNOWN LIMITATIONS: (1) on resolution FAILURE we allow — a non-resolving name
+// can't be fetched, and this keeps the shim-fetch tests working; (2) a TOCTOU
+// window remains without full IP pinning (fetch re-resolves). Both want the
+// undici IP-pinning agent to fully close. `lookup` is injectable for tests.
 
 import net from 'node:net';
 import { lookup as dnsLookup } from 'node:dns/promises';

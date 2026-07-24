@@ -16,13 +16,49 @@
 // endpoint, not the legacy import) rather than against copy that a refactor can restyle.
 //
 // VERDICT: GO / exit 0.
+//
+// MUTATION-TESTED: D-010 — the browser sign-in must actually open a browser:
+//   - opener command string plugin:opener|open_url → open_BROKEN in open-external.ts → D10b REDs
+//   - final `return false;` fallthrough → `return true;` in open-external.ts → D10c REDs
+//   - bare window.open(subWebUrl reintroduced in AISettings → D10d REDs
+//   - openExternal(subWebUrl) removed from AISettings (const opened=false) → R8a + D10d RED
+//   - onboarding openSubSignIn reverted to bare window.open → D10e REDs
+//   - tauri-plugin-opener dep name broken in Cargo.toml → D10f REDs
+//   - .plugin(tauri_plugin_opener::init()) removed from main.rs → D10g REDs
+//   - opener:allow-open-url removed from capabilities/default.json → D10h REDs
+//   (D10a is the file-existence precondition: with open-external.ts absent, D10a/b/c all RED.)
+// MUTATION-TESTED: D-002 ↻1 — subscription connected ≠ Claude Code engine:
+//   - subConnectedButNoCli condition `&& subscriptionConnected` → `&& false` in EngineSelector → D2a REDs
+//   - the "different thing from the Claude Code engine" distinction copy removed → D2b REDs
+//   - the "the engine stayed on Mycelium" headline copy removed → D2c REDs
+// MUTATION-TESTED: D-002 operator reframe — install/update from the app + persistence:
+//   - CLAUDE_NATIVE_INSTALL_SH → an evil URL in claude-cli-install.js → I1b REDs
+//   - minimalEnv spread `...env` (leaks secrets) → I2 REDs
+//   - runToVerdict verdict forced `true ? {ok:true}` (dishonest exit) → I3 REDs
+//   - updateClaudeCli `if (!bin) return not-installed` guard removed → I5 REDs
+//   - the endpoint `ok: r.ok && usable` → `ok: r.ok` (no re-probe honesty) → EP2 REDs
+//   - installCli POST path `harness/cli/install` → broken → UI1 REDs
+//   - load() `mode = j.harnessMode…` → `mode = 'native'` (drops persistence) → P1 REDs
+//   - card `class:sel={mode === 'cli'}` → `&& cliEligible` (silent downgrade) → P2 REDs
+//   - the `ec-blocked-note` remedy banner renamed away → P3 REDs
+// MUTATION-TESTED: F1 — code-exec endpoints reject cross-site even on loopback:
+//   - the `if (!requireSameOrigin(req)) 403` guard removed from portal-providers → SEC1/2/3 RED
+//   - isSameOriginRequest patched to `return true` (guard always passes) → SEC1/SEC2 RED
+// MUTATION-TESTED: F7 — installer stderr never leaks in the returned error:
+//   - runToVerdict restored to append `': ' + err.slice(-160)` (leaks stderr) → I7 REDs
+// All mutations restored; the suite returns GREEN on the restored tree.
+import express from 'express';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { portalProvidersRouter } from '../src/portal-providers.js';
 import {
   probeClaudeCli, fetchLatestClaudeVersion, claudeVersionGte, parseClaudeVersion,
   CLAUDE_MIN_VERSION, _resetLatestCache,
 } from '../src/inference/claude-cli-status.js';
+import {
+  installClaudeCli, updateClaudeCli, CLAUDE_NATIVE_INSTALL_SH,
+} from '../src/inference/claude-cli-install.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => { try { return readFileSync(resolve(ROOT, p), 'utf8'); } catch { return ''; } };
@@ -142,8 +178,8 @@ ok(/mycelium:connect-claude-sub/.test(ENGINE) && /mycelium:connect-claude-sub/.t
 // R7/R8 — issue #2: "Open Claude sign-in" opened nothing.
 ok(!/href=\{subWebUrl\}[^>]*target="_blank"/.test(AISET),
   'R7. the sign-in control is no longer a bare <a target="_blank"> (swallowed in the webview)');
-ok(/function openSignIn\(\)/.test(AISET) && /if \(!w\) subOpenFailed = true;/.test(AISET) && /subOpenFailed/.test(AISET),
-  'R8a. a blocked window.open FAILS VISIBLY (subOpenFailed)');
+ok(/function openSignIn\(\)/.test(AISET) && /openExternal\(subWebUrl\)/.test(AISET) && /subOpenFailed = true/.test(AISET),
+  'R8a. the sign-in open path tries the native opener (openExternal) and FAILS VISIBLY when it can’t (subOpenFailed)');
 // The copyable URL must be rendered UNCONDITIONALLY — a webview can refuse without
 // reporting, so it cannot be gated on the failure flag.
 const urlBlock = AISET.match(/<div class="signin-url">[\s\S]{0,80}?<\/div>/);
@@ -180,6 +216,171 @@ ok(/function openSubSignIn/.test(ONBOARD) && /subOpenFailed = true/.test(ONBOARD
 // The manual path in Settings must SURVIVE — the brief says keep it, don't replace it.
 ok(/finishSubWeb/.test(AISET) && /Paste the code from Claude/.test(AISET),
   'R10. the existing manual entry in Settings is PRESERVED (fallback not removed)');
+
+// ── D-010 (QA7 P3.2): the sign-in must actually OPEN a browser, not just copy-paste ──
+// Operator: "why can't the app open a browser?" window.open('_blank') is swallowed by
+// the Tauri webview (a remote http origin), so BOTH sign-in surfaces fell straight to
+// their copy-paste fallback — the DEGRADED path shown as the only path. The fix routes
+// through the native opener plugin FIRST; assert the whole chain, JS through native.
+const OPENEXT = read('portal-app/src/lib/open-external.ts');
+const CAP = read('src-tauri/capabilities/default.json');
+const MAINRS = read('src-tauri/src/main.rs');
+const CARGO = read('src-tauri/Cargo.toml');
+ok(!!OPENEXT, 'D10a. open-external.ts exists (the shared open-in-browser helper)');
+// The REAL fix hinges on the EXACT opener command + arg key — a typo there silently
+// reverts to the swallowed window.open, which is the bug.
+ok(/plugin:opener\|open_url/.test(OPENEXT) && /invoke\(['"]plugin:opener\|open_url['"],\s*\{\s*url\s*\}/.test(OPENEXT),
+  'D10b. openExternal invokes plugin:opener|open_url with { url } (the native browser hand-off)');
+ok(/const w = window\.open\(/.test(OPENEXT) && /if \(w\) return true;/.test(OPENEXT) && /return false;\s*\n\}/.test(OPENEXT),
+  'D10c. …with window.open as the dev fallback and an honest final `false` when neither opens');
+// Both sign-in surfaces route through it — NOT a bare window.open the webview eats.
+ok(/openExternal\(subWebUrl\)/.test(AISET) && !/window\.open\(subWebUrl/.test(AISET),
+  'D10d. AISettings "Open Claude sign-in" goes through openExternal, not a bare window.open');
+ok(/openExternal\(subWebUrl\)/.test(ONBOARD) && !/window\.open\(subWebUrl/.test(ONBOARD),
+  'D10e. Onboarding sign-in goes through openExternal, not a bare window.open');
+// The NATIVE side must depend on, register, AND grant the opener — miss any one and
+// open_url rejects and we silently fall back to the swallowed path.
+ok(/tauri-plugin-opener/.test(CARGO), 'D10f. Cargo.toml depends on tauri-plugin-opener');
+ok(/tauri_plugin_opener::init\(\)/.test(MAINRS), 'D10g. main.rs registers the opener plugin');
+ok(/opener:allow-open-url/.test(CAP) && /opener:allow-default-urls/.test(CAP),
+  'D10h. the webview capability grants open_url + its http/https URL scope');
+
+// ── D-002 (operator reframe 2026-07-24): INSTALL + UPDATE the CLI FROM the app ──
+// The bar is no longer copy-paste homework: the app must install the `claude` CLI and
+// update it. The behavioural half (I*) runs the REAL runner with an injected spawn — no
+// real install — and asserts the fixed command, honesty, and that no vault secret rides
+// the child env.
+function fakeChild(exitCode, { throwOnClose = false, stderrText = '' } = {}) {
+  const handlers = {};
+  const child = {
+    stderr: { on: (ev, cb) => { handlers[`err:${ev}`] = cb; } },
+    on: (ev, cb) => { handlers[ev] = cb; return child; },
+    kill: () => {},
+  };
+  // Emit stderr (if any) then fire close on the next tick, like a real child.
+  queueMicrotask(() => {
+    if (stderrText) handlers['err:data']?.(Buffer.from(stderrText));
+    if (throwOnClose) handlers['error']?.({ code: 'BOOM' });
+    else handlers['close']?.(exitCode);
+  });
+  return child;
+}
+{
+  // I1 — install runs the OFFICIAL fixed command, never an interpolated one.
+  let seen = null;
+  const spy = (cmd, args, opts) => { seen = { cmd, args, opts }; return fakeChild(0); };
+  const r1 = await installClaudeCli({ spawnImpl: spy, platform: 'darwin', env: { PATH: '/usr/bin', HOME: '/h' } });
+  ok(r1.ok === true, 'I1a. a clean installer exit → ok:true');
+  ok(seen && seen.cmd === '/bin/sh' && Array.isArray(seen.args) && seen.args[0] === '-c' && seen.args[1] === CLAUDE_NATIVE_INSTALL_SH
+    && /^curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash$/.test(String(seen.args[1] || '')),
+    'I1b. install runs the OFFICIAL claude.ai native-installer command verbatim (no interpolation)');
+  // I2 — minimal env: a secret placed in the parent env must NOT reach the child.
+  let env2 = null;
+  const spy2 = (_c, _a, opts) => { env2 = opts.env; return fakeChild(0); };
+  await installClaudeCli({ spawnImpl: spy2, platform: 'darwin', env: { PATH: '/p', HOME: '/h', ANTHROPIC_API_KEY: 'sk-SECRET', ENCRYPTION_MASTER_KEY: 'deadbeef' } });
+  ok(env2 && env2.PATH === '/p' && env2.HOME === '/h' && !('ANTHROPIC_API_KEY' in env2) && !('ENCRYPTION_MASTER_KEY' in env2),
+    'I2. the installer child env carries PATH/HOME only — no vault secret crosses to it (§1)');
+  // I3 — a non-zero exit is an honest failure, never a false ok.
+  const r3 = await installClaudeCli({ spawnImpl: () => fakeChild(1), platform: 'darwin', env: { PATH: '/p', HOME: '/h' } });
+  ok(r3.ok === false && /^exit-1/.test(r3.error || ''), 'I3. a non-zero installer exit → ok:false with a code');
+  // I7 (F7) — the child's stderr can embed the user's home dir; it must NEVER appear in
+  // the returned error (§1). Emit a home-dir-shaped stderr line and assert the verdict
+  // carries ONLY the machine code.
+  const r7 = await installClaudeCli({ spawnImpl: () => fakeChild(2, { stderrText: 'error at /Users/alice/.local/bin/claude: EACCES' }), platform: 'darwin', env: { PATH: '/p', HOME: '/h' } });
+  ok(r7.ok === false && r7.error === 'exit-2' && !/Users|alice|\.local|EACCES/.test(r7.error || ''),
+    'I7. the returned error is the bare code — the installer stderr (a home-dir path) never leaks (§1)');
+  // I4 — a spawn that errors never throws across the boundary.
+  const r4 = await installClaudeCli({ spawnImpl: () => fakeChild(0, { throwOnClose: true }), platform: 'darwin', env: { PATH: '/p', HOME: '/h' } });
+  ok(r4.ok === false && /spawn-failed/.test(r4.error || ''), 'I4. a spawn error is caught → ok:false, never a throw');
+  // I5 — UPDATE with no installed binary refuses BEFORE spawning (nothing to update).
+  let updateSpawned = 0;
+  const r5 = await updateClaudeCli({ spawnImpl: () => { updateSpawned++; return fakeChild(0); }, findBin: () => null, env: { PATH: '/p', HOME: '/h' } });
+  ok(r5.ok === false && r5.error === 'not-installed' && updateSpawned === 0, 'I5. update with no CLI → not-installed, and spawns nothing');
+  // I6 — UPDATE with a binary runs `<bin> update`.
+  let seenU = null;
+  await updateClaudeCli({ spawnImpl: (cmd, args) => { seenU = { cmd, args }; return fakeChild(0); }, findBin: () => '/opt/homebrew/bin/claude', env: { PATH: '/p', HOME: '/h' } });
+  ok(seenU && seenU.cmd === '/opt/homebrew/bin/claude' && seenU.args?.[0] === 'update', 'I6. update runs `<resolved-bin> update`');
+}
+
+// EP — the endpoints wire the runner AND re-probe, so a clean-exit-but-broken install
+// is never sold as success (the honesty rule).
+ok(/installClaudeCli|updateClaudeCli/.test(PROVIDERS) && /harness\/cli\/install/.test(PROVIDERS) && /harness\/cli\/update/.test(PROVIDERS),
+  'EP1. POST /providers/harness/cli/{install,update} are wired to the runner');
+ok(/probeClaudeCli\(\)/.test(PROVIDERS) && /r\.ok && usable/.test(PROVIDERS),
+  'EP2. the endpoint RE-PROBES and reports ok ONLY when a usable CLI actually appears (no silent success)');
+
+// ── SEC (F1) — the code-exec endpoints REJECT cross-site requests even on loopback ──
+// These SPAWN a process. The vault gate bypasses CSRF for any loopback browser, so a
+// cross-site page could auto-POST here. This mounts the REAL router (NO vault gate, so
+// the request IS trusted-loopback — exactly the exposed condition) with the installer
+// SEAMS stubbed (nothing is ever really installed) and drives real HTTP: a cross-site-
+// shaped POST must 403 and NEVER reach the installer; a same-origin one must pass.
+{
+  let installCalls = 0, updateCalls = 0;
+  const app = express();
+  app.use(express.json());
+  app.use('/api/v1/portal', portalProvidersRouter({
+    db: { providers: {} }, userId: 'u',
+    installCli: async () => { installCalls++; return { ok: true }; },
+    updateCli: async () => { updateCalls++; return { ok: true }; },
+  }));
+  const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}/api/v1/portal`;
+  const post = (p, headers) => fetch(base + p, { method: 'POST', headers });
+  try {
+    // Cross-site shape: browser would send Sec-Fetch-Site: cross-site, and a cross-site
+    // POST carries no readable CSRF token. Must be refused BEFORE spawning.
+    const xsite = await post('/providers/harness/cli/install', { 'sec-fetch-site': 'cross-site' });
+    ok(xsite.status === 403, 'SEC1. a cross-site POST to /cli/install is REFUSED (403) even from loopback', `status=${xsite.status}`);
+    // A bare POST with no same-origin proof at all — also refused.
+    const bare = await post('/providers/harness/cli/install', {});
+    ok(bare.status === 403, 'SEC2. a POST with NO same-origin proof is refused (403)');
+    // The installer seam was NEVER reached by either refused request.
+    ok(installCalls === 0, 'SEC3. …and the installer is NEVER spawned by a refused request (no forced code-exec)');
+    // Same-origin (Fetch Metadata) passes the guard and reaches the (stubbed) installer.
+    const same = await post('/providers/harness/cli/install', { 'sec-fetch-site': 'same-origin' });
+    ok(same.status !== 403 && installCalls === 1, 'SEC4. a genuine same-origin POST passes the guard and runs the action', `status=${same.status} calls=${installCalls}`);
+    // A valid double-submit CSRF token (cookie + matching header) also passes.
+    const csrf = await post('/providers/harness/cli/install', { cookie: 'mycelium_csrf=tok123', 'x-csrf-token': 'tok123' });
+    ok(csrf.status !== 403 && installCalls === 2, 'SEC5. a valid double-submit CSRF token also passes the guard');
+    // A cookie present but a WRONG echoed token is refused (no token confusion).
+    const badtok = await post('/providers/harness/cli/update', { cookie: 'mycelium_csrf=tok123', 'x-csrf-token': 'WRONG' });
+    ok(badtok.status === 403 && updateCalls === 0, 'SEC6. a wrong CSRF token is refused on /cli/update too (both endpoints guarded)');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+}
+
+// UI — the panel offers the real Install/Update ACTIONS, not just a command.
+ok(/async function installCli\(/.test(ENGINE) && /harness\/cli\/install/.test(ENGINE),
+  'UI1. EngineSelector installs the CLI from the app (installCli → POST install)');
+ok(/async function updateCli\(/.test(ENGINE) && /harness\/cli\/update/.test(ENGINE),
+  'UI2. …and updates it from the app (updateCli → POST update)');
+ok(/onclick=\{installCli\}/.test(ENGINE) && />\{installing \? 'Installing…' : 'Install Claude Code'\}</.test(ENGINE),
+  'UI3. an Install Claude Code button is rendered (missing CLI)');
+ok(/updateCli\(\)/.test(ENGINE) && /'Update Claude Code'|>Update</.test(ENGINE),
+  'UI4. an Update action is rendered (outdated or newer-available)');
+
+// PERSIST — operator req 3: 'cli' survives a restart and is NEVER silently downgraded.
+ok(/mode = j\.harnessMode === 'cli' \? 'cli' : 'native'/.test(ENGINE),
+  'P1. load() re-reads the stored engine from harnessMode on mount (persists across restart)');
+ok(/class:sel=\{mode === 'cli'\}/.test(ENGINE) && !/class:sel=\{mode === 'cli' &&/.test(ENGINE),
+  'P2. the Claude Code card shows selected from `mode` ALONE — eligibility never downgrades the shown selection');
+ok(/storedCliButBlocked = \$derived\(loaded && mode === 'cli' && !cliEligible\)/.test(ENGINE) && /ec-blocked-note/.test(ENGINE),
+  'P3. a stored-but-blocked engine surfaces a click-free remedy banner (selected-but-blocked, not reverted)');
+
+// ── D-002 ↻1 (QA7 P3.1): a connected subscription is NOT the Claude Code engine ──
+// Server persistence + the version gate already work; the recurrence is a CONCEPTUAL
+// gap. The operator connected a Claude SUBSCRIPTION and "Claude Code" reverted to
+// Mycelium with no reconcilable reason. When a subscription IS connected but the local
+// `claude` binary is missing, the panel must (a) detect that as its own state, (b) say
+// the subscription≠engine distinction out loud, and (c) EXPLAIN the revert.
+ok(/subConnectedButNoCli/.test(ENGINE) && /blocker === 'cli' && subscriptionConnected/.test(ENGINE),
+  'D2a. the "subscription connected, CLI still missing" case is detected as its own state');
+ok(/different thing from the Claude Code engine/.test(ENGINE) && /command-line program/.test(ENGINE) && /subscription stays connected/.test(ENGINE),
+  'D2b. …and the panel copy states the subscription≠engine distinction out loud');
+ok(/panelHeadline/.test(ENGINE) && /the engine stayed on Mycelium/.test(ENGINE),
+  'D2c. the revert is EXPLAINED (a headline names why the engine stayed on Mycelium), never silent');
 
 console.log('');
 if (failures) { console.log(`VERDICT: NO-GO — ${failures} failure(s)`); process.exit(1); }

@@ -50,7 +50,11 @@ const MAX_BACKOFF_MS = 30000;
 const DOWN_AFTER = 5;            // consecutive crashes → report 'down' (likely a bad token)
 const PROBE_TIMEOUT_MS = 1500;
 
-let _health = { status: 'unknown', message: 'Channels not started.', detail: null, replies: null, backend: null };
+// `transports` (D-014) is the per-platform LIVE connection state proxied from the
+// daemon's /healthz. It is `{}` — never a fabricated default — whenever we have no
+// fresh read, so a consumer that finds no entry for a platform must treat it as NOT
+// connected (fail closed; see honestChannelConnection() below).
+let _health = { status: 'unknown', message: 'Channels not started.', detail: null, replies: null, backend: null, transports: {} };
 let _instance = null;
 
 /**
@@ -63,6 +67,53 @@ let _instance = null;
  * @returns {{status:string,message:string,detail:string|null}}
  */
 export function getChannelHealth() { return { ..._health }; }
+
+/**
+ * D-014 — the ONE honest answer to "is <platform> connected?", for the settings UI.
+ *
+ * The operator's report: "discord shows as connected even though it is not connected."
+ * The old UI derived that badge from `hasToken` — a STORED FLAG meaning "a bot token
+ * exists in the vault". A token is a credential, not a socket. This function refuses to
+ * conflate them, and it FAILS CLOSED: `connected` is true only when the daemon's own
+ * transport reporter says the platform's gateway reached `ready`.
+ *
+ * States (the D-013 taxonomy, applied to one channel):
+ *   'not-configured' — no token stored; nothing to connect
+ *   'off'            — configured, but the channels master switch is off
+ *   'connecting'     — the bridge is starting, or the socket is mid-handshake
+ *   'connected'      — a LIVE gateway session exists (the only "connected")
+ *   'failed'         — the bridge or that platform's gateway is down (reason names it)
+ *   'unknown'        — we genuinely could not read (supervisor not started). NOT connected.
+ *
+ * @param {object} a
+ * @param {'telegram'|'discord'} a.platform
+ * @param {boolean} a.hasToken   a token is stored for this platform
+ * @param {boolean} a.enabled    the channels master switch
+ * @param {object}  [a.health]   getChannelHealth() result
+ * @returns {{state:string, connected:boolean, reason:string|null, detail:string|null}}
+ */
+export function honestChannelConnection({ platform, hasToken, enabled, health = getChannelHealth() }) {
+  const out = (state, reason = null, detail = null) => ({ state, connected: state === 'connected', reason, detail });
+  if (!hasToken) return out('not-configured');
+  if (!enabled) return out('off', 'disabled', 'Channels are switched off in Advanced.');
+
+  const st = health?.status;
+  if (st === 'unknown') return out('unknown', 'no_read', 'The bridge has not reported yet.');
+  if (st === 'disabled') return out('off', 'disabled', health?.message || null);
+  if (st === 'down') return out('failed', 'bridge_down', health?.message || 'The channel bridge is not running.');
+  if (st === 'starting') return out('connecting', 'bridge_starting', health?.message || null);
+
+  // status 'ok' means the daemon PROCESS answered /healthz — which is exactly the
+  // evidence that was previously mistaken for "Discord is connected". Go one level
+  // deeper and read the platform's own transport state.
+  const t = health?.transports?.[platform];
+  if (!t) return out('unknown', 'no_transport_report', 'The bridge is running but has not reported this channel.');
+  if (t.connected === true && t.state === 'ready') return out('connected');
+  if (t.state === 'connecting') return out('connecting', 'handshake', t.message || null);
+  if (t.state === 'disconnected') return out('failed', t.reason || 'socket_closed', t.message || 'The connection dropped; retrying.');
+  if (t.state === 'idle') return out('connecting', 'not_started', t.message || null);
+  return out('failed', t.reason || 'gateway_failed', t.message || null);
+}
 
 /**
  * Start + supervise the channel daemon. Idempotent (a second call returns the
@@ -101,7 +152,10 @@ export function startChannelSupervisor({
   let errBuf = '';
   let tickTimer = null;
 
-  const setHealth = (status, message, detail = null, extra = {}) => { _health = { status, message, detail, replies: null, backend: null, ...extra }; };
+  // `transports` resets to {} on every setHealth unless the caller supplies a fresh
+  // read (D-014). Stale per-platform state is worse than none: a gateway that was
+  // ready before a crash must not keep reporting `ready` through the restart.
+  const setHealth = (status, message, detail = null, extra = {}) => { _health = { status, message, detail, replies: null, backend: null, transports: {}, ...extra }; };
   const lastErrLine = () => errBuf.split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
   const backoff = () => { nextStartAt = Date.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(failures, 5)); };
 
@@ -205,7 +259,11 @@ export function startChannelSupervisor({
         'ok',
         captureOnly ? 'Bridge running — receiving, but not replying (no AI model connected).' : 'Channel bridge is running.',
         captureOnly ? 'Select an AI model in Settings → AI (or add a channel assistant key) to enable replies.' : null,
-        { replies: up.replies || null, backend: up.backend || null },
+        // D-014: carry the daemon's per-platform transport report through verbatim. An
+        // OLDER daemon (or one that answered /healthz before the field existed) sends no
+        // `transports` — {} then means "no read", which honestChannelConnection() renders
+        // as 'unknown', never as connected.
+        { replies: up.replies || null, backend: up.backend || null, transports: (up.transports && typeof up.transports === 'object') ? up.transports : {} },
       );
       failures = 0;
       return;
@@ -243,7 +301,7 @@ export function startChannelSupervisor({
 export function _resetChannelSupervisor() {
   if (_instance) { try { _instance.stop(); } catch { /* */ } }
   _instance = null;
-  _health = { status: 'unknown', message: 'Channels not started.', detail: null };
+  _health = { status: 'unknown', message: 'Channels not started.', detail: null, replies: null, backend: null, transports: {} };
 }
 
 export default startChannelSupervisor;

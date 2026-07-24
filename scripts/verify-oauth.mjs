@@ -4,7 +4,7 @@
 // then an MCP initialize + tools/list + tools/call over the authenticated HTTP
 // transport, plus a 401-on-unauth check and a DELETE session-eviction check.
 //
-// Adapted from spike/oauth/probe.mjs (verified GO). The server runs in its own
+// Adapted from the OAuth spike probe (verified GO). The server runs in its own
 // process — the proven spike topology.
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';

@@ -24,10 +24,17 @@
 	type Group = { id: string; title: string | null; access: Access };
 	type DChan = { id: string; name: string | null; access: Access };
 	type Routing = { router: string; ollamaModel: string; ollamaUrl: string; coalesceMs: string; rateLimitMax: string; rateLimitWindowMs: string; sensitivePatterns: string };
+	// D-014 — the honest per-channel connection state the server derives
+	// (src/channels/supervisor.js honestChannelConnection). `connected` is true ONLY
+	// when the daemon reports a live gateway for that platform.
+	type Conn = {
+		state: 'not-configured' | 'off' | 'connecting' | 'connected' | 'failed' | 'unknown';
+		connected: boolean; reason: string | null; detail: string | null;
+	};
 	type ChannelsState = {
 		enabled: boolean;
-		telegram: { hasToken: boolean; ownerId: string | null };
-		discord: { hasToken: boolean; ownerId: string | null };
+		telegram: { hasToken: boolean; ownerId: string | null; connection?: Conn };
+		discord: { hasToken: boolean; ownerId: string | null; connection?: Conn };
 		agent: { hasKey: boolean; model: string | null };
 		routing: Routing;
 		groups: Group[];
@@ -145,6 +152,32 @@
 	}
 
 	function pick(ch: 'telegram' | 'discord') { selected = selected === ch ? null : ch; }
+
+	// ── D-014: the tile badge ────────────────────────────────────────────────────
+	// The operator's words: "discord shows as connected even though it is not connected."
+	// The badge used to read `hasToken` — "a bot token is saved in the vault" — which is a
+	// credential, not a connection. It said Connected while the Discord gateway had never
+	// started (discord.js is an optional dep that isn't installed, so every start() threw
+	// and the error was swallowed at index.js's `.catch()`).
+	//
+	// Now it renders the SERVER-DERIVED honest state, and it FAILS CLOSED: an older server
+	// that sends no `connection` object, or any state that is not exactly 'connected',
+	// renders as something other than Connected. There is no branch that can print
+	// "Connected" from a stored flag.
+	function badgeFor(c: { hasToken: boolean; connection?: Conn } | undefined): { text: string; tone: string } | null {
+		if (!c?.hasToken) return null;                                  // nothing configured → no badge
+		const st = c.connection?.state;
+		if (st === 'connected') return { text: 'Connected', tone: 'ok' };
+		if (st === 'connecting') return { text: 'Connecting…', tone: 'warn' };
+		if (st === 'off') return { text: 'Off', tone: 'muted' };
+		if (st === 'failed') return { text: 'Not connected', tone: 'bad' };
+		// 'unknown' — and the no-`connection`-field case. We do NOT know it is connected,
+		// so we must not say it is. "Checking…" is the honest word for an absent read.
+		return { text: 'Checking…', tone: 'muted' };
+	}
+	// Called from the markup (inside the `{:else}` arm where `cs` is already narrowed
+	// non-null) rather than hoisted into a `$derived` — at this point in the module TS
+	// narrows the still-unassigned `cs` to `null`, so `cs?.telegram` would be `never`.
 </script>
 
 <section class="card p-5">
@@ -179,19 +212,23 @@
 
 		{#if error}<div class="text-xs text-red-400 mb-3 p-2 rounded bg-red-500/10">{error}</div>{/if}
 
-		<!-- pick a logo → connect -->
+		<!-- pick a logo → connect. The badges are {@const} here rather than a module-level
+		     $derived: at that point TS narrows the still-unassigned `cs` to `null`, so
+		     `cs.telegram` would be `never`. Inside this {:else} arm `cs` is non-null. -->
+		{@const tgBadge = badgeFor(cs.telegram)}
+		{@const dcBadge = badgeFor(cs.discord)}
 		<div class="grid grid-cols-2 gap-3 mb-4">
 			<button type="button" onclick={() => pick('telegram')} aria-pressed={selected === 'telegram'}
 				class="channel-tile {selected === 'telegram' ? 'channel-tile--on' : ''}">
 				<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" class="w-6 h-6"><path d="M9.78 18.65l.28-4.23 7.68-6.92c.34-.31-.07-.46-.52-.19L7.74 13.3 3.64 12c-.88-.25-.89-.86.2-1.3l15.97-6.16c.73-.33 1.43.18 1.15 1.3l-2.72 12.81c-.19.91-.74 1.13-1.5.71l-4.13-3.05-1.98 1.93c-.23.23-.42.42-.86.42z"/></svg>
 				<span class="channel-name">Telegram</span>
-				{#if cs.telegram.hasToken}<span class="channel-badge">Connected</span>{/if}
+				{#if tgBadge}<span class="channel-badge" data-tone={tgBadge.tone} data-testid="badge-telegram" title={cs.telegram.connection?.detail ?? undefined}>{tgBadge.text}</span>{/if}
 			</button>
 			<button type="button" onclick={() => pick('discord')} aria-pressed={selected === 'discord'}
 				class="channel-tile {selected === 'discord' ? 'channel-tile--on' : ''}">
 				<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" class="w-6 h-6"><path d="M20.32 4.37A19.8 19.8 0 0015.45 3l-.24.44a18.3 18.3 0 014.32 1.35 16.9 16.9 0 00-19.06 0A18.3 18.3 0 018.8 3.44L8.55 3a19.8 19.8 0 00-4.87 1.37C.6 8.96-.24 13.44.18 17.86a19.95 19.95 0 006.03 3.05l.66-1.05a13 13 0 01-2.06-.98l.5-.38a14.24 14.24 0 0012.36 0l.5.38c-.65.38-1.34.71-2.06.98l.66 1.05a19.95 19.95 0 006.03-3.05c.5-5.12-.84-9.56-3.5-13.49zM8.03 15.33c-1.18 0-2.15-1.08-2.15-2.4s.95-2.42 2.15-2.42 2.16 1.09 2.15 2.42c0 1.32-.96 2.4-2.15 2.4zm7.94 0c-1.18 0-2.15-1.08-2.15-2.4s.95-2.42 2.15-2.42 2.16 1.09 2.15 2.42c0 1.32-.95 2.4-2.15 2.4z"/></svg>
 				<span class="channel-name">Discord</span>
-				{#if cs.discord.hasToken}<span class="channel-badge">Connected</span>{/if}
+				{#if dcBadge}<span class="channel-badge" data-tone={dcBadge.tone} data-testid="badge-discord" title={cs.discord.connection?.detail ?? undefined}>{dcBadge.text}</span>{/if}
 			</button>
 		</div>
 
@@ -203,8 +240,29 @@
 			</div>
 		{:else if selected === 'discord'}
 			<div class="connect-panel mb-4 space-y-3">
+				<!-- D-014: this line claimed "✓ Discord connected" off `hasToken` too. It now
+				     tracks the same honest state, and NAMES THE REMEDY when it is not connected
+				     (the QA6 bar) instead of asserting a connection that does not exist. -->
 				{#if cs.discord.hasToken}
-					<p class="text-[0.75rem] text-[var(--color-accent)]">✓ Discord connected. Add me to a server and send <code>/allow</code> in a channel.</p>
+					{#if cs.discord.connection?.state === 'connected'}
+						<p class="text-[0.75rem] text-[var(--color-accent)]">✓ Discord connected. Add me to a server and send <code>/allow</code> in a channel.</p>
+					{:else if cs.discord.connection?.state === 'connecting'}
+						<p class="text-[0.75rem] text-[var(--color-text-secondary)]">Connecting to Discord…</p>
+					{:else if cs.discord.connection?.state === 'off'}
+						<p class="text-[0.75rem] text-[var(--color-text-secondary)]">Token saved, but channels are switched off — turn on “Enable channels” in Advanced below.</p>
+					{:else if cs.discord.connection?.state === 'failed'}
+						<p class="text-[0.75rem] text-amber-400" data-testid="discord-not-connected">
+							Token saved, but Discord is <strong>not connected</strong>.
+							{#if cs.discord.connection?.reason === 'module_missing'}
+								This build doesn’t include the Discord gateway library, so incoming Discord messages can’t be received.
+							{:else if cs.discord.connection?.detail}
+								{cs.discord.connection.detail}
+							{/if}
+							Re-check the bot token and that the <code>MESSAGE CONTENT</code> intent is enabled in the Discord dev portal, then press Update.
+						</p>
+					{:else}
+						<p class="text-[0.75rem] text-[var(--color-text-tertiary)]">Token saved — checking the Discord connection…</p>
+					{/if}
 				{/if}
 				<div>
 					<label for="ch-dc-token" class="text-[0.7rem] text-[var(--color-text-secondary)] block mb-1">Discord bot token {#if cs.discord.hasToken}<span class="ml-2 text-[var(--color-accent)]">configured ✓</span>{/if}</label>
@@ -363,10 +421,16 @@
 		background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 	}
 	.channel-name { font-size: 0.8rem; font-weight: 500; }
+	/* D-014: the badge is TONED by the honest state, so "Not connected" cannot read as
+	   an accent-coloured success the way the old unconditional "Connected" did. */
 	.channel-badge {
 		font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.04em;
-		color: var(--color-accent);
+		color: var(--color-text-tertiary);
 	}
+	.channel-badge[data-tone='ok'] { color: var(--color-accent-jade); }
+	.channel-badge[data-tone='warn'] { color: var(--color-accent-aurum); }
+	.channel-badge[data-tone='bad'] { color: var(--color-accent-coral); }
+	.channel-badge[data-tone='muted'] { color: var(--color-text-tertiary); }
 	.connect-panel {
 		padding: 0.85rem; border-radius: 0.6rem;
 		border: 1px solid var(--color-border, rgba(128,128,128,0.3));

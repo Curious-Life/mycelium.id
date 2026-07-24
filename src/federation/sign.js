@@ -1,7 +1,7 @@
 // src/federation/sign.js — canonicalization + detached-signature verification for
 // the inter-instance federation protocol (Tier-0).
 //
-// The wire contract (proven in spike/federation-tier0/): a sender canonicalizes
+// The wire contract (proven in the federation spike): a sender canonicalizes
 // the request envelope, signs the canonical bytes with its box ed25519 identity
 // (src/identity/identity.js), and transmits EXACTLY those canonical bytes plus
 // `X-Myc-Did` + `X-Myc-Sig` headers. The receiver verifies the signature over the

@@ -12,6 +12,7 @@
 // are never logged (CLAUDE.md §1 — the image is user plaintext).
 
 import { localInfer, DEFAULT_OLLAMA_URL } from "../inference/local.js";
+import { admit, withTicket, CLASS } from "../core/compute-governor.js";
 import { pickModelWithCapability } from "./model-caps.js";
 import { CAPTION_MAX_CHARS } from "./text-limits.js";
 
@@ -104,23 +105,40 @@ export async function describeImage({
   const chosen = model || (await pickVisionModel({ baseUrl, fetch }));
   if (!chosen) return null; // no vision model → graceful fallback
 
+  // COMPUTE GOVERNOR (D-001, L16 / P7 — the operator's ACTUAL import run): a vision model is a
+  // THIRD resident model, loaded INLINE per image during import while embed + categorize also run.
+  // That concurrency is a documented crash path (design §2 P7, "the most dangerous" §1). Vision is a
+  // RESIDENT lane. If the model slot is busy, REJECT this caption (design §3.3): return null so the
+  // caller embeds the FILENAME instead — the graceful fallback this function already documents —
+  // rather than loading a second/third model and crashing the box. The image is not lost: it is
+  // still embedded (by filename) and can be re-captioned once the slot is free. NEVER block/hang.
+  const adm = admit({ lane: 'vision-caption', klass: CLASS.RESIDENT, timeoutMs: Math.max(timeoutMs * 2, 60000) });
+  if (!adm.ok) return null; // model slot busy → filename fallback (P7/§3.3 REJECT), never a 3rd concurrent model
+
+  // withTicket records the held ticket in AsyncLocalStorage so the §3.4 hold-and-wait guard is
+  // ACTIVE for this lane (defense in depth) — a nested admit of another class inside the caption
+  // would throw rather than deadlock. This is also the reference wiring of withTicket.
   try {
-    const text = await localInfer({
-      prompt: CAPTION_PROMPT,
-      images: [b64],
-      model: chosen,
-      baseUrl,
-      fetch,
-      timeoutMs,
-      maxTokens: 220,
-      // Thinking models (gemma4-class) spend the whole token budget on hidden
-      // reasoning on /api/generate → empty response. We want the caption.
-      think: false,
+    return await withTicket(adm, async () => {
+      const text = await localInfer({
+        prompt: CAPTION_PROMPT,
+        images: [b64],
+        model: chosen,
+        baseUrl,
+        fetch,
+        timeoutMs,
+        maxTokens: 220,
+        // Thinking models (gemma4-class) spend the whole token budget on hidden
+        // reasoning on /api/generate → empty response. We want the caption.
+        think: false,
+      });
+      const caption = String(text || "").trim().replace(/\s+/g, " ");
+      return caption.length ? caption.slice(0, CAPTION_MAX_CHARS) : null; // was a silent 600-char cut
     });
-    const caption = String(text || "").trim().replace(/\s+/g, " ");
-    return caption.length ? caption.slice(0, CAPTION_MAX_CHARS) : null; // was a silent 600-char cut
   } catch {
     return null; // timeout / model error → fall back, never block the upload
+  } finally {
+    adm.release(); // crash-release #1 (finally) — always free the model slot
   }
 }
 

@@ -1,6 +1,6 @@
 // Express HTTP transport + OAuth 2.1 for the Mycelium MCP server.
 //
-// Layout (verified against spike/oauth, RESULT.md = GO; better-auth@1.6.12):
+// Layout (verified against the OAuth spike, verdict GO; better-auth@1.6.12):
 //   GET  /.well-known/oauth-authorization-server   (root)
 //   GET  /.well-known/oauth-protected-resource     (root)
 //   ALL  /api/auth/*splat   → toNodeHandler(auth)   (Express 5 NAMED splat)

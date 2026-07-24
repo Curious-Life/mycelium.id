@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Mycelium webview permissions. The window loads the local Node server (http://127.0.0.1:8787) as a REMOTE origin, so window IPC (notably start-dragging, used to make the header a window-drag strip) must be granted to that origin explicitly — without this, Tauri v2 denies the IPC by default and the drag does nothing.",
+  "description": "Mycelium webview permissions. The window loads the local Node server (http://127.0.0.1:8787) as a REMOTE origin, so window IPC (notably start-dragging, used to make the header a window-drag strip) must be granted to that origin explicitly — without this, Tauri v2 denies the IPC by default and the drag does nothing. The two opener grants (D-010) let the browser sign-in URL open in the OS default browser: allow-open-url grants the open_url command, allow-default-urls supplies its scope for http/https/mailto/tel only (no file-path opening, no reveal-in-dir).",
   "windows": ["main"],
   "remote": {
     "urls": ["http://127.0.0.1:8787/*", "http://localhost:8787/*"]
@@ -10,6 +10,8 @@
     "core:default",
     "core:window:allow-start-dragging",
     "core:window:allow-set-theme",
-    "core:window:allow-set-background-color"
+    "core:window:allow-set-background-color",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }

@@ -18,12 +18,61 @@
 
 	const SCENE_SCALE = 8;
 	const isLight = $derived($theme === 'light');
-	const POINT_SIZE_DARK = 0.28;
+
+	/*
+	 * D-026 — "the mindscape points need to be bigger, can we increase their size by 3x?"
+	 * (operator, v0.1.12 QA).
+	 *
+	 * Read `docs/MINDSCAPE-POINT-SIZING-DESIGN-2026-07-20.md` before touching these.
+	 * That doc designs a COUNT-ADAPTIVE factor (§2: base × f(N), log-lerp, clamped) and
+	 * is explicitly HELD — "do not build until the operator reviews this doc". It was
+	 * never built: the uniform below is still a bare constant, so nothing here conflicts
+	 * with it.
+	 *
+	 * Is "3×" coherent against that design? YES, and it is the only knob that exists
+	 * today — the design's own §2 formula is `effective = base × factor`, so raising
+	 * `base` is precisely the term the operator can move without pre-empting the held
+	 * curve. It is applied MULTIPLICATIVELY to BOTH theme bases (§2: "multiplicative, so
+	 * it rides the light/dark split for free"), which preserves the deliberate
+	 * 0.6-vs-0.28 ratio §4 documents rather than inventing two separate curves.
+	 *
+	 * TWO THINGS THE DESIGN OBLIGES US TO SAY OUT LOUD:
+	 *   1. §4 warns light mode blobs FIRST (`depthWrite:true` ⇒ opaque beads occlude,
+	 *      where dark just blends). 0.6 × 3 = 1.8 is past the §2 proposal's own ceiling
+	 *      (FACTOR_MAX 2.6, and that ceiling was for SPARSE maps only). The §7 visual
+	 *      matrix — 1/5/50/500/5000 points × light/dark — is therefore still OWED on this
+	 *      change and cannot be run headlessly (it is a WebGL render, §8.4). Flagged, not
+	 *      claimed as verified.
+	 *   2. If the held count-adaptive factor is ever built, FACTOR_MAX must be re-derived
+	 *      against THIS base — 2.6 × 3 would be ~8× today's mark, far past "one point
+	 *      must not fill the screen".
+	 *
+	 * Out of scope, per design §6: per-territory halos (uSize) and CONTACT_SIZE are
+	 * separate knobs and are deliberately NOT multiplied.
+	 */
+	const POINT_SIZE_MULTIPLIER = 3;
+	const POINT_SIZE_DARK_BASE = 0.28;
 	// Light mode needs noticeably bigger dots: they're solid (not glowing), so each
 	// must read as a distinct mark against the light background.
-	const POINT_SIZE_LIGHT = 0.6;
+	const POINT_SIZE_LIGHT_BASE = 0.6;
+	const POINT_SIZE_DARK = POINT_SIZE_DARK_BASE * POINT_SIZE_MULTIPLIER;
+	const POINT_SIZE_LIGHT = POINT_SIZE_LIGHT_BASE * POINT_SIZE_MULTIPLIER;
 	const POINT_SIZE = $derived(isLight ? POINT_SIZE_LIGHT : POINT_SIZE_DARK);
 	const CONTACT_SIZE = 0.9;
+
+	/*
+	 * Picking radii, in WORLD units. Design §5 ("Picking / hit-testing"): a 3× larger
+	 * mark wants a proportionally larger pick radius, or the visible dot and the
+	 * clickable dot stop agreeing — the mark grows but the hover target does not.
+	 *
+	 * These are kept SEPARATE (rather than raising the one shared
+	 * `raycaster.params.Points.threshold`) because contacts and points share the same
+	 * raycaster and contacts are tested FIRST. Widening the shared threshold would let
+	 * the unchanged-size contact cloud steal hover/click hits from nearby points.
+	 * Each intersect sets the threshold it needs immediately before running.
+	 */
+	const PICK_THRESHOLD_CONTACTS = 0.3;                             // unchanged — CONTACT_SIZE is unchanged
+	const PICK_THRESHOLD_POINTS = 0.3 * POINT_SIZE_MULTIPLIER;       // tracks the mark
 	const CONTACT_COLOR = '#E5B84C'; // Aurum/Gold — brand color
 
 	let container: HTMLDivElement;
@@ -1423,7 +1472,9 @@
 		}
 
 		raycaster = new THREE.Raycaster();
-		raycaster.params.Points = { threshold: 0.3 };
+		// Initialised to the POINTS radius; each intersect below re-sets the threshold it
+		// needs (contacts keep PICK_THRESHOLD_CONTACTS) — see the D-026 note at the top.
+		raycaster.params.Points = { threshold: PICK_THRESHOLD_POINTS };
 
 		const ambient = new THREE.AmbientLight(0xffffff, 0.6);
 		const directional = new THREE.DirectionalLight(0xffffff, 0.4);
@@ -2053,6 +2104,7 @@
 
 		// Check contacts first (they're on top visually)
 		if (contactCloud && contactCloud.visible && renderedContacts.length > 0) {
+			raycaster.params.Points.threshold = PICK_THRESHOLD_CONTACTS;
 			const hits = raycaster.intersectObject(contactCloud);
 			if (hits.length > 0 && hits[0].index != null && hits[0].index < renderedContacts.length) {
 				const c = renderedContacts[hits[0].index];
@@ -2072,6 +2124,7 @@
 
 		// Then check clustering points
 		if (pointCloud && pointCloud.visible) {
+			raycaster.params.Points.threshold = PICK_THRESHOLD_POINTS;
 			const intersects = raycaster.intersectObject(pointCloud);
 			if (intersects.length > 0 && intersects[0].index != null) {
 				const idx = intersects[0].index;
@@ -2117,6 +2170,7 @@
 
 		// Check contact clicks first
 		if (contactCloud && contactCloud.visible && renderedContacts.length > 0) {
+			raycaster.params.Points.threshold = PICK_THRESHOLD_CONTACTS;
 			const contactHits = raycaster.intersectObject(contactCloud);
 			if (contactHits.length > 0 && contactHits[0].index != null && contactHits[0].index < renderedContacts.length) {
 				const contact = renderedContacts[contactHits[0].index];
@@ -2132,6 +2186,7 @@
 		// If you click something in a different region, it first navigates to that
 		// region's parent level, like walking through the territory step by step.
 		if (!pointCloud) return;
+		raycaster.params.Points.threshold = PICK_THRESHOLD_POINTS;
 		const intersects = raycaster.intersectObject(pointCloud);
 		if (intersects.length > 0) {
 			const idx = intersects[0].index;

@@ -95,7 +95,7 @@ export async function boot({
   // multi-tenant VPS repo and its shared-host threat model doesn't apply. Every
   // child spawn uses an env allowlist, so the key never leaks to the embed/
   // transcribe/channel services. A shared/multi-tenant host would harden with a
-  // 0600 tmpfs file (env never set): docs/SECURITY-FOLLOWUP-KEY-IN-ENV-2026-06-11.md.
+  // 0600 tmpfs file (env never set).
   process.env.ENCRYPTION_MASTER_KEY = userHex;
 
   // Box identity (Tier-0 federation): one ed25519 identity from the master key,

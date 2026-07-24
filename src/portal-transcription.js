@@ -14,6 +14,7 @@
 // explicit model download from HuggingFace (same class as an Ollama pull).
 
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { ensureTranscribeSupervisor, getTranscriberHealth, transcribeServiceUrl } from './transcribe/supervisor.js';
 import { normalizeHealth } from './system/service-state.js';
 
@@ -50,7 +51,7 @@ export function portalTranscriptionRouter({ db, userId, authenticatePortalReques
   if (!db) throw new Error('portalTranscriptionRouter: db required');
   if (typeof authenticatePortalRequest !== 'function') throw new Error('portalTranscriptionRouter: authenticatePortalRequest required');
   const router = express.Router();
-  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
+  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; } if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
   async function chosenModel() {
     try { return (await db.users.getSettings(userId))?.transcribeModel || null; } catch { return null; }

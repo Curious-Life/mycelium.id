@@ -7,6 +7,7 @@
 // construction (stage labels are constants, never names/text — §1).
 
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
 import { isEmbedPaused, isCategorizePaused, getEnrichDrainerStatus, defaultLabelModel, defaultEnrichModel } from './enrich/drainer.js';
 
@@ -316,6 +317,11 @@ export async function categorizeProjection(db, userId) {
     // (the §3.9 plausible-wrong-number class the PR fixes for the pipeline slice — applied here too,
     // so the two surfaces stop contradicting each other). Absent flag ⇒ false (fail-soft to pre-QA6).
     const waitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
+    // D-001: deferred because the compute governor is holding the model slot for another resident
+    // lane (a describe child, clustering, chat). SAME contract as waitingOnEmbed — a choice-free
+    // scheduling `waiting`, ETA withdrawn — just a different immediate cause in the label.
+    const waitingOnCompute = Boolean(st?.categorizeWaitingOnCompute);
+    const waiting = waitingOnEmbed || waitingOnCompute;
     // null ⇒ the owner has not approved an on-box labeling model (§3.10c). NOTHING is
     // running: no model, no daemon woken, and the model may not even be on disk. Saying
     // "running" here would be the same lie the embed row told for a month.
@@ -333,24 +339,26 @@ export async function categorizeProjection(db, userId) {
       stage: noModel ? `${KIND_LABELS.categorize} · no local model`
         : paused ? `${KIND_LABELS.categorize} · paused`
           : waitingOnEmbed ? `${KIND_LABELS.categorize} · waiting for embedding`
-            : KIND_LABELS.categorize,
+            : waitingOnCompute ? `${KIND_LABELS.categorize} · waiting for compute`
+              : KIND_LABELS.categorize,
       model: model || null,                              // the APPROVED on-box labeling model, or none
-      // nothing is on-device if nothing runs: no model, OR the loop is deferred behind embedding.
-      process: (noModel || waitingOnEmbed) ? null : PROCESS_LABELS.categorize,
+      // nothing is on-device if nothing runs: no model, OR the loop is deferred (behind embedding
+      // OR behind the compute governor's model slot).
+      process: (noModel || waiting) ? null : PROCESS_LABELS.categorize,
       done: tagged,
       total,
       remaining: pending,
       // R2-review (§3.9): a REAL L1 estimate from the drainer's measured throughput (41/min ⇒ ~31h
       // for a 76k import). Was hardcoded `null` with "per-second rate not measured in V1" — true
       // when written, but the June sweep had mislabeled L1's rate as embedding's, which is why this
-      // never-measured stage sat unpriced for a year. WITHDRAWN (paused || waitingOnEmbed): a
-      // countdown to a moment the loop is not working toward is the frozen-ETA lie above.
+      // never-measured stage sat unpriced for a year. WITHDRAWN (paused || waiting): a countdown to
+      // a moment the loop is not working toward is the frozen-ETA lie above.
       // categorizeEta also nulls on no model / nothing tagged yet / no work / a stalled model.
-      etaSeconds: categorizeEta(st, pending, paused || waitingOnEmbed, noModel),
+      etaSeconds: categorizeEta(st, pending, paused || waiting, noModel),
       // `paused` covers waiting-on-a-decision (stopped OR no model); `waiting` is the deferral —
-      // NOT the owner's pause (they chose nothing) and NOT 'stalled' (nothing is broken; embedding
-      // is progressing). Never 'running' while the loop is idle.
-      status: (paused || noModel) ? 'paused' : waitingOnEmbed ? 'waiting' : 'running',
+      // NOT the owner's pause (they chose nothing) and NOT 'stalled' (nothing is broken). Never
+      // 'running' while the loop is idle.
+      status: (paused || noModel) ? 'paused' : waiting ? 'waiting' : 'running',
       startedAt: null,
       finishedAt: null,
     };
@@ -381,6 +389,8 @@ export async function enrichProjection(db, userId) {
     // `waiting_embed` arm; same fail-soft to false. (The flag is named for categorize but governs
     // both stages — see drainer.js line ~1384.)
     const waitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
+    const waitingOnCompute = Boolean(st?.categorizeWaitingOnCompute); // D-001: governor holds the model slot
+    const waiting = waitingOnEmbed || waitingOnCompute;
     // null ⇒ the owner has not approved an on-box enrich model (taskModels.enrich). NOTHING runs —
     // it is a legitimate steady state (§3.5), a CHOICE, not a fault (same rule as categorize).
     const model = await defaultEnrichModel(db, userId);
@@ -391,20 +401,22 @@ export async function enrichProjection(db, userId) {
       stage: noModel ? `${KIND_LABELS.enrich} · no local model`
         : paused ? `${KIND_LABELS.enrich} · paused`
           : waitingOnEmbed ? `${KIND_LABELS.enrich} · waiting for embedding`
-            : KIND_LABELS.enrich,
+            : waitingOnCompute ? `${KIND_LABELS.enrich} · waiting for compute`
+              : KIND_LABELS.enrich,
       model: model || null,                              // the APPROVED on-box enrich model, or none
-      // nothing is on-device if nothing runs: no model, OR the loop is deferred behind embedding.
-      process: (noModel || waitingOnEmbed) ? null : PROCESS_LABELS.enrich,
+      // nothing is on-device if nothing runs: no model, OR the loop is deferred (behind embedding
+      // OR behind the compute governor's model slot).
+      process: (noModel || waiting) ? null : PROCESS_LABELS.enrich,
       done,
       total,
       remaining: pending,
       // A real L2 estimate from the drainer's measured throughput (8/min ⇒ ~153h for a 76k import).
-      // WITHDRAWN (paused || waitingOnEmbed); also null on no model / nothing enriched yet / no work
+      // WITHDRAWN (paused || waiting); also null on no model / nothing enriched yet / no work
       // / a stalled model.
-      etaSeconds: enrichEta(st, pending, paused || waitingOnEmbed, noModel),
-      // `paused` = stopped OR no model approved; `waiting` = deferred behind embedding (a choice-
-      // free scheduling state); never 'running' while the loop is idle. Same shape as categorize.
-      status: (paused || noModel) ? 'paused' : waitingOnEmbed ? 'waiting' : 'running',
+      etaSeconds: enrichEta(st, pending, paused || waiting, noModel),
+      // `paused` = stopped OR no model approved; `waiting` = deferred (behind embedding or the
+      // compute governor); never 'running' while the loop is idle. Same shape as categorize.
+      status: (paused || noModel) ? 'paused' : waiting ? 'waiting' : 'running',
       startedAt: null,
       finishedAt: null,
     };
@@ -467,7 +479,7 @@ export function portalActivityRouter({ db, userId, authenticatePortalRequest }) 
   if (!db) throw new Error('portalActivityRouter: db required');
   if (typeof authenticatePortalRequest !== 'function') throw new Error('portalActivityRouter: authenticatePortalRequest required');
   const router = express.Router();
-  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
+  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; } if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
   // GET /activity — the rich feed: active jobs (with ETA) + recent history.
   router.get('/activity', async (req, res) => {

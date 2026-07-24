@@ -61,6 +61,27 @@ export interface GenState {
   // from the genuinely-terminal errors ("import first", embedder deps missing) that Retry
   // cannot help. Surfaces render a Retry affordance iff this is true.
   retryable: boolean;
+  // ── D-004: embedded-vs-mapped as a FIRST-CLASS state, not a note in a skip response ──
+  // The operator saw "2510 points" of their own data against a 369-point map and had no
+  // explanation available anywhere in the product. `map` is the served fact from
+  // GET /portal/mycelium/map-status (mirrored onto the `skipped` response so a load that
+  // already POSTed generate doesn't need a second round trip). null = not read yet;
+  // `unknown` = the server could not COUNT, which is NOT "your map is empty" — surfaces
+  // must render it as "couldn't check", never as a zero.
+  map: MapStatus | null;
+}
+
+/** GET /portal/mycelium/map-status — see src/mindscape-freshness.js for the predicate. */
+export interface MapStatus {
+  unknown?: boolean;
+  embedded: number;
+  mapped: number;
+  drift: number;
+  driftPct: number;
+  stale: boolean;
+  built: boolean;
+  basis: 'baseline' | 'mapped';
+  builtAt?: number | null;
 }
 
 const SS_KEY = 'mycelium_gen_job';
@@ -123,7 +144,7 @@ const RUN_CEILING_MS = SERVER_MAX_MS + 5 * 60 * 1000; // 50 min — server's 45-
 const initial: GenState = {
   phase: 'idle', jobId: null, step: 0, totalSteps: 5, stageLabel: '',
   embedded: 0, total: 0, startedAt: null, elapsedMs: 0, etaSeconds: null, message: '', error: '',
-  embedder: null, stalled: false, retryable: false,
+  embedder: null, stalled: false, retryable: false, map: null,
 };
 
 export const generate = writable<GenState>({ ...initial });
@@ -216,6 +237,9 @@ async function pollStatus() {
   if (j.status === 'done') {
     stop(); ss((x) => x.removeItem(SS_KEY));
     patch({ phase: 'done', step: j.totalSteps ?? s.totalSteps, totalSteps: j.totalSteps ?? s.totalSteps, stageLabel: 'Complete', startedAt, elapsedMs: (j.finishedAt ?? Date.now()) - startedAt, etaSeconds: 0 });
+    // The run just moved the numbers — re-read the served fact so the honesty line shows the
+    // CAUGHT-UP counts rather than the pre-run gap that motivated the rebuild.
+    void loadMapStatus();
     return;
   }
   if (j.status === 'canceled') { reset(); return; } // user stopped it → back to idle, no error
@@ -335,15 +359,37 @@ async function pollEmbedding() {
   }
 }
 
-/** Trigger a run (button click). Idempotent-ish: server single-flights concurrent starts. */
-export async function start() {
+/**
+ * Read the served embedded-vs-mapped fact. Cheap (cached readiness slice + one indexed
+ * COUNT) — safe to call on mount and after a run finishes. Never throws; on failure the
+ * store keeps its last `map` rather than fabricating zeros.
+ */
+export async function loadMapStatus(): Promise<MapStatus | null> {
+  try {
+    const res = await api('/portal/mycelium/map-status');
+    if (!res.ok) return null;
+    const m = (await res.json()) as MapStatus;
+    patch({ map: m });
+    return m;
+  } catch { return null; }
+}
+
+/**
+ * Trigger a run (button click). Idempotent-ish: server single-flights concurrent starts.
+ *
+ * `force` is the USER-VISIBLE rebuild (D-004 symptom 2: "it shows me a text saying map
+ * already built; pass ?force=1 to rebuild. this i cant do from the UI as a user"). It maps
+ * onto the exact query parameter the server already honoured — the capability existed, it
+ * simply had no control attached to it. See rebuild() below for the entry surfaces use.
+ */
+export async function start(opts: { force?: boolean } = {}) {
   unknownSince = 0; // a fresh attempt restarts every stall clock
   zeroSince = 0;
   startingSince = Date.now(); // arm the hung-POST watchdog (checkStarting)
   patch({ phase: 'starting', error: '', message: '', retryable: false });
   run(); // arm the poll NOW so tick()→checkStarting bounds a POST that never answers
   let res: Response;
-  try { res = await api('/portal/mycelium/generate', { method: 'POST' }); }
+  try { res = await api(`/portal/mycelium/generate${opts.force ? '?force=1' : ''}`, { method: 'POST' }); }
   catch { stop(); patch({ phase: 'error', error: 'Could not reach the server.' }); return; }
   // The watchdog (or a reset/cancel) may have moved us off 'starting' while the POST was in flight
   // — e.g. the server answered only AFTER START_TIMEOUT_MS. Honor that terminal; never un-cap it.
@@ -354,8 +400,11 @@ export async function start() {
     // The map is already built — nothing to do. NOT an error (it used to be, and being an
     // unrendered error made it silence). Callers that show progress must render this.
     if (data.status === 'skipped') {
+      // Only ever reached when the server judged the map FRESH (src/mindscape-freshness.js).
+      // A STALE map no longer skips — it starts a run and lands on the `jobId` branch below,
+      // which is what makes the map catch up without anyone typing a query parameter.
       stop();
-      patch({ phase: 'up-to-date', message: data.note || 'Your map is already built.', error: '' });
+      patch({ phase: 'up-to-date', message: data.note || 'Your map is up to date.', error: '', map: data.map ?? get(generate).map });
       return;
     }
     if (!data.jobId) { stop(); patch({ phase: 'error', error: 'Server did not return a job id.' }); return; }
@@ -394,7 +443,10 @@ export function reset() {
   zeroSince = 0;
   startingSince = 0;
   ss((x) => x.removeItem(SS_KEY));
-  generate.set({ ...initial });
+  // `map` SURVIVES a reset: it is a served fact about the vault, not run state. Clearing it
+  // would blank the embedded-vs-mapped line every time a run is dismissed or canceled — the
+  // "buried in a skip response" failure mode again, one layer up.
+  generate.set({ ...initial, map: get(generate).map });
 }
 
 /**
@@ -408,6 +460,22 @@ export async function retry() {
   embedStallSince = 0;
   zeroSince = 0;
   await start();
+}
+
+/**
+ * THE REBUILD CONTROL (D-004 symptom 2). A deliberate, user-initiated full re-cluster —
+ * the thing `?force=1` did and no button did. Distinct from retry()/start(): those ask the
+ * server to do whatever is needed and accept a skip; this one says "rebuild anyway", which
+ * is the only honest answer when the user is looking at a map they can see is behind.
+ *
+ * It goes through the SAME start() lifecycle, so progress, ETA, stall detection, cancel and
+ * the error taxonomy all apply — a rebuild is never a fire-and-forget with no feedback.
+ */
+export async function rebuild() {
+  unknownSince = 0;
+  embedStallSince = 0;
+  zeroSince = 0;
+  await start({ force: true });
 }
 
 /**

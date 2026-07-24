@@ -198,7 +198,11 @@ const STUB = '<script>let { ...rest } = $props();</script><div class="stub-child
 // the gen-status block. It is NOT this gate's subject (generate rendering is), lives below the
 // block under test, and reads its own store; an inert stub is faithful, but its specifier must be
 // rewired or the compiled import throws before mount.
-for (const name of ['ActivityBars', 'ImportField', 'ScanForData', 'SourceCatalog', 'IntelligenceScreen', 'AISettings', 'TelegramConnect', 'PipelineStatus']) {
+// MapFreshness (D-004) — the embedded-vs-mapped line + rebuild control MindscapeDetail mounts on
+// the realm list. NOT this gate's subject (generate PHASE rendering is) and it owns its own served
+// fact; an inert stub is faithful, but its specifier must be rewired or the compiled import throws
+// before mount. Its own coverage: verify:portal-mindscape Part S.
+for (const name of ['ActivityBars', 'MapFreshness', 'ImportField', 'ScanForData', 'SourceCatalog', 'IntelligenceScreen', 'AISettings', 'TelegramConnect', 'PipelineStatus']) {
   const out = compile(STUB, { generate: 'client', name, css: 'injected' });
   writeFileSync(`${GEN}/${name}.gen.js`, out.js.code);
 }
@@ -244,7 +248,8 @@ const rewired = out.js.code
   .replace(/from\s+['"]\$lib\/components\/settings\/IntelligenceScreen\.svelte['"]/g, `from './IntelligenceScreen.gen.js'`)
   .replace(/from\s+['"]\$lib\/components\/settings\/AISettings\.svelte['"]/g, `from './AISettings.gen.js'`)
   .replace(/from\s+['"]\$lib\/components\/channels\/TelegramConnect\.svelte['"]/g, `from './TelegramConnect.gen.js'`)
-  .replace(/from\s+['"]\$lib\/components\/mindscape\/PipelineStatus\.svelte['"]/g, `from './PipelineStatus.gen.js'`);
+  .replace(/from\s+['"]\$lib\/components\/mindscape\/PipelineStatus\.svelte['"]/g, `from './PipelineStatus.gen.js'`)
+  .replace(/from\s+['"]\.\/MapFreshness\.svelte['"]/g, `from './MapFreshness.gen.js'`);
 writeFileSync(`${GEN}/Subject.gen.js`, rewired);
 
 // A specifier we FAILED to rewire would throw at import and read as a broken gate, not a broken

@@ -559,6 +559,27 @@
 
 
 
+	// U7: mint the unified device-session cookie, then enter the app. After a fresh
+	// web login/enrol the browser holds a better-auth session cookie — but that cookie
+	// alone CANNOT reach the sensitive routers (they gate on makePortalOwnerGate, which
+	// does not accept the better-auth cookie), which is the D-032 "web login doesn't
+	// reach the vault" breakage. POST /auth/device-session/web (owner session + CSRF
+	// double-submit) mints a narrower web-kind device token + a session bound to it,
+	// and its 303 sets the HttpOnly mycelium_device_session cookie the routers DO
+	// accept. Best-effort: navigation proceeds regardless (on failure the app is no
+	// worse off than before this change).
+	async function enterApp() {
+		try {
+			const csrf = document.cookie.match(/mycelium_csrf=([^;]+)/)?.[1];
+			await fetch('/auth/device-session/web', {
+				method: 'POST',
+				credentials: 'same-origin',
+				headers: csrf ? { 'X-CSRF-Token': csrf } : {},
+			});
+		} catch { /* best-effort — navigate anyway */ }
+		window.location.assign('/');
+	}
+
 	// Operator-password sign-in (V1 self-hosted, reached over the relay). The vault
 	// is single-user, so there is no email to ask for — we POST only the password to
 	// the server-side shim /api/auth/operator-login (same-origin to this webview,
@@ -623,7 +644,7 @@
 			// passkey sign-in just established a session — carry them to enrolment
 			// rather than into the app.
 			if (enrollIntent) { mode = 'enroll'; loading = false; return; }
-			window.location.assign('/');
+			await enterApp();
 		} catch (e) {
 			error = (e instanceof Error && e.name === 'NotAllowedError') ? 'Passkey sign-in cancelled' : (e instanceof Error ? e.message : 'Passkey sign-in failed');
 		} finally {
@@ -657,7 +678,7 @@
 				body: JSON.stringify({ response, name: 'This device' }),
 			});
 			if (!verRes.ok) throw new Error('Passkey setup failed');
-			window.location.assign('/');
+			await enterApp();
 		} catch (e) {
 			error = (e instanceof Error && e.name === 'NotAllowedError') ? 'Passkey setup cancelled' : (e instanceof Error ? e.message : 'Passkey setup failed');
 		} finally {
@@ -837,7 +858,7 @@
 							{/if}
 						</button>
 						<button
-							onclick={() => window.location.assign('/')}
+							onclick={() => enterApp()}
 							disabled={loading}
 							class="w-full btn py-2.5 text-sm text-[var(--color-text-secondary)] disabled:opacity-50"
 						>

@@ -34,6 +34,7 @@ import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { describeProvider } from '../src/agent/harness.js';
 import { createAgentLoop } from '../src/agent/loop.js';
+import { stripCommentsFor } from './lib/strip-comments.mjs';
 import { isLoopbackUrl } from '../src/inference/presets.js';
 import { DEFAULT_OLLAMA_URL } from '../src/inference/local.js';
 import { startNarrationWalkJob, resumeNarration, getNarrationStatus, _resetNarration } from '../src/jobs.js';
@@ -337,8 +338,12 @@ rec('D10. the unattributable FLOOR dials THIS DEVICE (what makes the resume-seed
 // was satisfied by its OWN comments and went GO with the bug fully restored.
 {
   const raw = fs.readFileSync(new URL('../portal-app/src/lib/components/mindscape/NarrateControl.svelte', import.meta.url), 'utf8');
-  // Strip // line comments and <!-- --> blocks so prose about the bug can't satisfy the gate.
-  const src = raw.replace(/<!--[\s\S]*?-->/g, '').replace(/^\s*\/\/.*$/gm, '');
+  // Strip comments so prose about the bug can't satisfy the gate — LEXICALLY, via the one
+  // stripper (scripts/lib/strip-comments.mjs). The regexes that were here only removed
+  // LINE-LEADING `//`, so a TRAILING comment (`someCall(); // run.provider is gone`) stayed
+  // in the text and could satisfy these matches outright; block comments were not handled
+  // at all. Gated by verify:strip-comments.
+  const src = stripCommentsFor('NarrateControl.svelte', raw);
   assert.ok(/on_this_device/.test(raw), 'gate mis-wired: the component does not mention on_this_device at all');
   const readsServerFact = /on_this_device/.test(src);
   // `run.provider` is GONE — the name is not in the component's code in any form.

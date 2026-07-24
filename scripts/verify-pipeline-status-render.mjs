@@ -31,8 +31,37 @@
 //   R-CTRL  the harness can SEE ABSENCE — a sentinel the component never contains is reported absent
 //       AND a real stage is present, so every "must NOT contain" above is non-vacuous.
 //
+//   ── D-025 (QA7 P4.1) — the card COLLAPSES when the pipeline is up to date ──────────────────
+//   C1  a SETTLED pipeline (done / up-to-date / skipped, no blocked, no running) renders its
+//       overall line and NO stage rows — collapsed, mirroring the header vault-pill's quiet
+//       healthy state (StatusPopover.svelte:291-348). The operator's report is that it stayed
+//       expanded: "when it is up to date, it should collapse the same way as it does in the
+//       activity monitor."
+//   C2  an UNSETTLED pipeline (blocked / running / error / unknown / idle) renders its stages
+//       AND offers NO toggle — the card cannot be collapsed over a problem. This is the
+//       safety asymmetry; without it "collapse when fine" degrades into "hide anything".
+//   C3  the collapse is REACHABLE, not a dead end: clicking the settled card's disclosure
+//       reveals the full stage list (EXPAND=1). A collapse the user cannot open would trade
+//       one QA defect for another.
+//   C4  the settled predicate is not merely `overall`: a `done` overall that still carries a
+//       BLOCKED stage stays EXPANDED. A pipeline cannot go quiet while a stage needs a hand.
+//
 // Each load-bearing render assertion is mutation-falsified in scripts/mutate-pipeline-status-render.sh
 // (mutate the component so a state renders nothing → this gate reds → restore from a cp snapshot).
+//
+// MUTATION-TESTED (D-025, 2026-07-23): PipelineStatus.svelte `const expanded = $derived(true)` — i.e.
+//   the card is always expanded, the EXACT pre-fix behaviour the operator reported → C1 REDs
+//   ("probe caughtup must render COLLAPSED when settled"). C2/C3/C4 stayed green, so C1 is the
+//   check that actually owns this behaviour.
+// MUTATION-TESTED (D-025, 2026-07-23): `settled` dropped its per-stage guard (the
+//   `.every(s => s.state !== 'blocked' && s.state !== 'running')` term replaced by `true`), so
+//   `overall` alone buys quiet → C4 REDs ("a `done` overall with a blocked stage must NOT be judged
+//   settled") and C2 REDs on the same run ("probe doneblocked must NOT be judged settled").
+// MUTATION-TESTED (D-025, 2026-07-23): the `.pipe-toggle` button rendered under `{#if true}` instead of
+//   `{#if settled}`, so a blocked card could be collapsed away → C2 REDs ("probe midflight must offer
+//   NO collapse toggle").
+// MUTATION-TESTED (D-025, 2026-07-23): the toggle's `onclick` replaced with a no-op, making the
+//   disclosure a dead control → C3 REDs ("clicking the disclosure must EXPAND the card").
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 
@@ -48,6 +77,7 @@ function run(probe, opts = {}) {
   if (opts.click) env.CLICK = opts.click;
   if (opts.ctrl) env.CTRL = opts.ctrl;   // click the co-located per-stage control (R2/R3), not the generic action
   if (opts.double) env.DOUBLE = '1';
+  if (opts.expand) env.EXPAND = '1';     // D-025: click the settled card's disclosure before reporting
   const line = execFileSync('node', ['--conditions', 'browser', 'test/mount-pipeline-status.mjs'],
     { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env })
     .trim().split('\n').pop();
@@ -58,9 +88,14 @@ function run(probe, opts = {}) {
 const byKey = (o) => Object.fromEntries(o.stages.map((s) => [s.key, s]));
 
 let midflight, caughtup, toofew, paused, embedderdown, idle, error, uptodate, waitingembed;
+// D-025: the settled probes are now COLLAPSED at rest, so the stage-level assertions (R4c, R7)
+// read the OPENED card. Keeping both reports is deliberate — the collapsed one proves the
+// collapse, the opened one proves the collapse hid nothing.
+let caughtupOpen, doneblocked;
 try {
   midflight = run('midflight');
   caughtup = run('caughtup');
+  caughtupOpen = run('caughtup', { expand: true });
   toofew = run('toofew');
   paused = run('paused');
   embedderdown = run('embedderdown');
@@ -68,12 +103,13 @@ try {
   error = run('error');
   uptodate = run('uptodate');
   waitingembed = run('waitingembed');
+  doneblocked = run('doneblocked');
 } catch (e) {
   console.log(`FAIL  R0. the component MOUNTS and every probe runs — ${String(e?.message || e).slice(0, 400)}`);
   console.log('\nVERDICT: NO-GO — a probe failed to run  EXIT=1');
   process.exit(1);
 }
-rec('R0. PipelineStatus mounts and all nine probes run', true);
+rec('R0. PipelineStatus mounts and all eleven probes run', true);
 
 t('R1. the six stages render TOP-TO-BOTTOM in the server order (never re-sorted)', () => {
   assert.deepEqual(midflight.order, ORDER, `expected the six keys in order. Got: ${JSON.stringify(midflight.order)}`);
@@ -172,8 +208,11 @@ t('R4c. ⭐ co-located per-stage controls (R2/R3/N9): a RUNNING stage shows a �
   for (const s of midflight.stages.filter((x) => x.key !== 'embed' && x.key !== 'categorize')) {
     assert.equal(s.controls.length, 0, `a derived stage (${s.key}) must carry NO per-stage controls`);
   }
-  // A caught-up (all-done) vault shows no controls — nothing to stop, nothing paused.
-  assert.equal(caughtup.ctrlCount, 0, 'a settled vault must show no Stop/Resume controls');
+  // A caught-up (all-done) vault shows no controls — nothing to stop, nothing paused. Read the
+  // OPENED card (D-025 collapses it at rest), so this stays a real assertion about the stage
+  // rows rather than a vacuous 0 from a card that renders no stages at all.
+  assert.ok(caughtupOpen.stageCount === 6, `the opened caught-up card must render its six stages (got ${caughtupOpen.stageCount})`);
+  assert.equal(caughtupOpen.ctrlCount, 0, 'a settled vault must show no Stop/Resume controls');
 });
 
 t('R4d. ⭐ QA6: a DEFERRED categorize (waiting_embed) renders its reason + Pause control, NO generic action, and NOT "waiting on you"', () => {
@@ -259,13 +298,63 @@ t('R6. ⭐ overall:"up-to-date"/"skipped" RENDERS — the "Illuminate does nothi
 });
 
 t('R7. ⭐ a caught-up vault: EVERY stage done (settled ✓), NO spinner anywhere (the restart trap)', () => {
-  for (const s of caughtup.stages) {
+  // Read the OPENED card — D-025 collapses a settled pipeline, and this assertion is about what
+  // the stage rows SAY, not about whether they are on screen (that is C1/C3).
+  assert.ok(caughtupOpen.stages.length === 6, `the opened caught-up card must expose six stages (got ${caughtupOpen.stages.length})`);
+  for (const s of caughtupOpen.stages) {
     assert.equal(s.state, 'done', `${s.key} must be done on a caught-up vault`);
     assert.ok(s.icon.includes('✓'), `${s.key} must show the settled ✓, not a spinner`);
     assert.ok(!s.hasSpinner, `${s.key} must NOT spin on a caught-up vault`);
   }
-  assert.equal(caughtup.spinnerCount, 0, 'a mature vault must show NO spinner anywhere (the caught-up trap)');
+  assert.equal(caughtupOpen.spinnerCount, 0, 'a mature vault must show NO spinner anywhere (the caught-up trap)');
+  // The overall line is the ONE thing a collapsed card still says — assert it on the COLLAPSED
+  // report, because that is the state the operator actually looks at.
   assert.ok(/up to date/i.test(caughtup.overallText), `and the overall says so. Got: "${caughtup.overallText}"`);
+});
+
+// ── D-025 (QA7 P4.1) — the card collapses when the pipeline is up to date ────────────────────
+t('C1. ⭐ D-025: a SETTLED pipeline renders its overall line and NO stage rows (collapsed, like the vault-pill)', () => {
+  for (const o of [caughtup, uptodate]) {
+    assert.equal(o.settled, true, `probe ${o.probe} must be judged settled (overall=${o.overallText})`);
+    assert.equal(o.expanded, false, `probe ${o.probe} must render COLLAPSED when settled — the operator's report is that it stayed expanded`);
+    assert.equal(o.stageCount, 0, `a settled pipeline must render NO stage rows (collapsed). Got ${o.stageCount} in probe ${o.probe}`);
+    // Collapsed is not silent: the ONE summary line survives, so the card still says where it is.
+    assert.ok(o.overallVisible && o.overallText.length > 0,
+      `a collapsed card must STILL render its overall line — collapse must not become silence. Got: "${o.overallText}"`);
+    assert.ok(o.toggleVisible, `a collapsed card must offer a visible disclosure so it can be opened (probe ${o.probe})`);
+  }
+});
+
+t('C2. ⭐ D-025: an UNSETTLED pipeline renders its stages and offers NO collapse toggle (a problem cannot be hidden)', () => {
+  // blocked (midflight/toofew/embedderdown/paused), running (waitingembed), error, idle — every
+  // non-settled shape stays open, and none of them exposes a way to shut it.
+  for (const o of [midflight, toofew, embedderdown, paused, waitingembed, error, idle, doneblocked]) {
+    assert.equal(o.settled, false, `probe ${o.probe} must NOT be judged settled`);
+    assert.equal(o.expanded, true, `probe ${o.probe} must render EXPANDED — an unsettled pipeline is never collapsed`);
+    assert.equal(o.stageCount, 6, `probe ${o.probe} must render all six stage rows. Got ${o.stageCount}`);
+    assert.equal(o.toggleVisible, false,
+      `probe ${o.probe} must offer NO collapse toggle — "collapse when fine" must not degrade into "hide anything"`);
+  }
+});
+
+t('C3. ⭐ D-025: the collapse is REACHABLE — clicking the settled card\'s disclosure reveals the full stage list', () => {
+  assert.equal(caughtupOpen.toggleExisted, true, 'the settled card must expose a disclosure button to click');
+  assert.equal(caughtupOpen.expanded, true, 'clicking the disclosure must EXPAND the card');
+  assert.equal(caughtupOpen.stageCount, 6,
+    `clicking the disclosure must reveal the stage list — a collapse the user cannot open is a new dead end. Got stageCount ${caughtupOpen.stageCount}`);
+  // …and the revealed content is the real stage machine, in order (not an empty shell).
+  assert.deepEqual(caughtupOpen.order, ORDER, `the revealed stages must be the six server stages in order. Got: ${JSON.stringify(caughtupOpen.order)}`);
+});
+
+t('C4. ⭐ D-025: `overall` alone never buys quiet — a done overall carrying a BLOCKED stage stays EXPANDED', () => {
+  // The predicate must read the STAGES, not just the summary. A pipeline that reports itself
+  // done while one stage still needs a hand is exactly the dishonest-quiet this gate forbids.
+  assert.equal(doneblocked.settled, false,
+    'a `done` overall with a blocked stage must NOT be judged settled — the collapse predicate must inspect the stages');
+  assert.equal(doneblocked.stageCount, 6, 'and its stage rows stay on screen');
+  const cat = byKey(doneblocked).categorize;
+  assert.equal(cat.state, 'blocked', 'the blocked stage is still rendered as blocked');
+  assert.ok(cat.actionLabel && cat.actionVisible, 'and its remedy is still reachable — the whole point of refusing to collapse');
 });
 
 t('R8. an empty vault: overall idle renders, NO spinner (idle is not a fabricated running)', () => {

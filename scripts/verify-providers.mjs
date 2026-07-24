@@ -11,6 +11,7 @@ import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { portalProvidersRouter } from '../src/portal-providers.js';
 import { jurisdictionForBaseUrl } from '../src/inference/presets.js';
+import { resolveInferenceConfigForTask, _setSubscriptionTokenReaderForTests } from '../src/inference/resolve.js';
 
 const DB = 'data/verify-providers.db', KCV = 'data/verify-providers-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -201,6 +202,90 @@ const FRESH = 'fresh-user-no-row-p14';
 await db.users.updateSettings(FRESH, { taskModels: { chat: { providerId: 7 } } });
 const back = await db.users.getSettings(FRESH);
 rec('P14. updateSettings UPSERTS on a fresh vault (no prior row → settings persist)', back?.taskModels?.chat?.providerId === 7, JSON.stringify(back));
+
+// ── P15 (D-029) — connecting a subscription AUTO-SELECTS it as the DEFAULT for chat +
+// narration, even when another provider is already active; and it does NOT override a
+// DELIBERATE per-task assignment. Drives the REAL /auth/claude/import → persistSubscription
+// path with an injected credential reader (no ~/.claude dependency), then resolves chat +
+// narrate through the REAL resolver (inference/resolve.js) — end-to-end, not shape.
+//
+// MUTATION-TESTED: reverting persistSubscription to `if (!hadActive) setActive` (portal-
+//   providers.js) → P15c/P15d/P15e/P15f RED (subscription stays inert behind the prior
+//   active provider; getActive + both resolvers keep returning the OpenAI row).
+// MUTATION-TESTED: dropping the `, id DESC` tiebreak from providers.getActive (db/providers.js)
+//   → P15d/P15e/P15f FLAKY→RED (same-second last_used_at tie can return the OpenAI row).
+// MUTATION-TESTED: making persistSubscription ALSO write settings.taskModels = {chat,narrate:
+//   {providerId:<sub>}} (the over-aggressive "fix" that clobbers an explicit choice) →
+//   P15g + P15h RED (the deliberate chat/narrate→OpenAI assignments no longer win).
+{
+  const U2 = 'd029-user';
+  try { await db.users.create(U2, 'D029'); } catch { /* row may exist */ }
+  // Deterministic subscription token: there is no live Keychain/claude CLI in CI, so pin the
+  // live-token reader to "no token" → withFreshSubscriptionToken keeps the STORED token.
+  _setSubscriptionTokenReaderForTests(async () => ({}));
+  const app2 = express(); app2.use(express.json());
+  app2.use('/api/v1/portal', portalProvidersRouter({
+    db, userId: U2, fetch: mockFetch,
+    importClaudeCli: async () => ({ claudeOAuthToken: 'sk-ant-oat-D029', refreshToken: null, expiresAt: null, scopes: ['user:inference'], account: null }),
+  }));
+  const s2 = await new Promise((r) => { const s = app2.listen(0, '127.0.0.1', () => r(s)); });
+  const base2 = `http://127.0.0.1:${s2.address().port}/api/v1/portal`;
+  const post2 = (p, b) => fetch(base2 + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b || {}) });
+
+  // A BYOK provider connected FIRST → auto-activates (becomes the prior default).
+  const first = await J(await post2('/providers', { provider: 'openai', label: 'Prior', api_key: 'GOODKEY-PRIOR', model_preference: 'gpt-4o-mini' }));
+  const priorId = first.body.id;
+  rec('P15a. a prior BYOK provider is active BEFORE the subscription connect', first.body.activated === true, `activated=${first.body.activated}`);
+
+  // Connect the subscription — hadActive is TRUE, yet it MUST become the default (the D-029 fix).
+  const imp = await J(await post2('/auth/claude/import', { acknowledgeToS: true }));
+  rec('P15b. subscription import succeeds (real /auth/claude/import → persistSubscription)', imp.status === 200 && imp.body.id > 0, JSON.stringify(imp.body));
+  rec('P15c. subscription AUTO-SELECTS as active despite a prior active provider (D-029 fix)', imp.body.activated === true, `activated=${imp.body.activated}`);
+  const active = await db.providers.getActive(U2);
+  rec('P15d. providers.getActive() now returns the SUBSCRIPTION row', !!active && String(active.auth_type).toLowerCase() === 'oauth', `active.auth_type=${active?.auth_type}`);
+
+  // End-to-end: chat + narration resolve to the subscription through the real resolver.
+  const chatCfg = await resolveInferenceConfigForTask(db, U2, 'chat');
+  const narrCfg = await resolveInferenceConfigForTask(db, U2, 'narrate');
+  rec('P15e. resolveInferenceConfigForTask(chat) → the subscription', chatCfg?.providerName === 'claude_subscription' && chatCfg?.claudeOAuthToken === 'sk-ant-oat-D029', `providerName=${chatCfg?.providerName}`);
+  rec('P15f. resolveInferenceConfigForTask(narrate) → the subscription', narrCfg?.providerName === 'claude_subscription', `providerName=${narrCfg?.providerName}`);
+
+  await new Promise((r) => s2.close(r));
+
+  // ── ANTI-CLOBBER (D-029 constraint) — a DELIBERATE per-task assignment made BEFORE the
+  // connect still wins afterwards. Separate user U3 so the explicit choice PREDATES the
+  // subscription import: that is what makes an over-reaching connect (one that writes
+  // taskModels) observable here — if persistSubscription re-pointed chat/narrate at the
+  // subscription, these two rows would flip. The resolver honours settings.taskModels[task]
+  // .providerId over the active provider (inference/resolve.js), so setActive alone can never
+  // reach them — this proves the fix stayed on the DEFAULT surface only.
+  const U3 = 'd029-user-explicit';
+  try { await db.users.create(U3, 'D029x'); } catch { /* row may exist */ }
+  const app3 = express(); app3.use(express.json());
+  app3.use('/api/v1/portal', portalProvidersRouter({
+    db, userId: U3, fetch: mockFetch,
+    importClaudeCli: async () => ({ claudeOAuthToken: 'sk-ant-oat-D029X', refreshToken: null, expiresAt: null, scopes: ['user:inference'], account: null }),
+  }));
+  const s3 = await new Promise((r) => { const s = app3.listen(0, '127.0.0.1', () => r(s)); });
+  const base3 = `http://127.0.0.1:${s3.address().port}/api/v1/portal`;
+  const post3 = (p, b) => fetch(base3 + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b || {}) });
+
+  const prior3 = await J(await post3('/providers', { provider: 'openai', label: 'Prior3', api_key: 'GOODKEY-PRIOR3', model_preference: 'gpt-4o-mini' }));
+  const priorId3 = prior3.body.id;
+  // The user DELIBERATELY routes BOTH chat and narrate to their OpenAI row (Settings →
+  // Intelligence) — BEFORE any subscription exists.
+  const s0 = await db.users.getSettings(U3);
+  await db.users.updateSettings(U3, { ...s0, taskModels: { ...(s0?.taskModels || {}), chat: { providerId: priorId3 }, narrate: { providerId: priorId3 } } });
+  // NOW connect the subscription.
+  const imp3 = await J(await post3('/auth/claude/import', { acknowledgeToS: true }));
+  const chatX = await resolveInferenceConfigForTask(db, U3, 'chat');
+  const narrX = await resolveInferenceConfigForTask(db, U3, 'narrate');
+  rec('P15g. connect does NOT override an EXPLICIT chat choice made beforehand', imp3.body.activated === true && chatX?.providerName === 'openai' && chatX?.claudeOAuthToken == null, `providerName=${chatX?.providerName}`);
+  rec('P15h. connect does NOT override an EXPLICIT narrate choice made beforehand', narrX?.providerName === 'openai' && narrX?.claudeOAuthToken == null, `providerName=${narrX?.providerName}`);
+
+  await new Promise((r) => s3.close(r));
+  _setSubscriptionTokenReaderForTests(null); // restore the default live-token reader
+}
 
 server.close(); close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

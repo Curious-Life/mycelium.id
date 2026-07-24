@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { mindscapeState } from '$lib/stores/mindscape';
 	import { navigationState } from '$lib/stores/navigation';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
@@ -264,33 +264,55 @@
 	});
 
 	// React to the shared store reporting completion: reload the map, then clear.
+	//
+	// ⚠️ THIS EFFECT RE-ENTERED ITSELF ~18,000 TIMES A SECOND, AND THAT IS D-028's SECOND HALF —
+	// the operator's "it laggs and restarts reload multiple times… the jittery restarting loading
+	// icon looks very broken", reported THREE TIMES. Measured, not reasoned:
+	// `portal-app/test/mount-mindscape-loading.mjs` drives the real post-generate sequence and
+	// counted 20,001 mindscapeState.load() calls in 1,106 ms, creating and destroying 19,999
+	// separate `.loading-3d` elements. Every one of those is a spinner torn down and rebuilt —
+	// a CSS animation restarting from t=0 — while the main thread and the network are pinned.
+	//
+	// THE MECHANISM. A Svelte 5 `$effect` tracks every reactive read that happens during its
+	// synchronous run — INCLUDING reads inside the functions it calls. `loadTerritories()` opens
+	// with `if (territoriesLoaded) return;`, so this effect silently took a dependency on
+	// `territoriesLoaded` — which the effect itself writes (`= false`) and which loadTerritories
+	// writes again (`= true`). Writing a signal the effect depends on re-invalidates the effect ⇒
+	// re-run ⇒ `mindscapeState.load()` ⇒ `loading` true→false ⇒ the loading node is destroyed and
+	// rebuilt ⇒ round and round. Bounded ONLY by resetGen()'s 4s timer, which the loop itself
+	// starves. Proven by experiment: deleting the `loadTerritories()` call took the count from
+	// 20,001 to 3.
+	//
+	// TWO INDEPENDENT DEFENCES, because one of them is a rule about a framework's tracking
+	// behaviour and rules like that get re-broken by the next edit (CLAUDE.md §2):
+	//   1. `doneHandled` — a PLAIN `let`, deliberately NOT `$state` (a reactive latch would itself
+	//      be a dependency). The body runs once per false→true edge of `phase === 'done'` no matter
+	//      what anything reads. Re-armed when the phase leaves 'done', so a SECOND generate run
+	//      still gets its reload — the latch bounds re-entry, it does not consume the event.
+	//   2. `untrack()` — the body's reads (and its callees') no longer become dependencies, so the
+	//      effect depends on exactly one thing: the generate phase. That is what it always meant.
+	let doneHandled = false;
 	$effect(() => {
-		if ($generate.phase === 'done') {
+		const isDone = $generate.phase === 'done';
+		if (!isDone) { doneHandled = false; return; }   // re-arm for the NEXT completed run
+		if (doneHandled) return;
+		doneHandled = true;
+		untrack(() => {
 			territories = []; realms = [];
 			territoriesLoaded = false; // allow the reload below to fetch the freshly-generated territories
 			mindscapeState.load();
 			loadTerritories();
 			mindGenerated = true;   // we just watched it happen — no need to re-probe
-			justGenerated = true;   // the reveal, below
 			setTimeout(() => resetGen(), 4000);
-		}
+		});
 	});
 
-	// ⚠️ THE REVEAL MOVED HERE, AND ALMOST DIED. It lived in OnboardingFlow, gated on
-	// `justGenerated`, whose ONLY writer was the rail's own pollGenerate() — which E2 deletes
-	// (Generate is a pre-generation act; it moved to the invite). So the "Your mycelium is ready"
-	// moment became UNREACHABLE, and `exploreMind` with it: a live feature killed as collateral,
-	// which is the exact capability-deletion this build has already committed twice
-	// (independent review MED-1, 2026-07-16).
-	// It cannot live in the rail: the rail requires `generated`, so it can never OBSERVE the
-	// false→true flip — its poll is gated on the very fact it would be watching for. This view
-	// already reacts to `phase === 'done'`, so it is the one place that genuinely sees the moment.
-	let justGenerated = $state(false);
-	// ⚠️ The reveal renders INSIDE .map-container — the user is already on /mindscape looking at
-	// the map. The old body `goto('/mindscape')` was correctly dropped on the move, but the store
-	// write that remained set primaryView to the value it already had: a button that did NOTHING
-	// observable and did not even dismiss itself (review MED-6). Dismissing IS the action here.
-	function exploreMind() { justGenerated = false; }
+	// The "Your mycelium is ready — explore your mind" reveal popup was REMOVED (D-033):
+	// clicking it did nothing observable. Its only body (`goto('/mindscape')`) was already
+	// dropped when it moved here — the user is already on /mindscape — leaving a button that
+	// merely dismissed itself, identical to its own × control (review MED-6). Operator's call
+	// was to remove the popup rather than wire it up. Nothing depended on the `justGenerated`
+	// state or the `exploreMind` handler; both are gone with the markup below.
 
 	// Cleanup timers on unmount
 	$effect(() => {
@@ -557,6 +579,33 @@
 
 	const msState = $derived($mindscapeState);
 
+	// ── The ONE waiting state (D-028 part 2) ────────────────────────────────────────────────
+	// Which "we are not showing you a map yet" state are we in, if any? This is a TRANSCRIPTION
+	// of the {#if}/{:else if} chain that used to live in the markup — same predicates, same
+	// order, same precedence — lifted out so the template can render ONE stable `.loading-3d`
+	// element whose COPY varies, instead of five separate elements that destroy and recreate the
+	// spinner (and restart its CSS animation) on every transition. See the markup comment.
+	//   null ⇒ not waiting: either the map renders (points + the 3D module) or the welcome invite.
+	// ⚠️ ORDER IS LOAD-BEARING and matches the old chain exactly:
+	//   1. the store is loading                       → bare spinner
+	//   2. points exist but the 3D module has not     → bare spinner ('module')
+	//   3. existence UNKNOWN and the probe capped     → 'capped'  (no spinner, Retry)
+	//   4. existence UNKNOWN, still probing           → 'checking'
+	//   5. map exists, this client has no geometry    → 'built-not-loaded'
+	//   6. otherwise                                  → null (map, or the welcome invite)
+	// `mindGenerated === false` MUST fall through to null so the welcome invite still renders on a
+	// genuinely empty vault — null here never means "empty", it means "this element is not the
+	// thing on screen".
+	type LoadArm = 'store' | 'module' | 'capped' | 'checking' | 'built-not-loaded';
+	const loadArm = $derived<LoadArm | null>(
+		msState.loading ? 'store'
+		: (msState.points && msState.points.length > 0) ? (Mindscape3D ? null : 'module')
+		: (mindGenerated === null && genProbeExhausted) ? 'capped'
+		: mindGenerated === null ? 'checking'
+		: mindGenerated === true ? 'built-not-loaded'
+		: null
+	);
+
 	// Deep-link from Curious Life → a specific territory. CuriousLifeView stashes
 	// the territory id in navigation state and routes here; once the 3D map's
 	// points are actually loaded we apply the selection (the map's own effect then
@@ -669,66 +718,65 @@
 	<!-- Main content area -->
 	<main class="view-panel">
 
-			{#if msState.loading}
+			<!-- ⚠️ ONE loading element, not five — D-028's other half.
+			     This chain USED to spell each waiting state as its own `<div class="loading-3d">`
+			     inside a separate `{:else if}` arm. Semantically fine; visually broken. Each arm is
+			     a DIFFERENT DOM node, so every transition between them DESTROYED one element and
+			     CREATED another, and a CSS keyframe animation on a brand-new element starts at
+			     t=0 — the spinner visibly snapped back to its start angle on each hop. Measured on
+			     the real post-generate sequence (`portal-app/test/mount-mindscape-loading.mjs`):
+			     THREE distinct `.loading-3d` nodes created and destroyed for ONE map landing, with
+			     no reload of any kind involved. That is the "restarting loading icon" the operator
+			     described, and it is invisible to any assertion that only reads text.
+			     ⇒ The ARM is now a value (`loadArm`), and the element is a constant. Svelte keeps
+			     the same `.loading-3d` node while `loadArm` stays truthy, so the spinner animates
+			     CONTINUOUSLY across store-loading → checking → built-not-loaded → module-loading.
+			     Only the COPY changes — which is the honest thing to change, because only the copy
+			     ever differed. Every arm's meaning is preserved verbatim below; nothing was merged
+			     away. NOT a slower animation, NOT a delay, NOT a fade: the same states, one node. -->
+			{#if loadArm}
 				<div class="loading-3d">
-					<div class="spinner"></div>
+					<!-- The cap is the one waiting state that is NOT waiting: the probe has given up
+					     and retry is the user's move, so a spinner there would be a lie. -->
+					{#if loadArm !== 'capped'}<div class="spinner"></div>{/if}
+
+					{#if loadArm === 'capped'}
+						<!-- ⚠️ THE CAP. The readiness probe has failed PROBE_MAX_FAILS times (~20s): stop the
+						     spinner and offer a way forward. Still claims nothing about the map (§3.2a) — a
+						     failed read is "couldn't look", never "empty" — so this is NOT the invite and NOT
+						     a false "Grow your mycelium"; it is an actionable retry. retryProbe() clears the
+						     count so the poll re-arms. Mirrors generate.ts's capped-`unknown` retryable state. -->
+						<p class="load-fail">Couldn’t read your map just yet.</p>
+						<p class="load-fail sub">This is usually temporary.</p>
+						<button class="load-retry" onclick={retryProbe}>Retry</button>
+					{:else if loadArm === 'checking'}
+						<!-- ⚠️ We do not KNOW whether a map exists — the readiness probe failed and is
+						     retrying. Falling through to the invite here would tell an owner with a built
+						     mindscape to "Grow your mycelium", AND would put the invite on screen next to
+						     the rail (which polls independently and recovers first) — the very overlap
+						     this increment exists to make impossible. Claim nothing; say so.
+						     Bounded: past PROBE_MAX_FAILS this yields to the capped state ABOVE. -->
+						<p class="load-fail sub">Checking your mind…</p>
+					{:else if loadArm === 'built-not-loaded'}
+						<!-- ⚠️ The map EXISTS (the server counted points) but this client has none — the
+						     points fetch raced clustering, or the durable points cache held a stale-empty
+						     bundle. A LOAD FAILURE IS NOT AN EMPTY VAULT — §3.2a's rule, one surface over.
+						     P1-A: the readiness poll's reconcileGeometry() now auto-pulls the geometry with a
+						     cache-busting fetch every ~4s until it arrives, so this recovers ON ITS OWN with
+						     no click. We render it as an ACTIVE loading state (spinner + honest copy), not a
+						     dead end — and keep a manual "Try again" that forces a fresh fetch for impatience
+						     or a persistent stale cache. `{ fresh: true }` guarantees the retry can never be
+						     defeated by the same cached empty result that made the old button look dead. -->
+						<p class="load-fail">Your map is built — finishing loading it…</p>
+						{#if msState.error}<p class="load-fail sub">{msState.error}</p>{/if}
+						<button class="load-retry" onclick={() => mindscapeState.load({ fresh: true })}>Try again</button>
+					{/if}
 				</div>
 			{:else if msState.points && msState.points.length > 0}
-				{#if Mindscape3D}
-			<div class="map-container">
-						<Mindscape3D {active} />
-						{#if justGenerated}
-							<!-- The moment it lands. Moved from the rail (see the comment above
-							     `justGenerated`): the rail can never observe the flip, this view can. -->
-							<div class="reveal" role="status">
-								<span>Your mycelium is ready.</span>
-								<button class="reveal-go" onclick={exploreMind}>Explore your mind →</button>
-								<button class="reveal-x" aria-label="Dismiss" onclick={() => (justGenerated = false)}>×</button>
-							</div>
-						{/if}
-					</div>
-				{:else}
-					<div class="loading-3d">
-						<div class="spinner"></div>
-					</div>
-				{/if}
-			{:else if mindGenerated === null && genProbeExhausted}
-				<!-- ⚠️ THE CAP. The readiness probe has failed PROBE_MAX_FAILS times (~20s): stop the
-				     spinner and offer a way forward. Still claims nothing about the map (§3.2a) — a
-				     failed read is "couldn't look", never "empty" — so this is NOT the invite and NOT
-				     a false "Grow your mycelium"; it is an actionable retry. retryProbe() clears the
-				     count so the poll re-arms. Mirrors generate.ts's capped-`unknown` retryable state. -->
-				<div class="loading-3d">
-					<p class="load-fail">Couldn’t read your map just yet.</p>
-					<p class="load-fail sub">This is usually temporary.</p>
-					<button class="load-retry" onclick={retryProbe}>Retry</button>
-				</div>
-			{:else if mindGenerated === null}
-				<!-- ⚠️ We do not KNOW whether a map exists — the readiness probe failed and is
-				     retrying. Falling through to the invite here would tell an owner with a built
-				     mindscape to "Grow your mycelium", AND would put the invite on screen next to
-				     the rail (which polls independently and recovers first) — the very overlap
-				     this increment exists to make impossible. Claim nothing; say so.
-				     Bounded: past PROBE_MAX_FAILS this yields to the capped state ABOVE. -->
-				<div class="loading-3d">
-					<div class="spinner"></div>
-					<p class="load-fail sub">Checking your mind…</p>
-				</div>
-			{:else if mindGenerated === true}
-				<!-- ⚠️ The map EXISTS (the server counted points) but this client has none — the
-				     points fetch raced clustering, or the durable points cache held a stale-empty
-				     bundle. A LOAD FAILURE IS NOT AN EMPTY VAULT — §3.2a's rule, one surface over.
-				     P1-A: the readiness poll's reconcileGeometry() now auto-pulls the geometry with a
-				     cache-busting fetch every ~4s until it arrives, so this recovers ON ITS OWN with
-				     no click. We render it as an ACTIVE loading state (spinner + honest copy), not a
-				     dead end — and keep a manual "Try again" that forces a fresh fetch for impatience
-				     or a persistent stale cache. `{ fresh: true }` guarantees the retry can never be
-				     defeated by the same cached empty result that made the old button look dead. -->
-				<div class="loading-3d">
-					<div class="spinner"></div>
-					<p class="load-fail">Your map is built — finishing loading it…</p>
-					{#if msState.error}<p class="load-fail sub">{msState.error}</p>{/if}
-					<button class="load-retry" onclick={() => mindscapeState.load({ fresh: true })}>Try again</button>
+				<!-- `loadArm` is null here ⇒ Mindscape3D has resolved (see loadArm's 'module' arm),
+				     so this branch is only ever reached with a component to mount. -->
+				<div class="map-container">
+					<Mindscape3D {active} />
 				</div>
 			{:else}
 				<!-- Welcome: empty mindscape onboarding -->
@@ -805,23 +853,6 @@
 	.resize-handle:hover,
 	.resize-handle.active {
 		background: var(--color-accent);
-	}
-
-	.reveal {
-		position: absolute; left: 50%; transform: translateX(-50%); bottom: 2rem; z-index: 20;
-		display: flex; align-items: center; gap: 0.75rem;
-		padding: 0.6rem 0.9rem; border-radius: 12px;
-		border: 1px solid rgba(229, 184, 76, 0.35); background: var(--glass-card-bg);
-		backdrop-filter: blur(12px); font-size: 0.8rem; color: var(--color-text-primary);
-	}
-	.reveal-go {
-		padding: 0.35rem 0.8rem; border-radius: 8px; border: none;
-		background: var(--color-accent-aurum, #e5b84c); color: #0a0a0c;
-		font-size: 0.75rem; font-weight: 500; cursor: pointer; font-family: inherit;
-	}
-	.reveal-x {
-		background: none; border: none; color: var(--color-text-tertiary);
-		font-size: 0.9rem; cursor: pointer; padding: 0 0.2rem;
 	}
 
 	.load-fail { font-size: 0.82rem; color: var(--color-text-secondary); margin: 0 0 0.5rem; text-align: center; }

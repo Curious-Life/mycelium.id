@@ -1,5 +1,5 @@
 // Local secrets API — the self-hosted equivalent of the cloud product's
-// /portal/settings/secret(s) (which lives in reference/ and was never ported).
+// /portal/settings/secret(s) (which lives in the canonical tree and was never ported).
 // Stores into the encrypted secrets table (db.secrets → SYSTEM_KEY at rest).
 // Single-user, localhost-only, behind the vault-init guard (no per-request auth).
 // Wiring this also un-breaks the existing portal "Connect" buttons

@@ -39,6 +39,7 @@ import { createTerritoryDocsNamespace } from './territory-docs.js';
 import { createHistoryNamespace } from './history.js';
 import { createProvidersNamespace } from './providers.js';
 import { createDeviceTokensNamespace } from './device-tokens.js';
+import { createDeviceSessionsNamespace } from './device-sessions.js';
 import { createConnectorsNamespace } from './connectors.js';
 import { createUsersNamespace } from './users.js';
 import { createClaimsNamespace } from './claims.js';
@@ -171,6 +172,14 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // backed by the raw handle (so it slots into the sync owner-gate unchanged).
     // Raw tokens are never stored — only SHA-256 hashes. @see src/db/device-tokens.js.
     deviceTokens: createDeviceTokensNamespace({ d1Query, rawDb }),
+
+    // Device SESSIONS — the ONE unified session mechanism (mycelium_device_session
+    // cookie) for a second client (web browser + embedded WKWebView portal). Each
+    // session is BOUND to a device_tokens row: matchSync() JOINs and dies with the
+    // token (validity==token-liveness, no independent TTL — R0). Sync hot-path
+    // matcher, raw secrets never stored. @see src/db/device-sessions.js,
+    // docs/UNIFIED-AUTH-DESIGN-2026-07-24.md.
+    deviceSessions: createDeviceSessionsNamespace({ d1Query, rawDb }),
 
     // Connectors (data-connection operational state for the sync scheduler +
     // /portal/connectors). account_label/last_error/recent_runs are encrypted at

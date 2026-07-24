@@ -43,17 +43,22 @@ export function createDeviceTokensNamespace(deps) {
 
   return {
     /**
-     * Mint a new per-device token. Returns the RAW token ONCE — the caller seals it
-     * to the phone and never persists it in the clear. Only the hash is stored.
+     * Mint a new per-client token. Returns the RAW token ONCE — the caller seals it
+     * to the phone (kind='phone') or sets it as the backing token for a web session
+     * (kind='web'), and never persists it in the clear. Only the hash is stored.
+     * `kind` is a NON-secret label only: it changes no authorization (a 'web' token
+     * has exactly the authority of a 'phone' token). Unknown kinds fall back to
+     * 'phone' so a bad caller can never widen authority via this field.
      * @returns {Promise<{ token: string, hash: string, id: number }>}
      */
-    async mint(deviceLabel, userId) {
+    async mint(deviceLabel, userId, kind = 'phone') {
       const token = crypto.randomBytes(32).toString('hex'); // 64 hex — matches the static-bearer entropy
       const hash = hashTokenSync(token);
       const label = String(deviceLabel == null ? 'device' : deviceLabel).trim().slice(0, 64) || 'device';
+      const safeKind = (kind === 'web') ? 'web' : 'phone'; // allowlist — never trust the caller's string
       const res = await d1Query(
-        `INSERT INTO device_tokens (token_hash, device_label, user_id) VALUES (?, ?, ?)`,
-        [hash, label, String(userId)],
+        `INSERT INTO device_tokens (token_hash, device_label, user_id, kind) VALUES (?, ?, ?, ?)`,
+        [hash, label, String(userId), safeKind],
       );
       return { token, hash, id: res?.meta?.last_row_id };
     },
@@ -88,10 +93,32 @@ export function createDeviceTokensNamespace(deps) {
       }
     },
 
-    /** Owner-visible list — NEVER returns the token hash. */
+    /**
+     * SYNCHRONOUS, fail-closed lookup of the LIVE token's numeric id for a presented
+     * token — used to BIND a device session to its backing token (device-sessions.js).
+     * Returns null for an unknown / revoked / too-short token. Does NOT bump last_seen
+     * (binding is not "use"); matchSync remains the hot-path authorizer.
+     * @param {string} tokenPlain
+     * @returns {number|null}
+     */
+    matchIdSync(tokenPlain) {
+      try {
+        if (typeof tokenPlain !== 'string' || tokenPlain.length < MIN_TOKEN_LEN) return null;
+        const hash = hashTokenSync(tokenPlain);
+        const row = rawDb
+          .prepare(`SELECT id FROM device_tokens WHERE token_hash = ? AND revoked_at IS NULL`)
+          .get(hash);
+        return row ? Number(row.id) : null;
+      } catch {
+        return null; // fail-closed
+      }
+    },
+
+    /** Owner-visible list — NEVER returns the token hash. Surfaces `kind` so the
+     *  devices UI can distinguish a paired phone from a signed-in web browser. */
     async list() {
       const result = await d1Query(
-        `SELECT id, device_label, created_at, last_seen_at, revoked_at
+        `SELECT id, device_label, kind, created_at, last_seen_at, revoked_at
          FROM device_tokens ORDER BY (revoked_at IS NULL) DESC, created_at DESC`,
         [],
       );

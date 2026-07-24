@@ -18,10 +18,13 @@ import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { reportChild } from './lib/child-stderr.mjs';
+import { stripCommentsFor } from './lib/strip-comments.mjs';
 import { createServer } from 'node:http';
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { join } from 'node:path';
 import { boot } from '../src/index.js';
+import { startRestServer } from '../src/server-rest.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startClusterNamingJob, _resetClusterNaming } from '../src/jobs.js';
 import { setSessionKeys, clearSessionKeys } from '../src/account/session-keys.js';
@@ -254,8 +257,13 @@ delete process.env.MYCELIUM_GATE_AMBIENT; delete process.env.MYCELIUM_NAMING_SCR
   // The button wiring (§3a "Illuminate → this, not generate"). SOURCE assert with comments stripped
   // as REGIONS (a block-comment line survives a prefix filter) — the same honest reach as
   // verify:generate-phase D2: it catches a repoint/deletion, not an open set of dead-coding.
-  const raw = readFileSync('portal-app/src/lib/components/mindscape/MindscapeDetail.svelte', 'utf8');
-  const code = raw.replace(/<!--[\s\S]*?-->/g, '').replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  const MD = 'portal-app/src/lib/components/mindscape/MindscapeDetail.svelte';
+  const raw = readFileSync(MD, 'utf8');
+  // ONE lexical stripper (scripts/lib/strip-comments.mjs), not a regex chain: the chain
+  // could not tell a comment from a string, so prose could satisfy a positive assert
+  // (`"x"// …` survived it) and a `/*` inside a string could DELETE live code and satisfy
+  // a negative one (S3 below is exactly that shape). Gated by verify:strip-comments.
+  const code = stripCommentsFor(MD, raw);
   // NB: apiPost carries a TS generic here (apiPost<{…}>(…)) — match the route string + the fn,
   // not `apiPost(`. The only name-clusters POST in this file is illuminateRealms (describeTerritory
   // posts describe-more), so the string presence pins the wiring.
@@ -264,6 +272,90 @@ delete process.env.MYCELIUM_GATE_AMBIENT; delete process.env.MYCELIUM_NAMING_SCR
   rec('S3. …and NO LONGER calls generate — the whole "does nothing" bug (its render condition was the route\'s skip condition)',
     !/startGenerate/.test(code) && !/illuminateRealms\(\)\s*\{\s*void start/.test(code),
     'illuminate must not drive generate; generate re-clusters and its debounce skips whenever topology exists');
+}
+
+// =====================================================================================
+// PART D — D-004 ↻1: the OTHER naming path must not be starved by the Generate debounce
+// =====================================================================================
+// This gate's own header states the mechanism: describe-clusters.js is the ONLY writer of
+// realm/territory name+essence, and inside Generate it is step 3/16 — the step the debounce
+// skipped. Part W/S above proved the ESCAPE HATCH (/mycelium/name-clusters) works. This part
+// proves the PRIMARY path is reachable again, which is the operator's symptom 3 verbatim:
+//   "the cluster names dont show, they say territory 2 etc.... not the actual name"
+// Territory {id} / Realm {id} is the NULL-name fallback (src/portal-measurement.js:1133) —
+// the names were never WRITTEN, because the only writer sat behind a skip with no staleness
+// condition.
+//
+// BEHAVIOURAL, end to end: a real REST server, a STALE map (many embedded messages, few
+// mapped points), a clustering script standing in for the pipeline that runs the REAL
+// describe-clusters.js child against a stub model — then assert the realm ACTUALLY GOT A
+// NAME. A source grep would not have caught this; the pre-fix predicate REDs it.
+//
+// MUTATION-TESTED:
+//   // MUTATION-TESTED: src/portal-mindscape.js skip predicate reverted to the pre-fix
+//   //   `COUNT(clustering_points) > 0` (no staleness condition) → D1 REDs ("generate was
+//   //   SKIPPED on a stale map") and D2 REDs ("realm still unnamed") — i.e. the naming
+//   //   starvation is observed as an unnamed realm, not merely as a route status.
+{
+  const DBD = `${dataDir}/verify-illuminate-naming-D.db`, KCVD = `${dataDir}/verify-illuminate-naming-D-kcv.json`;
+  for (const f of [DBD, KCVD, `${DBD}-shm`, `${DBD}-wal`]) { try { rmSync(f); } catch {} }
+  const uD = crypto.randomBytes(32).toString('hex'), sD = crypto.randomBytes(32).toString('hex');
+  { const d = new Database(DBD); applyMigrations(d); d.close(); }
+  const stubD = makeStub('{"name":"Named By Generate","essence":"written by step 3/16"}');
+  const portD = await listen(stubD);
+
+  const EMBEDDED_D = 60;   // the vault
+  const MAPPED_D = 4;      // …and the fraction of it that is on the map ⇒ STALE
+  {
+    const { db, close } = await boot({ dbPath: DBD, kcvPath: KCVD, userHex: uD, systemHex: sD, embedder: null });
+    for (let i = 0; i < EMBEDDED_D; i++) {
+      await db.rawQuery(`INSERT INTO messages (id, user_id, content, created_at, embedding_768, nlp_processed) VALUES (?,?,?,?,?,1)`,
+        [`d${i}`, U, `${SECRET} a thought numbered ${i}`, '2026-06-01T10:00:00Z', Buffer.alloc(16, 1)]);
+    }
+    for (let i = 0; i < MAPPED_D; i++) {
+      await db.rawQuery(`INSERT INTO clustering_points (id, user_id, source_type, source_id, realm_id, territory_id, landscape_x, landscape_y, landscape_z) VALUES (?,?,'message',?,?,?,?,?,?)`,
+        [`cp-d${i}`, U, `d${i}`, 0, 1, i * 0.1, i * 0.2, i * 0.3]);
+    }
+    const provId = await db.providers.create(U, { provider: 'custom', label: 'stub', authType: 'api_key', model: 'stub-model', baseUrl: `http://127.0.0.1:${portD}/v1` });
+    await db.providers.setActive(provId, U);
+    close();
+  }
+
+  // The clustering script stand-in: Generate's naming step, and nothing else.
+  const genScript = path.resolve(`${dataDir}/verify-illuminate-naming-generate.sh`);
+  writeFileSync(genScript, '#!/bin/bash\necho "Step 3/16: Describing clusters"\nexec node pipeline/describe-clusters.js\n');
+  const prevScript = process.env.MYCELIUM_CLUSTER_SCRIPT;
+  const prevStats = existsSync(join(dataDir, 'generate-stats.json')) ? readFileSync(join(dataDir, 'generate-stats.json'), 'utf8') : null;
+  try { rmSync(join(dataDir, 'generate-stats.json')); } catch {}   // no baseline ⇒ the fallback path
+  process.env.MYCELIUM_CLUSTER_SCRIPT = genScript;
+
+  const srvD = await startRestServer({ dbPath: DBD, kcvPath: KCVD, userHex: uD, systemHex: sD, port: 0, host: '127.0.0.1', portalMode: 'legacy' });
+  try {
+    const post = await fetch(`${srvD.url}/api/v1/portal/mycelium/generate`, { method: 'POST' });
+    const body = await post.json().catch(() => ({}));
+    rec(`D1. ⭐ a STALE map (${EMBEDDED_D} embedded / ${MAPPED_D} mapped) does NOT skip Generate — the naming step is reachable`,
+      body?.status !== 'skipped' && Boolean(body?.jobId),
+      `status=${body?.status} reason=${body?.reason ?? '—'} jobId=${body?.jobId ?? 'null'}`);
+
+    for (let i = 0; i < 150; i++) {
+      const st = await (await fetch(`${srvD.url}/api/v1/portal/mycelium/generate/status/${body?.jobId}`)).json().catch(() => ({}));
+      if (st?.status && st.status !== 'running') break;
+      await sleep(200);
+    }
+    const { db, close } = await boot({ dbPath: DBD, kcvPath: KCVD, userHex: uD, systemHex: sD, embedder: null });
+    const r0 = ((await db.rawQuery(`SELECT name FROM realms WHERE user_id=? AND realm_id=0`, [U])).results || [])[0];
+    const t1 = ((await db.rawQuery(`SELECT name FROM territory_profiles WHERE user_id=? AND territory_id=1`, [U])).results || [])[0];
+    close();
+    rec('D2. ⭐ …and the run ACTUALLY NAMED the clusters — no more "Territory 2" / "Realm 0" placeholders',
+      r0?.name === 'Named By Generate' && t1?.name === 'Named By Generate',
+      `realm0=${JSON.stringify(r0?.name)} territory1=${JSON.stringify(t1?.name)} (null ⇒ the UI renders the "Territory {id}" fallback — the reported symptom)`);
+  } finally {
+    srvD.server.close(); try { srvD.close?.(); } catch {}
+    stubD.close();
+    if (prevScript === undefined) delete process.env.MYCELIUM_CLUSTER_SCRIPT; else process.env.MYCELIUM_CLUSTER_SCRIPT = prevScript;
+    if (prevStats != null) { try { writeFileSync(join(dataDir, 'generate-stats.json'), prevStats); } catch {} } else { try { rmSync(join(dataDir, 'generate-stats.json')); } catch {} }
+    for (const f of [DBD, KCVD, `${DBD}-shm`, `${DBD}-wal`, genScript]) { try { rmSync(f); } catch {} }
+  }
 }
 
 // ── cleanup ──

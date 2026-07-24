@@ -1,7 +1,7 @@
 // Build-new injected helpers for the db-d1 namespaces.
 //
 // These are the small free functions the reference db-d1.js orchestrator
-// supplied to specific namespace factories. They are NOT in reference/ (only
+// supplied to specific namespace factories. They are NOT in the canonical tree (only
 // the leaf namespaces are), so they are written here against the verified
 // call-site contracts:
 //   - parseHealthRow      (health.js:65,73)  — row -> typed row (workout_types JSON)

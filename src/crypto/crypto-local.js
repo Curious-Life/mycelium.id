@@ -731,8 +731,7 @@ function readMasterKeyHex() {
   // it). CLAUDE.md §4 ("never in env") was inherited from the multi-tenant VPS
   // repo; its threat model (shared host, /proc, cross-tenant) does not apply to
   // a local install, so this is an accepted boundary here. Only a shared /
-  // multi-tenant host would need the 0600-tmpfs hardening — see
-  // docs/SECURITY-FOLLOWUP-KEY-IN-ENV-2026-06-11.md.
+  // multi-tenant host would need the 0600-tmpfs hardening.
   const envKey = process.env.ENCRYPTION_MASTER_KEY;
   if (envKey) {
     if (!global._masterKeyFallbackWarned) {

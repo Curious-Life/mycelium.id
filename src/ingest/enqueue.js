@@ -3,7 +3,7 @@
 // work-queue index). This module is the *nudge*: a best-effort POST to the
 // build-new :8095 enrichment service so it drains the queue promptly.
 //
-// CONTRACT (reference/server-routes/portal-enrichment.js:158): POST /enrich-all
+// CONTRACT (the canonical portal route): POST /enrich-all
 // { userId } to the loopback enrichment service. The service itself is build-new
 // and Tier-2-gated (needs the :8091 embed model). Its ABSENCE must be non-fatal:
 // the row is already durably queued, so a failed/empty nudge just means the

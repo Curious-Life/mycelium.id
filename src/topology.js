@@ -3,7 +3,7 @@
  * Markdown fragments for the MCP tool surface.
  *
  * BUILD-NEW (V1): the canonical repo carried these alongside the topology MCP
- * tools but they were not in reference/. They are derived from the exact row
+ * tools but they were not in the canonical tree. They are derived from the exact row
  * shapes produced by the db.topology namespace (src/db/topology.js) and the
  * topologyHelpers fetchers (src/topology/helpers.js), and consumed by
  * src/tools/topology-tools.js.

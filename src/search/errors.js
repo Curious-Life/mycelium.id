@@ -1,6 +1,6 @@
 // Mind-search — typed error hierarchy.
 //
-// Ported from reference/mind-search/errors.js. Every error thrown out of
+// Ported from the canonical mind-search module. Every error thrown out of
 // mind-search is a MindSearchError or subclass. Each carries a stable string
 // `class` for log tagging and a degradation-tier hint.
 //

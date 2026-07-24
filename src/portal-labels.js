@@ -14,6 +14,7 @@
  * endpoints are the headless-verifiable data plane.
  */
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { runAxisCvpFromLabels } from './metrics/axis-cvp.js';
 
 const AXES = Object.freeze([
@@ -31,6 +32,7 @@ export function portalLabelsRouter({ db, userId = 'local-user', authenticatePort
   const router = express.Router();
   const auth = (req, res) => {
     const u = authenticatePortalRequest(req);
+    if (isCsrfDeny(u)) { res.status(403).json({ ok: false, error: 'csrf' }); return null; }
     if (!u) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return null; }
     return u;
   };

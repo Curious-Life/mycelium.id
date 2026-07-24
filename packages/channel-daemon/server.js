@@ -20,9 +20,10 @@ import express from 'express';
  * @param {()=>object|null} deps.getActiveTurn
  * @param {{mode:'on'|'capture-only',backend:string|null}} [deps.replies]  two-way reply state
  * @param {()=>object|null} [deps.getLastTurn]  most recent turn outcome (lane.lastTurn)
+ * @param {()=>object} [deps.getTransports]  D-014: per-transport LIVE connection state
  * @param {string} [deps.jsonLimit]
  */
-export function createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getLastTurn, jsonLimit = '1mb' }) {
+export function createDaemonApp({ telegramSendHandler, discordSendHandler, getActiveTurn, replies, getLastTurn, getTransports, jsonLimit = '1mb' }) {
   if (typeof getActiveTurn !== 'function') throw new TypeError('createDaemonApp: getActiveTurn required');
   if (typeof telegramSendHandler !== 'function' && typeof discordSendHandler !== 'function') {
     throw new TypeError('createDaemonApp: at least one of telegramSendHandler / discordSendHandler required');
@@ -58,12 +59,20 @@ export function createDaemonApp({ telegramSendHandler, discordSendHandler, getAc
   // `lastTurn` carries verdict/reason/error of the most recent agent turn (no
   // message content) — without it a failed turn is invisible (stderr is a ring
   // buffer surfaced only on daemon exit; cost a session on 2026-06-10).
+  // `transports` (D-014) carries the LIVE per-platform connection state, e.g.
+  //   { discord: { state:'failed', connected:false, reason:'module_missing', message:'…' } }
+  // The daemon PROCESS being up says nothing about whether a given platform's
+  // socket is up — that gap is exactly what let the settings UI paint "Connected"
+  // over a Discord gateway that had never started. Fail closed: if no transport
+  // reporter was wired, emit `{}` rather than an optimistic default, so a consumer
+  // that finds no entry treats the platform as NOT connected.
   app.get('/healthz', (_req, res) => res.json({
     ok: true,
     service: 'channel-daemon',
     replies: replies?.mode || 'unknown',
     backend: replies?.backend || null,
     lastTurn: (typeof getLastTurn === 'function' ? getLastTurn() : null) || null,
+    transports: (typeof getTransports === 'function' ? getTransports() : null) || {},
   }));
 
   return app;

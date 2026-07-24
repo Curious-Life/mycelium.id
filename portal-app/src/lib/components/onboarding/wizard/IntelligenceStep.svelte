@@ -273,43 +273,17 @@
 		finally { connecting = ''; }
 	}
 
-	// ── Name beat (name-only; personality deferred to the character page) ────────
-	// The server default when unset — mirrors DEFAULT_AGENT_NAME (src/portal-chat.js). A
-	// display-only heuristic: don't PREFILL the box with the placeholder default, so a fresh
-	// vault shows "e.g. Aria" while a returning user sees the name they chose (R4-14 fix a).
-	const DEFAULT_AGENT_NAME = 'Mycelium';
-	let agentName = $state('');
-	let savedName = $state<string | null>(null); // last value we persisted (dedupe redundant PUTs)
-	let advancing = $state(false);
-
-	// The ONE save path — awaited, best-effort, idempotent. Called both eagerly (on blur, so a
-	// header "Skip for later" that bypasses the step's Continue still persists — R4-14 fix b) and
-	// again on Continue. `settings.agent.name` is what ChatFloat reads, so this is the whole fix.
-	async function saveName() {
-		const name = agentName.trim();
-		if (!name || name === savedName) return;
-		try {
-			const res = await api('/portal/agent-identity', { method: 'PUT', body: JSON.stringify({ name }) });
-			if (res.ok) savedName = name;
-		} catch { /* best-effort — nameable later on the character page */ }
-	}
-	async function continueOn() {
-		if (advancing) return;
-		advancing = true;
-		await saveName();
-		onNext();
-	}
+	// ── NAME BEAT RELOCATED (D-031 / QA7 U9) ────────────────────────────────────
+	// The "How will you call it?" name prompt used to live HERE (misplaced — the
+	// operator's D-031). It moved to the new Step 5 (AgentStep.svelte), reworded to
+	// "How will you call your personal agent?" and paired with the messenger connect.
+	// This step now only connects intelligence; it no longer names the agent.
 
 	onMount(async () => {
-		const [pr, , identity] = await Promise.all([
+		const [pr] = await Promise.all([
 			getJSON('/portal/providers/presets'), loadBundle(),
-			getJSON('/portal/agent-identity'),
 		]);
 		if (pr?.presets) presets = pr.presets;
-		// Seed the box from the stored name so a returning user sees it (and a re-save never
-		// blanks it). Skip the server default — a fresh vault keeps the placeholder.
-		const stored = typeof identity?.name === 'string' ? identity.name.trim() : '';
-		if (stored && stored !== DEFAULT_AGENT_NAME) { agentName = stored; savedName = stored; }
 	});
 </script>
 
@@ -449,16 +423,9 @@
 			<p class="privacy">Your assistant talks via your chosen engine; your labeling and mind-map are always built privately on your {machineNoun}.</p>
 		</section>
 
-		<!-- ── Name beat (name-only; personality lives on the character page) ── -->
-		{#if hasEngine}
-			<section class="sec name-beat">
-				<label class="name-label" for="wiz-agent-name">How will you call it?</label>
-				<input id="wiz-agent-name" class="name-input" type="text" maxlength="40" bind:value={agentName} onblur={saveName} placeholder="e.g. Aria" />
-			</section>
-		{/if}
-
+		<!-- Naming the agent moved to Step 5 (AgentStep). This step ends on Continue. -->
 		<div class="footer">
-			<button class="primary" disabled={advancing} onclick={continueOn}>{advancing ? 'Saving…' : 'Continue'}</button>
+			<button class="primary" onclick={onNext}>Continue</button>
 		</div>
 	{/if}
 </div>
@@ -510,10 +477,6 @@
 	.key-input { padding: 0.5rem 0.7rem; border-radius: 9px; border: 1px solid var(--glass-input-border, rgba(255,255,255,0.14)); background: var(--glass-input-bg, rgba(0,0,0,0.2)); color: var(--color-text-primary); font-family: inherit; font-size: 0.82rem; outline: none; }
 	.key-input:focus { border-color: var(--color-accent-aurum, #e5b84c); }
 	.privacy { font-size: 0.72rem; line-height: 1.45; color: var(--color-text-tertiary); margin: 0.8rem 0 0; padding-left: 0.7rem; border-left: 2px solid var(--glass-border, rgba(255,255,255,0.12)); }
-	.name-beat { display: flex; flex-direction: column; gap: 0.4rem; }
-	.name-label { font-size: 0.85rem; color: var(--color-text-primary); }
-	.name-input { padding: 0.55rem 0.75rem; border-radius: 9px; border: 1px solid var(--glass-input-border, rgba(255,255,255,0.14)); background: var(--glass-input-bg, rgba(0,0,0,0.2)); color: var(--color-text-primary); font-family: inherit; font-size: 0.9rem; outline: none; max-width: 20rem; }
-	.name-input:focus { border-color: var(--color-accent-aurum, #e5b84c); }
 	.footer { margin-top: 0.6rem; }
 	.primary { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.55rem 1.2rem; border-radius: 9px; border: none; background: var(--color-accent-aurum, #e5b84c); color: #0a0a0c; font-family: inherit; font-size: 0.85rem; font-weight: 500; cursor: pointer; transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.15s ease; }
 	.primary.sm { padding: 0.4rem 0.9rem; font-size: 0.78rem; align-self: flex-start; }

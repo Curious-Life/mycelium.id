@@ -129,11 +129,18 @@ export function createProvidersNamespace(deps) {
         return result.results?.[0] || null;
       }
       // No type specified — return any active provider, prefer most-recently-used.
+      // `id DESC` is a DETERMINISTIC tiebreak (D-029): setActive bumps last_used_at with
+      // `datetime('now')` (SECOND resolution), so connecting a provider and a subscription
+      // in the same wizard second leaves BOTH is_active=1 (one per type) with an EQUAL
+      // last_used_at — and a bare `LIMIT 1` then returns an arbitrary one, so the freshly
+      // connected subscription could lose the tie and never become the default. Highest id
+      // = most-recently-created = the row the user just connected, which is the intended
+      // winner. Without it the auto-select in persistSubscription is a race, not a rule.
       const result = await d1Query(
         `SELECT id, provider, label, auth_type, credentials, config_dir,
                 model_preference, base_url, status
          FROM ai_providers WHERE user_id = ? AND is_active = 1
-         ORDER BY last_used_at DESC NULLS LAST LIMIT 1`,
+         ORDER BY last_used_at DESC NULLS LAST, id DESC LIMIT 1`,
         [userId],
       );
       return result.results?.[0] || null;

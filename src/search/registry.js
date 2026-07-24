@@ -1,7 +1,7 @@
 /**
  * mind-search instance registry — late binding.
  *
- * Ported verbatim from reference/mind-search/registry.js. A small set/get
+ * Ported verbatim from the canonical mind-search module. A small set/get
  * holder so db-layer match* helpers can reach the mind-search backend without
  * crossing import boundaries at construction time. Module-level singleton —
  * acceptable because mind-search is one-tenant-one-index by design.

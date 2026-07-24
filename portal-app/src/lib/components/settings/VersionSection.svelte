@@ -33,6 +33,32 @@
 		return typeof inv === 'function' ? inv : null;
 	}
 
+	// D-022: a rejected invoke() must never collapse to a bare "check failed". Tauri's IPC
+	// rejects with a plain STRING (a Rust `Err(String)`, or a framework error such as
+	// "command check_for_update not found") far more often than with an Error object — so
+	// `e?.message` was `undefined` for the common case and the real reason was thrown away,
+	// leaving only the "check failed" fallback. Normalise every rejection shape
+	// (string · Error · {message}/{error} · JSON) down to the actual text, so the NEXT
+	// failure tells the user exactly why instead of a generic message.
+	function describeError(e: unknown): string {
+		if (e == null) return 'unknown error (no detail)';
+		if (typeof e === 'string') return e.trim() || 'empty error';
+		if (e instanceof Error && e.message) return e.message;
+		if (typeof e === 'object') {
+			const anyE = e as Record<string, unknown>;
+			if (typeof anyE.message === 'string' && anyE.message.trim()) return anyE.message;
+			if (typeof anyE.error === 'string' && anyE.error.trim()) return anyE.error;
+			try {
+				const s = JSON.stringify(e);
+				if (s && s !== '{}') return s;
+			} catch {
+				/* non-serialisable — fall through */
+			}
+		}
+		const s = String(e);
+		return s && s !== '[object Object]' ? s : 'unknown error';
+	}
+
 	onMount(async () => {
 		const invoke = tauriInvoke();
 		isTauri = !!invoke;
@@ -47,15 +73,25 @@
 	});
 
 	async function checkForUpdate() {
+		if (checking || installing) return;
 		const invoke = tauriInvoke();
-		if (!invoke || checking || installing) return;
+		// The button only renders under isTauri, but __TAURI_INTERNALS__ can go stale (e.g.
+		// after a webview reload). Surface that as its OWN reason rather than failing silently
+		// — it distinguishes "the desktop bridge is gone" from "the updater returned an error".
+		if (!invoke) {
+			status = { state: 'error', error: 'the desktop bridge is unavailable — reopen the app and try again' };
+			return;
+		}
 		checking = true;
 		status = null;
 		try {
 			const s = (await invoke('check_for_update')) as UpdateStatus;
-			status = s && typeof s.state === 'string' ? s : { state: 'error', error: 'unexpected response' };
-		} catch (e: any) {
-			status = { state: 'error', error: e?.message || 'check failed' };
+			status =
+				s && typeof s.state === 'string'
+					? s
+					: { state: 'error', error: `unexpected response: ${describeError(s)}` };
+		} catch (e) {
+			status = { state: 'error', error: describeError(e) };
 		} finally {
 			checking = false;
 		}

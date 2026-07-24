@@ -7,6 +7,7 @@
 // dimensions ONLY — llm_usage never stores any prompt/completion text (§1).
 
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 
 const clampDays = (v) => {
   const n = Number(v);
@@ -18,7 +19,7 @@ export function portalUsageRouter({ db, userId, authenticatePortalRequest }) {
   if (!db) throw new Error('portalUsageRouter: db required');
   if (typeof authenticatePortalRequest !== 'function') throw new Error('portalUsageRouter: authenticatePortalRequest required');
   const router = express.Router();
-  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
+  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; } if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
   // GET /usage?days=N — aggregated token consumption + recent events.
   router.get('/usage', async (req, res) => {

@@ -32,6 +32,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { stripCommentsFor } from './lib/strip-comments.mjs';
 
 process.env.ENCRYPTION_MASTER_KEY ||= crypto.randomBytes(32).toString('hex');
 // The router coalesces to env.LOCAL_MODEL before DEFAULT_LOCAL_MODEL — a stray one in the
@@ -58,7 +59,10 @@ const feedNamespace = createActivityFeedNamespace({ d1QueryAdmin: async () => ({
 // Source assertions must read CODE, not prose: these files legitimately NAME the retired
 // resolver and the dead notice() in comments explaining why they are gone. Matching a comment
 // would make this gate fail on its own documentation.
-const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+// ONE lexical stripper (scripts/lib/strip-comments.mjs) — the regex pair that was here
+// missed TRAILING `//` comments entirely and could not tell a comment from a string in
+// either direction. Gated by verify:strip-comments.
+const stripComments = (s) => stripCommentsFor('x.js', s);
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };

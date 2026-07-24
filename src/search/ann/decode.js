@@ -1,7 +1,7 @@
 /**
  * Vector envelope ↔ Float32Array codec.
  *
- * Ported from reference/mind-search/ann/decode.js. Import rewrite: reference
+ * Ported from the canonical mind-search module. Import rewrite: reference
  * imported `decrypt`/`encrypt` from '../../crypto-local.js'; here the wrapped-DEK
  * envelope codec lives at ../../crypto/crypto-local.js and exposes the SAME
  * `encrypt(plaintext, scope, masterKey, userId)` / `decrypt(envelope, masterKey,

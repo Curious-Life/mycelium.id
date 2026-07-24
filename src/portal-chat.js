@@ -14,6 +14,7 @@
 // the same captureMessage funnel as every other message (encrypted at rest).
 
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { randomUUID } from 'node:crypto';
 import { createAgentHarness, describeProvider, DEFAULT_ANTHROPIC_CHAT_MODEL } from './agent/harness.js';
 import { resolveHarness } from './agent/resolve-harness.js';
@@ -71,6 +72,37 @@ export const AGENT_NAME_MAX = 40;
 export function agentDisplayName(raw) {
   const s = (typeof raw === 'string' ? raw.trim() : '').slice(0, AGENT_NAME_MAX).trim();
   return s || DEFAULT_AGENT_NAME;
+}
+
+/**
+ * Compose the agent's onboarding first message (D-016 / QA7 U9).
+ *
+ * A DETERMINISTIC greeting (no model call) so it is instant and CANNOT fabricate
+ * awareness: it states only real counts passed in. It introduces the agent by its
+ * chosen name, reflects what the agent can already see in the vault, and asks who
+ * the user is. An EMPTY vault says so honestly rather than inventing data.
+ *
+ * PROPOSED COPY — needs operator review (QA7 Q2). Kept here (one place) so the
+ * wording is reviewable and the gate can assert the honest-empty branch exists.
+ */
+export function composeOnboardingGreeting({ name, messageCount = 0, territoryCount = 0 } = {}) {
+  const who = agentDisplayName(name);
+  const msgs = Math.max(0, Number(messageCount) || 0);
+  const terrs = Math.max(0, Number(territoryCount) || 0);
+  const intro = `Hi — I'm ${who}, your personal agent.`;
+  let awareness;
+  if (msgs <= 0) {
+    // HONEST-EMPTY: no data yet — never imply a map or counts we don't have.
+    awareness = `Your vault is empty right now, so there's nothing in your mind-map yet. The moment you import or write something, I'll start mapping it for you.`;
+  } else {
+    const msgPart = `${msgs.toLocaleString('en-US')} message${msgs === 1 ? '' : 's'}`;
+    const terrPart = terrs > 0
+      ? ` already grouped into ${terrs.toLocaleString('en-US')} territor${terrs === 1 ? 'y' : 'ies'}`
+      : `, and I'm still mapping them`;
+    awareness = `I can already see ${msgPart} in your vault${terrPart}.`;
+  }
+  const ask = `To get started: who are you, and what would you like me to help you think about?`;
+  return `${intro} ${awareness} ${ask}`;
 }
 // (Personality is no longer a 4-option enum tone knob. The agent's character is its
 //  self.md "Being" — authored on the Character page, loaded every turn as WHO YOU ARE —
@@ -143,7 +175,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
   // Claude Code engine (C2). The native path is behavior-identical to the previous
   // module-scoped loop. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
 
-  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
+  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; } if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
   async function readPolicy() {
     try { const raw = await db.secrets.get(userId, POLICY_KEY); return normalizePolicy(raw ? JSON.parse(raw) : null); }
@@ -195,6 +227,56 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
       await db.users.updateSettings(userId, { ...s, agent });
       res.json({ ok: true, name: agent.name, channelWrite: agent.channelWrite !== false, scopes: Array.isArray(agent.scopes) ? agent.scopes : [...ALL_SCOPES] });
     } catch { res.status(500).json({ error: 'Could not save agent identity' }); }
+  });
+
+  // ── POST /onboarding/greeting — the agent's first message (D-016 / QA7 U9). ──
+  // After a model is connected at the END of onboarding, the client opens chat and
+  // calls this ONCE. It composes a greeting in the agent's chosen name that shows
+  // HONEST awareness of the vault (real message + territory counts, never invented),
+  // introduces the agent, and asks who the user is — then persists it as the first
+  // assistant turn of the caller's thread so a reload keeps it.
+  //
+  // "Generated once": guarded by the durable users.settings.onboardingGreetingAt
+  // stamp, so a relaunch / second finish is a no-op returning null. The text is
+  // composed HERE (deterministic — no model call), so it works before the first real
+  // turn and cannot fabricate data (composeOnboardingGreeting only states real counts).
+  router.post('/onboarding/greeting', async (req, res) => {
+    if (!auth(req, res)) return;
+    try {
+      try { await db.users.create(userId, userId); } catch { /* row already exists */ }
+      const s = (await db.users.getSettings(userId)) || {};
+      // Idempotent: once sent, never regenerate (no greeting spam on every open).
+      if (s.onboardingGreetingAt) { res.json({ ok: true, sent: false, alreadySent: true, greeting: null }); return; }
+
+      const { name } = await readAgentIdentity();
+
+      // HONEST awareness — real counts only, from the same surfaces readiness reads.
+      // A read failure biases to the "empty" phrasing rather than inventing numbers.
+      let messageCount = 0;
+      try { messageCount = Number((await db.messages.embedBacklog(userId))?.total || 0); } catch { /* honest-empty */ }
+      let territoryCount = 0;
+      try { territoryCount = ((await db.mindscape?.getTerritoryProfiles?.(userId)) || []).length; } catch { /* honest-empty */ }
+
+      const greeting = composeOnboardingGreeting({ name, messageCount, territoryCount });
+
+      // Persist as the FIRST assistant turn of the caller's thread so a reload keeps it.
+      // Same source (portal-chat) + `chat:` namespace as a normal turn ⇒ /chat/history
+      // returns it. CHAT_SOURCE is NOT an agent source, so the agent-capture consent
+      // gate does not apply (this is a system-authored greeting, not captured chat).
+      const rawConv = (typeof req.body?.conversationId === 'string' && req.body.conversationId.trim())
+        ? req.body.conversationId.trim().slice(0, 100) : '';
+      const conversationId = rawConv ? `chat:${rawConv}` : null;
+      try {
+        await captureMessage(db, {
+          userId, role: 'assistant', content: greeting, source: CHAT_SOURCE,
+          messageType: 'chat', ...(conversationId ? { conversationId } : {}),
+        }, enqueueEnrichment);
+      } catch (e) { chatLog(`greeting persist failed: ${e?.message}`); }
+
+      // Stamp only AFTER a successful compose so a transient failure retries next finish.
+      await db.users.updateSettings(userId, { ...s, onboardingGreetingAt: Date.now() });
+      res.json({ ok: true, sent: true, greeting });
+    } catch { res.status(500).json({ error: 'Could not prepare the greeting' }); }
   });
 
   // ── GET /ai-access — the AI Access policy (for the settings panel). Returns the
