@@ -262,7 +262,20 @@ export class SecureChannel {
 			const req = this.pending.get(id)!;
 
 			if (type === 'stream-chunk' && req.onChunk) {
-				req.onChunk(data);
+				// SECOND LAYER (D-020). A consumer callback that throws used to escape into this
+				// WebSocket frame handler: the pending request was never settled, so the caller's
+				// promise hung forever and its try/catch never ran - the failure surfaced to the
+				// user as a permanently empty bubble with no error. A throwing onChunk is a bug in
+				// the consumer (ChatFloat's error case was one), but this transport must not
+				// convert it into a silent hang. Settle the request instead, so the caller's own
+				// error handling gets a chance to run.
+				try {
+					req.onChunk(data);
+				} catch (e) {
+					clearTimeout(req.timeout);
+					this.pending.delete(id);
+					req.reject(e instanceof Error ? e : new Error(String(e)));
+				}
 				return;
 			}
 

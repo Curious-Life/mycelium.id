@@ -5,6 +5,9 @@
 	import { goto } from '$app/navigation';
 	import { api, apiPost } from '$lib/api';
 	import { generate } from '$lib/generate';
+	// D-004: embedded-vs-mapped + the rebuild control. Mounted on the REALM LIST — the surface a
+	// user with a built map actually looks at, and the one where "369 of 2510" was invisible.
+	import MapFreshness from './MapFreshness.svelte';
 
 	// Per-territory "describe more": deepen narration coverage for just this territory
 	// (POST /mycelium/describe-more {territoryId} → spawns describe-chronicles.js as a
@@ -676,6 +679,12 @@
 				{/if}
 			{/if}
 
+			<!-- ⚠️ MOUNTED UNCONDITIONALLY at the realm level, deliberately (D-004). It is NOT
+			     nested under the naming card's cardState, and NOT under `sortedRealms.length > 0`:
+			     the whole defect was a remedy that existed only behind a condition the user could
+			     not reach. This component owns its own honest empty/unknown states. -->
+			<MapFreshness />
+
 			{#if totalMessages > 0}
 				<div class="nav-footer">
 					{totalMessages.toLocaleString()} messages · {totalRealms} {totalRealms === 1 ? 'area' : 'areas'}
@@ -1235,6 +1244,13 @@
 	.nav-content {
 		flex: 1;
 		overflow-y: auto;
+		/* D-034. `overflow-y: auto` alone does NOT make a flex child scroll. A flex item's
+		   default `min-height: auto` lets it grow to its content instead of shrinking to its
+		   flex basis, so the box is always exactly as tall as what is inside it and there is
+		   never any overflow to scroll. The detail panel therefore rendered its full height
+		   and the content below the fold was simply unreachable. `min-height: 0` restores the
+		   shrink so the overflow rule above can actually take effect. */
+		min-height: 0;
 	}
 
 	/* Section header (realm/theme summary) */

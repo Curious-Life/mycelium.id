@@ -1,4 +1,5 @@
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import fs from 'node:fs';
 import { CONTRACTS } from './metrics/contracts.js';
 import { METRIC_COLUMNS, _internal as metricsInternal } from './db/metrics.js';
@@ -106,8 +107,7 @@ function figureRealmAsset() {
  * Surfaces the now-populated measurement plane (cognitive harmonics, vitality,
  * Fisher trajectory + phase + milestones, metric freshness) to the HUMAN over
  * HTTP so the shipped portal pages render real numbers instead of
- * "Era unavailable". Ported from reference/server-routes/{portal-metrics,
- * portal-vitality,portal-trajectory,portal-metric-freshness,internal-metrics}.js
+ * "Era unavailable". Ported from the canonical portal metrics routes
  * and adapted to V1: single-user, in-process, local SQLite — every
  * Cloudflare-Worker / multi-tenant / remote-fetch hop stripped.
  *
@@ -141,6 +141,7 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   // gated identically and a missing owner is always fail-closed.
   const owner = (req, res) => {
     const u = authenticatePortalRequest(req);
+    if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; }
     if (!u || !u.id) { res.status(401).json({ error: 'Unauthorized' }); return null; }
     return u;
   };

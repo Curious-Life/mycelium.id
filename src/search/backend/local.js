@@ -1,7 +1,7 @@
 /**
  * LocalBackend — composes the mind-search primitives into a working backend.
  *
- * Ported from reference/mind-search/backend/local.js, reduced for the V1
+ * Ported from the canonical mind-search module, reduced for the V1
  * single-user build:
  *   - Embedder is INJECTED (sibling unit R2 owns the real one); no masterKey /
  *     scopes / persist / metrics / degrade-tier orchestrator deps. Those land

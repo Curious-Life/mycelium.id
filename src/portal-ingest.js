@@ -11,6 +11,7 @@
 // docs/STREAMS-INGESTION-MCP-DESIGN-2026-06-16.md. Owner-gated (loopback OR the
 // owner's static Bearer) because it writes vault plaintext.
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { captureMessage } from './ingest/capture.js';
 
 const MAX_BATCH = 1000;
@@ -20,6 +21,7 @@ export function portalIngestRouter({ db, userId = 'local-user', enqueueEnrichmen
   const router = express.Router();
   const auth = (req, res) => {
     const u = authenticatePortalRequest(req);
+    if (isCsrfDeny(u)) { res.status(403).json({ ok: false, error: 'csrf' }); return null; }
     if (!u) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return null; }
     return u;
   };

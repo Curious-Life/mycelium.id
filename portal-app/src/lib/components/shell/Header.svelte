@@ -6,6 +6,7 @@
 	import { theme } from '$lib/stores/theme';
 	import { viewLabel } from '$lib/nav/config';
 	import { workspace } from '$lib/workspace/store';
+	import { goBackIntent } from '$lib/nav/back-intent';
 	import TabStrip from '$lib/components/workspace/TabStrip.svelte';
 	import type { WsNode, LeafPane } from '$lib/workspace/types';
 	import { activity, startActivityPolling, fmtAgo, isFreshError } from '$lib/stores/activity';
@@ -77,7 +78,8 @@
 	// ── R4-SWIPEBACK: two-finger horizontal swipe → app-level Back ──────────────────────────────
 	// The workspace authors its own URL with replaceState, so in-app view switches leave NO browser
 	// history entry and the OS/WebKit Back gesture has nothing to return to. Map the macOS back
-	// gesture onto the workspace's OWN view-history back-stack (workspace.back()). Bound at the WINDOW
+	// gesture onto a UNIFIED back (goBackIntent — D-035): it walks the mindscape's internal drill-down
+	// history first, then falls through to the workspace's OWN view-history back-stack. Bound at the WINDOW
 	// so a swipe anywhere navigates — but GUARDED so it never hijacks a legitimate in-view horizontal
 	// scroll: if the gesture starts over an element that can still scroll horizontally in that
 	// direction (a wide table, a code block, the tab strip), that element keeps the gesture.
@@ -121,7 +123,11 @@
 			// so nothing legitimate is being blocked). Requires the passive:false listener below.
 			if (e.cancelable) e.preventDefault();
 			accum += e.deltaX;
-			if (!fired && accum <= -THRESHOLD) { fired = true; workspace.back(); }
+			// D-035: route the back through the unified coordinator, not workspace.back()
+			// directly — it walks the mindscape's internal drill-down (detail → territory →
+			// realm) FIRST and only pops the workspace VIEW once the mindscape is at its top
+			// level (or is not the focused view). One coherent back, not two competing ones.
+			if (!fired && accum <= -THRESHOLD) { fired = true; goBackIntent(); }
 			endSoon();
 		}
 		window.addEventListener('wheel', onWheel, { passive: false });

@@ -43,6 +43,7 @@ import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { stripCommentsFor } from './lib/strip-comments.mjs';
 import crypto from 'node:crypto';
 
 const DB = 'data/verify-provider-import.db';
@@ -66,8 +67,10 @@ const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAI
 const CLEAN = [DB, KCV, `${DB}-shm`, `${DB}-wal`];
 
 /** Source with comments stripped. Structural checks must read CODE, not prose — an earlier
- *  version "passed" on a regex that matched the word it was hunting inside a comment. */
-const codeOf = (p) => readFileSync(p, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+ *  version "passed" on a regex that matched the word it was hunting inside a comment. The
+ *  strip itself is now ONE lexical scanner (scripts/lib/strip-comments.mjs, gated by
+ *  verify:strip-comments): the regex pair here missed TRAILING `//` comments outright. */
+const codeOf = (p) => stripCommentsFor(p, readFileSync(p, 'utf8'));
 
 async function main() {
   for (const f of CLEAN) rmSync(f, { force: true });
@@ -402,7 +405,7 @@ async function main() {
           keepAwake: { enabled: false },
           // A REAL canonical-vault key with NO V1 reader — the witness for why a denylist
           // beats an allowlist. Canonical writes it at
-          // reference/server-routes/portal-settings.js:118 (and portal-ws.js:643); a sweep
+          // the canonical portal route (and portal-ws.js:643); a sweep
           // of src/ + portal-app/ finds no reader. An allowlist would silently delete it on
           // the one path whose job is to bring the user's vault home.
           // NOT an invented key: the earlier `canonicalOnlyPref`/`theme` versions asserted

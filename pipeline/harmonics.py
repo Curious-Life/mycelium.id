@@ -278,8 +278,7 @@ def _safe_hilbert(signal) -> np.ndarray:
     whose phase winds around the offset and whose envelope is dominated by the
     constant, distorting both instantaneous phase and amplitude. Removing the
     mean isolates the oscillatory component, matching the reference PAC/PLV
-    implementations (research/multi-scale-surprisal-harmonic-coherence-research-
-    2026-05-07.md). Demeaning leaves the std unchanged, so the constant-signal
+    implementations (the canonical harmonic-coherence research note). Demeaning leaves the std unchanged, so the constant-signal
     guard below still fires for a flat input (→ explicit zeros).
     """
     arr = np.asarray(signal, dtype=np.float64).ravel()

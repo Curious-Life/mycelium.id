@@ -1,9 +1,21 @@
 <script lang="ts">
 	import Tab from './Tab.svelte';
 	import { get } from 'svelte/store';
+	import { browser } from '$app/environment';
 	import { REGISTRY } from '$lib/workspace/registry';
 	import { workspace, tabDrag, type DropEdge } from '$lib/workspace/store';
 	import type { Tab as TabT } from '$lib/workspace/types';
+
+	// D-035. Teleport the menu to <body> so a `fixed` overlay escapes the tab strip's
+	// clipping/stacking ancestors — `.pane { overflow:hidden }` and, inline, `.app-header`
+	// (overflow-hidden + a backdrop-filter containing block that traps even position:fixed).
+	// `position: fixed` ALONE is not enough in the header case; the header's own activity
+	// dropdown teleports for exactly this reason (Header.svelte `portal`). Same pattern here.
+	function portal(node: HTMLElement, target: string = 'body') {
+		const dest = (browser && document.querySelector(target)) || null;
+		if (dest) dest.appendChild(node);
+		return { destroy() { node.remove(); } };
+	}
 
 	let { tabs, activeTabId, paneId, onfocus, onclose, onopen, onreorder, inline = false }: {
 		tabs: TabT[];
@@ -18,6 +30,32 @@
 
 	let menuOpen = $state(false);
 	const sections = Object.entries(REGISTRY).map(([id, v]) => ({ id, title: v.title }));
+
+	// D-035. The "+" (open-a-view) menu was `position: absolute` inside the tab strip,
+	// which lives in a `.pane` (overflow:hidden) and, inline, in `.app-header`
+	// (overflow-hidden + `relative z-10` stacking). Either ancestor CLIPS an absolutely
+	// positioned descendant and traps it below sibling panes — the menu opened underneath
+	// other UI. Header.svelte already documents this exact trap. Fix: pin the menu to the
+	// VIEWPORT (`position: fixed`, z-index above every pane, matching CommandPalette's 1000)
+	// and compute its anchor from the button's live rect on open, so it escapes both the
+	// clip and the stacking context. Recomputed on scroll/resize while open.
+	let menuBtn = $state<HTMLButtonElement | null>(null);
+	let menuPos = $state<{ top: number; right: number }>({ top: 0, right: 0 });
+	function anchorMenu() {
+		if (!menuBtn) return;
+		const r = menuBtn.getBoundingClientRect();
+		// right-aligned to the button, dropped just below it.
+		menuPos = { top: Math.round(r.bottom + 4), right: Math.round(window.innerWidth - r.right) };
+	}
+	function toggleMenu() {
+		menuOpen = !menuOpen;
+		if (menuOpen) anchorMenu();
+	}
+
+	// Keep the fixed menu glued to the button while it's open (top-level, not inside the
+	// {#if} — svelte:window cannot be nested). Cheap no-ops when the menu is closed.
+	function onWinScroll() { if (menuOpen) anchorMenu(); }
+	function onWinResize() { if (menuOpen) anchorMenu(); }
 
 	function pick(id: string) {
 		menuOpen = false;
@@ -126,6 +164,8 @@
 <!-- data-tabstrip-pane: the Sidebar's drag-a-section gesture hit-tests for this
      attribute on drop and opens the dragged view in THIS pane (explicit new-tab
      intent — see Sidebar.svelte's nav drag handlers). -->
+<svelte:window onscroll={onWinScroll} onresize={onWinResize} />
+
 <div class="tab-strip" class:inline role="tablist" data-tabstrip-pane={paneId}>
 	<div class="tabs" role="group" bind:this={tabsEl} onpointerdown={onPointerDown} onclickcapture={onClickCapture}>
 		{#each tabs as tab (tab.id)}
@@ -141,13 +181,15 @@
 
 	<div class="actions">
 		<div class="new-wrap">
-			<button class="strip-btn" title="Open a view" aria-label="Open a view" aria-haspopup="menu" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>+</button>
+			<button bind:this={menuBtn} class="strip-btn" title="Open a view" aria-label="Open a view" aria-haspopup="menu" aria-expanded={menuOpen} onclick={toggleMenu}>+</button>
 			{#if menuOpen}
-				<button class="menu-backdrop" tabindex="-1" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>
-				<div class="menu" role="menu">
-					{#each sections as s}
-						<button class="menu-item" role="menuitem" onclick={() => pick(s.id)}>{s.title}</button>
-					{/each}
+				<div use:portal>
+					<button class="menu-backdrop" tabindex="-1" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>
+					<div class="menu" role="menu" style="top: {menuPos.top}px; right: {menuPos.right}px;">
+						{#each sections as s}
+							<button class="menu-item" role="menuitem" onclick={() => pick(s.id)}>{s.title}</button>
+						{/each}
+					</div>
 				</div>
 			{/if}
 		</div>
@@ -172,9 +214,11 @@
 		display: flex; align-items: center; justify-content: center;
 	}
 	.strip-btn:hover { color: var(--color-text-primary); background: var(--color-elevated); }
-	.menu-backdrop { position: fixed; inset: 0; z-index: 40; background: transparent; border: none; cursor: default; }
+	.menu-backdrop { position: fixed; inset: 0; z-index: 999; background: transparent; border: none; cursor: default; }
 	.menu {
-		position: absolute; top: 38px; right: 4px; z-index: 50; min-width: 160px;
+		/* D-035: viewport-pinned (top/right set inline from the button's rect) so no
+		   ancestor overflow-hidden clips it and no pane stacking context paints over it. */
+		position: fixed; z-index: 1000; min-width: 160px;
 		background: var(--color-elevated); border: 1px solid var(--color-border);
 		border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-lg, 0 10px 30px rgba(0,0,0,0.4));
 		padding: 4px; display: flex; flex-direction: column;

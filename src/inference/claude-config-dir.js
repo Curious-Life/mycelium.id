@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { subscriptionTokenFrom } from './subscription-token.js';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import { dataDir } from '../paths.js';
@@ -47,6 +47,35 @@ export function claudeConfigCredsPath(opts = {}) {
 }
 
 /**
+ * Delete the config-dir-namespaced macOS Keychain item (`Claude Code-credentials-<hash>`) where
+ * `claude` keeps its OWN refreshed credential for this isolated dir. Synchronous + fail-soft (a
+ * missing item / non-darwin / access-declined is a no-op) — never throws, never logs the token.
+ *
+ * WHY (D-021): on an EXPLICIT reconnect the app force-seeds the NEW token into the seed FILE
+ * (<dir>/.credentials.json) and the DB row, but `claude` on macOS reads/refreshes its credential
+ * from this NAMESPACED Keychain item, NOT the seed file — and nothing here ever wrote it (claude
+ * did). So after a reconnect the file+DB hold the new token while the Keychain still holds the OLD
+ * (now server-revoked) one. The NATIVE wire merges file+keychain and picks the freshest-expiring, so
+ * the freshly-seeded file wins → Telegram/native turns recover. But the CLI harness spawns `claude`,
+ * which reads ONLY this Keychain item → it keeps authenticating as the stale session → portal chat
+ * on the Claude Code engine stays broken after a successful reconnect (Telegram works on the same
+ * credential). Clearing the item forces the next `claude` spawn to re-adopt the freshly-seeded FILE
+ * creds (new access + refresh token) and write a fresh Keychain item.
+ *
+ * @returns {boolean} true when a delete was issued (item existed and was removed), false otherwise.
+ */
+export function clearNamespacedKeychain({ env = process.env, platform = process.platform, execSyncImpl = execFileSync } = {}) {
+  if (platform !== 'darwin') return false;
+  try {
+    // `delete-generic-password` exits non-zero (→ throws) when the item is absent: that is the
+    // COMMON, benign case (first-time connect, or claude never migrated the seed to the Keychain),
+    // so swallow it. Success means a stale item was actually cleared.
+    execSyncImpl('security', ['delete-generic-password', '-s', claudeKeychainService({ env })], { timeout: 5000, stdio: 'ignore' });
+    return true;
+  } catch { return false; }
+}
+
+/**
  * Seed the isolated dir with the connected subscription's creds so `claude --config-dir` auths
  * as THAT account. Idempotent + non-clobbering: if the dir ALREADY holds a token (claude has
  * been refreshing its own copy), we leave it — writing our older stored token back would undo a
@@ -56,7 +85,7 @@ export function claudeConfigCredsPath(opts = {}) {
  * @param {{claudeOAuthToken?:string, accessToken?:string, refreshToken?:string|null, expiresAt?:number|null, scopes?:string[]}|null} creds
  *        the app's stored subscription credentials (db.providers.get(...).credentials, parsed)
  */
-export function seedClaudeConfigDir(creds, { env = process.env, force = false } = {}) {
+export function seedClaudeConfigDir(creds, { env = process.env, force = false, clearKeychainImpl = clearNamespacedKeychain } = {}) {
   // subscriptionTokenFrom is the ONE definition of these shapes — this line used to
   // hand-roll the same list (instance #4 of that drift; see the handoff). Identical today,
   // which is exactly why it was invisible: the bug only appears the day the shared list
@@ -97,6 +126,13 @@ export function seedClaudeConfigDir(creds, { env = process.env, force = false } 
       },
     };
     writeFileSync(credsPath, JSON.stringify(payload), { mode: 0o600 });
+    // EXPLICIT connect/reconnect (force): the seed FILE now holds the intended token, but on macOS
+    // `claude` reads/refreshes from the config-dir-namespaced Keychain item — which may still hold
+    // the OLD (revoked) credential. Clear it so the next `claude` spawn re-adopts THIS file's creds,
+    // instead of silently authenticating as the stale session (D-021: portal CLI chat stayed broken
+    // after reconnect while native/Telegram — which prefers the fresh file — recovered). Boot re-seed
+    // is non-forcing, so it never reaches here and never disturbs claude's own live Keychain refresh.
+    if (force) clearKeychainImpl({ env });
     return true;
   } catch { return false; }
 }

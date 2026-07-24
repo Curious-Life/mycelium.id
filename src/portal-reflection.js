@@ -13,6 +13,7 @@
 // here sends to a channel.
 
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { seedReflectionCycles as realSeed } from './agent/seed-cycles.js';
 import { CYCLE_CREATED_BY } from './agent/cycle-prompts.js';
 import { humanSchedule, humanNextRun, computeNextRun } from './agent/scheduler-time.js';
@@ -32,7 +33,7 @@ export function portalReflectionRouter({ db, userId, authenticatePortalRequest, 
   router.use(express.json({ limit: '256kb' }));
   // Owner gate (defense in depth): enabling autonomous cycles is a sensitive control,
   // so every route resolves the owner independently of the global /api gate.
-  const gate = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'unauthorized' }); return false; } return true; };
+  const gate = (req, res) => { const u = authenticatePortalRequest(req); if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return false; } if (!u) { res.status(401).json({ error: 'unauthorized' }); return false; } return true; };
 
   const listCycleTasks = async () => {
     const tasks = await db.harness.listTasks(userId).catch(() => []);

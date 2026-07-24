@@ -1462,7 +1462,7 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   });
 
   // Un-dismiss — "show setup guidance again" (§3.7b). Ported from
-  // reference/server-routes/portal-onboarding.js:285-295; the CLIENT ROUTE ALREADY EXISTED
+  // the canonical portal route; the CLIENT ROUTE ALREADY EXISTED
   // (secure-fetch.ts:180) and 404'd, so the undo has been unreachable since the rail shipped.
   //
   // ⚠️ WHY THIS IS NON-NEGOTIABLE, not a nicety: the rail is gated on `!dismissed`, and

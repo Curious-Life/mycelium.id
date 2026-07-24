@@ -3,7 +3,7 @@
  *
  * The REAL embedder wraps embed-service (Nomic v1.5 ONNX, 768D, task prefixes)
  * on :8091 — owned by a SIBLING unit (R2) and NOT present in this worktree.
- * Ported (shape) from reference/mind-search/embedder.js, which built an HTTP
+ * Ported (shape) from the canonical mind-search module, which built an HTTP
  * client. Here mind-search only depends on the INTERFACE below; the concrete
  * client is injected at boot. Real-embedding parity is gated on R2.
  *

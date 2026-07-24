@@ -120,6 +120,21 @@ const SLICES = {
     ],
     overall: 'blocked', blockedOn: 'embedder_down',
   },
+  // D-025 C4: an overall the server calls `done` that STILL carries a blocked stage. The
+  // collapse predicate must refuse to go quiet here — `overall` alone is not enough evidence
+  // that there is nothing to act on. (Real shape: a settled measure pass while categorize is
+  // still waiting on an approved model.)
+  doneblocked: {
+    stages: [
+      { key: 'import', state: 'done', count: { done: 100 } },
+      { key: 'embed', state: 'done', count: { done: 100, total: 100 } },
+      { key: 'categorize', state: 'blocked', reason: 'no_model', action: A_APPROVE, paused: false },
+      { key: 'cluster', state: 'done', count: { done: 20 } },
+      { key: 'describe', state: 'done' },
+      { key: 'measure', state: 'done' },
+    ],
+    overall: 'done', blockedOn: null,
+  },
   // An empty vault: idle, import pending — no spinner, no fabricated running/done.
   idle: {
     stages: [
@@ -224,6 +239,17 @@ try {
   // the button's disabled state after the click+flush — busy (in-flight) so it reads true. ───────
   // CTRL=<pause|resume|restart> clicks the co-located per-stage CONTROL (R2/R3) within the CLICK
   // stage instead of the generic `.pipe-action` remedy; absent, the generic action is clicked.
+  // ── D-025 collapse drive: EXPAND=1 clicks the settled card's disclosure caret before the
+  // report is taken, so the gate can prove the stage list is REACHABLE when collapsed (a
+  // collapse that cannot be opened is a new dead end, not a fix). On an unsettled probe the
+  // toggle does not exist and this is a no-op — which is itself asserted (C2). ────────────
+  let toggleExisted = null;
+  if (process.env.EXPAND === '1') {
+    const tgl = D.querySelector('button.pipe-toggle');
+    toggleExisted = !!tgl;
+    if (tgl) { tgl.click(); flushSync(); }
+  }
+
   let clickedDisabledAfter = null;
   const clickKey = process.env.CLICK;
   const clickCtrl = process.env.CTRL;
@@ -305,6 +331,16 @@ try {
     actionCount: D.querySelectorAll('button.pipe-action').length,
     ctrlCount: D.querySelectorAll('button.pipe-ctrl').length,
     spinnerCount: D.querySelectorAll('.pipe-spin').length,
+    // ⭐ D-025 collapse proof, read off the DOM the component actually produced:
+    //   settled       — the component's own predicate, stamped as data-settled
+    //   expanded      — whether the stage list is currently shown (data-expanded)
+    //   stageCount    — how many stage rows EXIST (0 ⇒ genuinely collapsed, not just styled)
+    //   toggleVisible — the disclosure caret is present and reachable
+    settled: D.querySelector('.pipe')?.getAttribute('data-settled') === '1',
+    expanded: D.querySelector('.pipe')?.getAttribute('data-expanded') === '1',
+    stageCount: D.querySelectorAll('.pipe-stage').length,
+    toggleVisible: (() => { const b = D.querySelector('button.pipe-toggle'); return b ? visible(b) : false; })(),
+    toggleExisted,
     // ⭐ Unit-4 wiring proof: which remedy(ies) the click fired, and the in-flight disabled state.
     calls: [...spies.calls],
     clickedDisabledAfter,

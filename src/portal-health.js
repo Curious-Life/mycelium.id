@@ -9,6 +9,7 @@
 // charts/trends need typed rows, not free-text events. Owner-gated (loopback OR
 // the owner's static Bearer) — it reads/writes vault plaintext.
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 
 const MAX_SYNC_DAYS = 60;
 
@@ -20,6 +21,7 @@ export function portalHealthRouter({ db, userId = 'local-user', authenticatePort
   const router = express.Router();
   const auth = (req, res) => {
     const u = authenticatePortalRequest(req);
+    if (isCsrfDeny(u)) { res.status(403).json({ ok: false, error: 'csrf' }); return null; }
     if (!u) { res.status(401).json({ ok: false, error: 'Unauthorized' }); return null; }
     return u;
   };

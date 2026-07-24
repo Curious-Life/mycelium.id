@@ -411,39 +411,74 @@
 </div>
 
 <style>
+	/*
+	 * D-024 — "agent character page elements need to adapt to light vs dark mode,
+	 * the boxes there are all dark mode even in white" (operator, v0.1.12 QA).
+	 *
+	 * ROOT CAUSE: this stylesheet referenced tokens that DO NOT EXIST — `--border`,
+	 * `--surface`, `--input`, `--accent`. The app's design system (src/lib/styles/
+	 * tokens.css) names them `--color-border`, `--color-surface`, `--color-elevated`
+	 * and `--color-accent`, and re-declares each under `[data-theme="light"]`. Because
+	 * the short names were never declared anywhere, EVERY `var(--border, #2a2a33)`
+	 * silently resolved to its hardcoded DARK fallback — in both themes. The page was
+	 * not "ignoring" light mode; it was never wired to the theme at all.
+	 *
+	 * FIX: use the real semantic tokens, with no hex fallbacks that could mask a
+	 * future rename the same way. This is the EXISTING mechanism (the `data-theme`
+	 * attribute the theme store stamps on <html>) — no new theming machinery.
+	 * Verified by scripts/verify-character-theme.mjs, which fails if an undeclared
+	 * custom property reappears here.
+	 */
 	/* The pane body is overflow:hidden, so the view must own its own scroll — matches
 	   the AgentsView/SettingsView pattern. Without this a tall character page clips. */
 	.page { height: 100%; overflow-y: auto; }
 	.character { max-width: 720px; margin: 0 auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem; }
-	.back { align-self: flex-start; background: transparent; border: 0; color: var(--accent, #9a86e0);
+	.back { align-self: flex-start; background: transparent; border: 0; color: var(--color-accent);
 		cursor: pointer; padding: .1rem .1rem; font-size: .85rem; }
 	.back:hover { text-decoration: underline; }
 	.head { display: flex; align-items: center; gap: 1rem; }
+	/* The avatar is a deliberate saturated gradient in BOTH themes (it is an identity
+	   mark, not a surface), so white glyph text on it stays correct either way. */
 	.avatar { width: 64px; height: 64px; border-radius: 16px; display: grid; place-items: center; font-size: 1.9rem;
 		background: linear-gradient(135deg, hsl(var(--hue) 60% 55%), hsl(calc(var(--hue) + 40deg) 55% 42%)); color: #fff; }
-	h1 { font-size: 1.4rem; margin: 0; } .sub { margin: .2rem 0 0; opacity: .7; font-size: .9rem; }
-	.card { border: 1px solid var(--border, #2a2a33); border-radius: 12px; padding: 1rem 1.15rem; background: var(--surface, #16161c); }
-	.card h2 { margin: 0 0 .6rem; font-size: 1.05rem; }
+	h1 { font-size: 1.4rem; margin: 0; color: var(--color-text-emphasis); }
+	.sub { margin: .2rem 0 0; opacity: .7; font-size: .9rem; color: var(--color-text-secondary); }
+	.card { border: 1px solid var(--color-border); border-radius: 12px; padding: 1rem 1.15rem;
+		background: var(--color-surface); color: var(--color-text-primary); }
+	.card h2 { margin: 0 0 .6rem; font-size: 1.05rem; color: var(--color-text-primary); }
 	.row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-top: .6rem; }
 	.field { display: flex; flex-direction: column; gap: .25rem; margin: .5rem 0; font-size: .85rem; }
-	input[type=text], textarea { width: 100%; padding: .5rem .6rem; border-radius: 8px; border: 1px solid var(--border, #2a2a33);
-		background: var(--input, #0e0e12); color: inherit; font: inherit; box-sizing: border-box; }
+	input[type=text], textarea { width: 100%; padding: .5rem .6rem; border-radius: 8px; border: 1px solid var(--color-border);
+		background: var(--color-bg); color: var(--color-text-primary); font: inherit; box-sizing: border-box; }
+	input[type=text]::placeholder, textarea::placeholder { color: var(--color-text-tertiary); }
+	input[type=text]:focus, textarea:focus { outline: none; border-color: var(--color-accent); }
 	textarea { resize: vertical; line-height: 1.5; }
-	button { padding: .45rem .8rem; border-radius: 8px; border: 1px solid var(--border, #2a2a33); background: var(--accent, #6b4fbb); color: #fff; cursor: pointer; }
+	/* The filled button keeps its contrast in both themes by painting the app
+	   background as its LABEL colour (the same pairing the settings buttons use),
+	   instead of a fixed #fff that vanished on the light accent. */
+	button { padding: .45rem .8rem; border-radius: 8px; border: 1px solid transparent;
+		background: var(--color-accent); color: var(--color-bg); cursor: pointer; }
 	button:disabled { opacity: .5; cursor: default; }
-	button.ghost, button.link { background: transparent; color: var(--accent, #9a86e0); }
+	button.ghost, button.link { background: transparent; color: var(--color-accent); border-color: var(--color-border); }
 	button.link { border: 0; padding: .2rem .4rem; font-size: .82rem; text-decoration: underline; }
-	button.rec { background: #b33; } .upload { cursor: pointer; padding: .45rem .8rem; border: 1px solid var(--border, #2a2a33); border-radius: 8px; }
-	.mic-select { padding: .45rem .6rem; border-radius: 8px; border: 1px solid var(--border, #2a2a33); background: var(--glass-input-bg, transparent); color: var(--color-text-primary, inherit); font-size: .82rem; max-width: 220px; cursor: pointer; }
-	.meta { display: flex; justify-content: space-between; gap: 1rem; font-size: .8rem; opacity: .75; margin-top: .4rem; flex-wrap: wrap; }
-	.meta .over { color: #e6a23c; } .muted { opacity: .65; font-size: .88rem; } .note { font-size: .78rem; opacity: .6; margin-top: .5rem; }
-	.set { font-weight: 600; } .ready { color: #4caf82; font-size: .85rem; }
-	.sep { border: 0; border-top: 1px solid var(--border, #2a2a33); margin: .8rem 0; }
-	.err { color: #e06c75; font-size: .85rem; margin-top: .4rem; } .warn { color: #e6a23c; font-size: .85rem; }
+	button.rec { background: var(--color-accent-coral); color: var(--color-bg); }
+	.upload { cursor: pointer; padding: .45rem .8rem; border: 1px solid var(--color-border); border-radius: 8px;
+		color: var(--color-text-secondary); }
+	.mic-select { padding: .45rem .6rem; border-radius: 8px; border: 1px solid var(--color-border); background: var(--glass-input-bg); color: var(--color-text-primary); font-size: .82rem; max-width: 220px; cursor: pointer; }
+	.meta { display: flex; justify-content: space-between; gap: 1rem; font-size: .8rem; opacity: .75; margin-top: .4rem; flex-wrap: wrap;
+		color: var(--color-text-secondary); }
+	.meta .over { color: var(--color-accent-aurum); }
+	.muted { opacity: .65; font-size: .88rem; color: var(--color-text-secondary); }
+	.note { font-size: .78rem; opacity: .6; margin-top: .5rem; color: var(--color-text-tertiary); }
+	.set { font-weight: 600; } .ready { color: var(--color-accent-jade); font-size: .85rem; }
+	.sep { border: 0; border-top: 1px solid var(--color-border); margin: .8rem 0; }
+	.err { color: var(--color-accent-coral); font-size: .85rem; margin-top: .4rem; }
+	.warn { color: var(--color-accent-aurum); font-size: .85rem; }
 	.history { margin-left: auto; font-size: .85rem; } .history ul { list-style: none; padding: 0; margin: .4rem 0 0; }
 	.history li { display: flex; gap: .5rem; align-items: center; padding: .15rem 0; }
-	.diff { margin-top: .7rem; border: 1px solid var(--border, #2a2a33); border-radius: 8px; overflow: auto; }
-	.diff-head { padding: .4rem .6rem; font-size: .82rem; display: flex; justify-content: space-between; border-bottom: 1px solid var(--border, #2a2a33); }
+	.diff { margin-top: .7rem; border: 1px solid var(--color-border); border-radius: 8px; overflow: auto;
+		background: var(--color-bg); }
+	.diff-head { padding: .4rem .6rem; font-size: .82rem; display: flex; justify-content: space-between; border-bottom: 1px solid var(--color-border); }
 	.diff pre { margin: 0; padding: .5rem .6rem; font-size: .8rem; line-height: 1.45; white-space: pre-wrap; }
-	.diff .add { color: #4caf82; } .diff .del { color: #e06c75; } .diff .omitted { opacity: .6; font-style: italic; }
+	.diff .add { color: var(--color-accent-jade); } .diff .del { color: var(--color-accent-coral); } .diff .omitted { opacity: .6; font-style: italic; }
 </style>

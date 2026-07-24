@@ -1,7 +1,7 @@
 /**
  * In-memory inverted index for the BM25 keyword path.
  *
- * Ported verbatim from reference/mind-search/index/inverted.js.
+ * Ported verbatim from the canonical mind-search module.
  *
  *   postings  : Map<token, Posting[]>      term → docs containing it
  *   documents : Map<id, { ts, length }>    doc → metadata

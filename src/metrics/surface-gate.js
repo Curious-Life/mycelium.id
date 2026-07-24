@@ -21,7 +21,7 @@
  * classify). The harmonic families are non-Tier-1 and carry contracts, so they
  * pass; the four Tier-1 anchor families are 'pending', so they refuse.
  *
- * Spec: research/mycelium-cognitive-measurement-unified-2026-06-04.md §2.2
+ * Spec: the canonical research note §2.2
  * field 7 (presentation contract) + §2.3 (CVP mandatory gate). Audit finding S1
  * in docs/METRICS-AUDIT-vs-LITERATURE-2026-06-19.md.
  */

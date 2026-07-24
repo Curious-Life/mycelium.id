@@ -1,7 +1,7 @@
 // MCP tool registration seam (low-level Server).
 //
 // VERIFIED CONTRACT (4th sweep + reference reads):
-//   - reference/ has NO @modelcontextprotocol/sdk; tool factories are plain
+//   - the canonical tree has NO @modelcontextprotocol/sdk; tool factories are plain
 //     createXDomain(deps) -> { tools, handlers } where each tool is
 //     { name, description, inputSchema(JSON-Schema) } and each handler is
 //     async (args) => string.

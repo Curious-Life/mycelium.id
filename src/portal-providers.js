@@ -33,7 +33,10 @@ import { probeClaudeCredential } from './inference/claude-sources.js';
 import { startPkceFlow, exchangeCode, refreshAccessToken, createPkceFlowStore, ClaudePkceError } from './inference/claude-pkce.js';
 import { resolveClaudeBin } from './inference/claude-bin.js';
 import { probeClaudeCli } from './inference/claude-cli-status.js';
+import { installClaudeCli, updateClaudeCli } from './inference/claude-cli-install.js';
+import { isSameOriginRequest } from './http/require-vault-auth.js';
 import { seedClaudeConfigDir, refreshClaudeConfigDirToken } from './inference/claude-config-dir.js';
+import { invalidateSubscriptionTokenCache } from './inference/resolve.js';
 import { getSubscriptionAuthValidity, recordSubscriptionRefreshOutcome } from './inference/subscription-auth-signal.js';
 import { isCliEngineReady } from './agent/harnesses/index.js';
 
@@ -192,7 +195,7 @@ export { KNOWN as __knownProvidersForTest };
 // device-store probe, the real ToS-clean refresher, the real evidence projection) so the
 // status + refresh routes can be gated deterministically without touching this machine's
 // Keychain or spawning `claude`.
-export function portalProvidersRouter({ db, userId = 'local-user', fetch = globalThis.fetch, probeCredential = probeClaudeCredential, refreshToken = refreshClaudeConfigDirToken, authValidity = getSubscriptionAuthValidity } = {}) {
+export function portalProvidersRouter({ db, userId = 'local-user', fetch = globalThis.fetch, probeCredential = probeClaudeCredential, refreshToken = refreshClaudeConfigDirToken, authValidity = getSubscriptionAuthValidity, importClaudeCli = importFromClaudeCli, installCli = installClaudeCli, updateCli = updateClaudeCli, requireSameOrigin = isSameOriginRequest } = {}) {
   if (!db?.providers) throw new Error('portalProvidersRouter: db.providers namespace required');
   const router = express.Router();
 
@@ -434,6 +437,44 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       ok(res, { harnessMode: mode });
     } catch { bad(res, 500, 'failed to update engine preference'); }
   });
+
+  // D-002 (operator reframe): the Engine panel must be able to INSTALL and UPDATE the
+  // `claude` CLI from the app — not just print a command the user runs in a terminal.
+  // Both run the OFFICIAL, fixed-command native installer (claude-cli-install.js) and
+  // then RE-PROBE: `ok` is reported ONLY when a usable binary actually appears, so a
+  // clean-exit-but-broken-install is never sold as success (§10 validate-every-op). The
+  // fresh `claude` status block is returned so the UI updates without a reload. Both
+  // are single-flight per process to stop a double-click launching two installers.
+  //
+  // SECURITY (F1 — CSRF on a code-exec endpoint). These SPAWN A PROCESS, so they must
+  // NOT rest on the loopback bypass alone (CLAUDE.md rule 2 — two independent layers).
+  // The global vault gate returns via:'loopback' for any 127.0.0.1 browser with NO CSRF
+  // check, so a cross-site page the user visits could auto-POST here. requireSameOrigin
+  // demands a genuine same-origin request (Sec-Fetch-Site: same-origin OR a valid
+  // double-submit CSRF token) BEFORE anything is spawned — a cross-site attacker can
+  // forge neither. Enforced first, even on loopback.
+  let cliActionRunning = false;
+  const runCliAction = async (req, res, action) => {
+    if (!requireSameOrigin(req)) return bad(res, 403, 'cross-site request refused');
+    if (cliActionRunning) return bad(res, 409, 'a CLI install/update is already running');
+    cliActionRunning = true;
+    try {
+      const r = await action();                    // never throws (structured verdict)
+      const claude = await probeClaudeCli().catch(() => null);
+      // Honest success: the action exited clean AND the re-probe now finds a USABLE
+      // CLI. Either half missing ⇒ ok:false with the reason the user can act on.
+      const usable = claude ? claude.usable : false;
+      ok(res, {
+        ok: r.ok && usable,
+        installed: !!(claude && claude.installed),
+        error: r.ok ? (usable ? null : 'installed-but-not-usable') : (r.error || 'action-failed'),
+        claude,
+      });
+    } catch { bad(res, 500, 'CLI action failed'); }
+    finally { cliActionRunning = false; }
+  };
+  router.post('/providers/harness/cli/install', (req, res) => runCliAction(req, res, () => installCli()));
+  router.post('/providers/harness/cli/update', (req, res) => runCliAction(req, res, () => updateCli()));
 
   // Agent-message capture consent — the opt-in control for AUTO-capturing
   // connected-agent conversations (Claude Code, the gateway, opencode, …) into
@@ -732,8 +773,6 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     for (const r of (await db.providers.list(userId)).filter(isSubscriptionRow)) {
       try { await db.providers.remove(r.id, userId); } catch { /* best-effort */ }
     }
-    let hadActive = false;
-    try { hadActive = (await db.providers.list(userId)).some((r) => r.is_active); } catch { /* fresh vault */ }
     const id = await db.providers.create(userId, {
       provider: 'anthropic',
       label: 'Claude subscription',
@@ -745,8 +784,28 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       model: null,
       baseUrl: null,
     });
+    // D-029 — AUTO-SELECT the connected subscription as the DEFAULT intelligence for
+    // chat + narration. Connecting a Claude subscription IS the deliberate "this is my
+    // main intelligence" act, so it becomes the active/default provider IMMEDIATELY —
+    // not only on a fresh vault. The prior guard (`if (!hadActive) setActive`) left the
+    // subscription INERT whenever ANY provider was already active (e.g. a BYOK key the
+    // user added earlier during onboarding), which is exactly the reported defect:
+    // connect the subscription, and chat + narration keep running the OLD model until
+    // the user hunts down the toggle. Operator, verbatim: "when i add claude
+    // subscription, it should automatically select it for conversations and narration".
+    //
+    // WHY THIS DOES NOT CLOBBER AN EXPLICIT CHOICE. The only per-task explicit choice a
+    // user can make is settings.taskModels[chat|narrate].providerId (Settings →
+    // Intelligence), and resolveInferenceConfigForTask (inference/resolve.js) honours
+    // THAT over the active provider — so a user who deliberately routed chat→Regolo
+    // keeps Regolo; setActive only moves the single GLOBAL default that UNASSIGNED
+    // chat/narrate tasks fall back to (resolveInferenceConfig → providers.getActive).
+    // Choosing your main intelligence IS choosing that default. (The generic BYOK
+    // POST /providers path keeps its first-only auto-activate: adding a *secondary* key
+    // must not hijack the default, and a subscription — one per vault, ToS-gated — is
+    // the unambiguous "main intelligence" signal that a spare API key is not.)
     let activated = false;
-    if (!hadActive) { try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal */ } }
+    try { await db.providers.setActive(id, userId); activated = true; } catch { /* non-fatal */ }
     // Seed the app's ISOLATED claude config dir so the CLI harness (when selected) and
     // the native wire share one live store.
     // force:true — this is an EXPLICIT connect: the user just chose this account, so it
@@ -754,7 +813,13 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     // reconnecting to a DIFFERENT account left the OLD token in the dir: the DB said
     // account B while CLI/native turns kept authenticating as account A. (Boot re-seed
     // still uses the default non-forcing call — it must not undo claude's own refresh.)
+    // The forced seed ALSO clears the config-dir-namespaced macOS Keychain item that `claude`
+    // reads (seedClaudeConfigDir → clearNamespacedKeychain), so the CLI harness re-adopts THIS
+    // token instead of the stale one it had cached (D-021).
     try { seedClaudeConfigDir(creds, { force: true }); } catch { /* non-fatal: token still stored in the DB row */ }
+    // Drop the native path's short-lived token cache too, so the reconnect is immediate on BOTH
+    // the CLI and native paths rather than lingering for up to the cache TTL (D-021).
+    try { invalidateSubscriptionTokenCache(); } catch { /* non-fatal */ }
     return { id, activated };
   }
 
@@ -839,7 +904,7 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   router.post('/auth/claude/import', async (req, res) => {
     if (req.body?.acknowledgeToS !== true) return bad(res, 400, TOS_MSG);
     let creds;
-    try { creds = await importFromClaudeCli(); }
+    try { creds = await importClaudeCli(); }
     catch (e) { return bad(res, 400, e instanceof ClaudeImportError ? e.message : 'failed to read Claude Code login'); }
     try {
       const { id, activated } = await persistSubscription(creds);

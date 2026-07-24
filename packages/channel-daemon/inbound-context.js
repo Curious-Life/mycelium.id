@@ -1,6 +1,6 @@
 /**
  * Active-turn registry — single source of truth for "what is this daemon
- * currently replying to." Harvested from reference/egress/inbound-context.js
+ * currently replying to." Harvested from the canonical egress module
  * (which mirrors the canonical packages/server/lib/inbound-context.js).
  *
  * V1 channel-daemon is one process per host running one agent. The single-user

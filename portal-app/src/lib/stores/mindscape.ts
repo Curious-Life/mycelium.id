@@ -362,6 +362,35 @@ function savePreferences(s: FullMindscapeState) {
 	} catch {}
 }
 
+// Pure: given the drill-down state, return the state ONE step up the mindscape's
+// internal history (detail → territories → themes → realms). Returns the SAME object
+// reference when already at the top, so a caller can detect "nothing to go back to"
+// by identity. Kept pure + module-level so the app-level back gesture (D-035) can be
+// driven in a test without the whole store.
+function MindscapeGoBackStep(s: FullMindscapeState): FullMindscapeState {
+	if (s.selectedTerritoryId !== null) {
+		return { ...s, selectedTerritoryId: null };
+	}
+	if (s.selectedSemanticThemeId !== null) {
+		return {
+			...s,
+			currentLevel: 'themes' as NavigationLevel,
+			selectedSemanticThemeId: null,
+			selectedTerritoryId: null,
+		};
+	}
+	if (s.selectedRealmId !== null) {
+		return {
+			...s,
+			currentLevel: 'realms' as NavigationLevel,
+			selectedRealmId: null,
+			selectedSemanticThemeId: null,
+			selectedTerritoryId: null,
+		};
+	}
+	return s;   // already at the top — identity return signals "no history to consume"
+}
+
 function createMindscapeStore() {
 	const initialState = { ...defaultState, ...loadPreferences() };
 	const { subscribe, set, update } = writable<FullMindscapeState>(initialState);
@@ -402,29 +431,23 @@ function createMindscapeStore() {
 			selectedTerritoryId: null,
 		})),
 
-		goBack: () => update(s => {
-			if (s.selectedTerritoryId !== null) {
-				return { ...s, selectedTerritoryId: null };
-			}
-			if (s.selectedSemanticThemeId !== null) {
-				return {
-					...s,
-					currentLevel: 'themes' as NavigationLevel,
-					selectedSemanticThemeId: null,
-					selectedTerritoryId: null,
-				};
-			}
-			if (s.selectedRealmId !== null) {
-				return {
-					...s,
-					currentLevel: 'realms' as NavigationLevel,
-					selectedRealmId: null,
-					selectedSemanticThemeId: null,
-					selectedTerritoryId: null,
-				};
-			}
-			return s;
-		}),
+		// Walk ONE step UP the mindscape's internal drill-down history
+		// (territory-detail → territories → themes → realms). Returns `true` iff it
+		// actually moved up a level, `false` when already at the top (realms, nothing
+		// selected). The boolean is what lets the app-level back gesture (D-035) know
+		// whether the mindscape consumed the back — walk the drill-down FIRST, and only
+		// fall through to the workspace VIEW-history back once this returns false. All
+		// existing callers (the detail back button, the 3D right-click) ignore the value,
+		// so this is backward-compatible.
+		goBack: (): boolean => {
+			let changed = false;
+			update(s => {
+				const next = MindscapeGoBackStep(s);
+				changed = next !== s;   // svelte's update runs synchronously → set before return
+				return next;
+			});
+			return changed;
+		},
 
 		resetNavigation: () => update(s => ({
 			...s,

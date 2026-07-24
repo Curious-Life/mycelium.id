@@ -10,6 +10,7 @@
 import { getBlob } from '../ingest/blob-store.js';
 import { clampStored } from './text-limits.js';
 import { audioFormatFor } from './transcribe-audio.js';
+import { admit, CLASS } from '../core/compute-governor.js';
 import { transcribeLongAudio } from './transcribe-long.js';
 import { getTranscriberHealth } from '../transcribe/supervisor.js';
 import { serviceState, isRetryable, transcribeNotReadyReason } from '../system/service-state.js';
@@ -50,6 +51,25 @@ export async function transcribeAttachment(db, userId, attachmentId, { onProgres
     return { ok: false, reason, detail: health?.status || 'unknown', retryable: state === 'loading' || isRetryable(health?.status), health: health || null };
   }
 
+  // COMPUTE GOVERNOR (D-001, review finding #2 / L14 — the operator's P7 run): faster_whisper is a
+  // ~1–3 GB model runtime, NOT Ollama-resident, and voice-note imports (WhatsApp/Telegram) routinely
+  // carry audio → whisper co-loads with the ONNX embed drain and a resident vision/describe model.
+  // That is the memory pile-up a count-of-1 RESIDENT gate does not catch. Transcription is a BULK
+  // lane. Reserve a BULK ticket for the whole decode; refused under memory pressure / a full BULK
+  // budget → return a RETRYABLE `compute-busy`, never a second concurrent heavy model. A leased
+  // backstop bounds a wedged decode (2 h cap upstream).
+  //
+  // ⚠️ WHO ACTUALLY RE-QUEUES A `compute-busy`: the BACKGROUND transcription drain
+  // (src/enrich/transcribe-retry.js), NOT this function's callers. The import path
+  // (ingest/run-import.js) is fire-and-forget and DISCARDS this result, and the portal
+  // /transcribe route is user-initiated — neither retries. Without the background drain a
+  // compute-busy voice note would be saved untranscribed and never revisited (round-2 review
+  // finding #1). The drain selects audio attachments with no transcript and retries them once
+  // capacity frees; a `compute-busy` there does NOT count against the per-attachment attempt cap
+  // (it is capacity, not a decode failure), so a busy note stays retriable until it succeeds.
+  const adm = admit({ lane: 'transcribe', klass: CLASS.BULK, estimateGb: 3, timeoutMs: 3 * 60 * 60 * 1000 });
+  if (!adm.ok) return { ok: false, reason: 'compute-busy', detail: adm.reason, retryable: true };
+
   let feedId = null;
   try { feedId = await db.activityFeed?.begin?.({ userId, kind: 'transcribe', stageLabel: 'Transcribing audio', model: health?.model || null }); } catch { /* */ }
   let lastSaved = 0, segCount = 0;
@@ -89,6 +109,8 @@ export async function transcribeAttachment(db, userId, attachmentId, { onProgres
   } catch (e) {
     try { await db.activityFeed?.finish?.(feedId, { status: 'error', error: 'failed' }); } catch { /* */ }
     return { ok: false, reason: fault || 'failed', detail: faultDetail, retryable: true };
+  } finally {
+    adm.release(); // crash-release #1 (finally) — always free the BULK transcribe ticket
   }
 }
 

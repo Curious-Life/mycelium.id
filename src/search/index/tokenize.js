@@ -1,7 +1,7 @@
 /**
  * Text tokenizer for the BM25 inverted index.
  *
- * Ported verbatim from reference/mind-search/index/tokenize.js.
+ * Ported verbatim from the canonical mind-search module.
  *
  *   - Lowercase, Unicode-aware (/[\p{L}\p{N}'_\-]+/gu).
  *   - No stemming (the semantic side handles morphology; stemming hurts

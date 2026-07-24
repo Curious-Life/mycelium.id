@@ -95,7 +95,7 @@ function genericCopy(t) {
 // bounded rowid RANGES: each seek touches a localized subtree, so damage stays
 // contained to its chunk and everything readable is still recovered.
 //
-// ⚠️ CURRENTLY UNUSED (kept for reference/last-resort manual salvage). Do NOT wire this into the
+// ⚠️ CURRENTLY UNUSED (kept for reference; last-resort manual salvage). Do NOT wire this into the
 // copy path or the loss guard: its index-satisfied enumeration can OVER-report phantom rowids on
 // a shared-page-damaged tree, which is exactly why robustCopy uses a scan-union and the loss
 // guard keys on scan-completeness instead. Feeding these rowids into a diff would false-abort a

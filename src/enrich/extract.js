@@ -1,7 +1,7 @@
 // D7 enrichment — deterministic NLP entity/tag extraction (the rules pass).
 //
 // The second stage of enrichment (state machine: 0 unprocessed → 2 embedded →
-// 1 enriched, per reference/server-routes/portal-enrichment.js:83). This pass
+// 1 enriched, per the canonical portal route). This pass
 // takes an embedded message's plaintext and derives structured signals with
 // pure, deterministic rules — no model, no network, fully Tier-1 verifiable.
 // A model-backed pass (local Ollama / Claude CLI, as the canonical

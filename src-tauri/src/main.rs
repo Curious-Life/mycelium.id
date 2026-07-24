@@ -472,27 +472,44 @@ async fn check_for_update(app: tauri::AppHandle) -> serde_json::Value {
     if is_dev_build || !updater_pubkey_is_real(&app) {
         return serde_json::json!({ "state": "unsupported" });
     }
+    // D-022: every error branch is STAGE-LABELLED and guaranteed non-empty. A bare
+    // e.to_string() can be empty (some plugin errors stringify to ""), which reaches the UI
+    // as a message-less rejection ("check failed"). The label also tells the operator WHERE
+    // it broke — updater-plugin init (a config/build problem) vs. the network check (the
+    // common transient) — without ever leaking a path or secret (§1): these plugin/reqwest
+    // errors carry the failure class, not the resolved binary location.
     let updater = match app.updater() {
         Ok(u) => u,
-        Err(e) => return serde_json::json!({ "state": "error", "error": e.to_string() }),
+        Err(e) => {
+            let d = e.to_string();
+            let d = if d.trim().is_empty() { "plugin not initialized".to_string() } else { d };
+            return serde_json::json!({ "state": "error", "error": format!("updater unavailable: {d}") });
+        }
     };
     match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
             let notes = update.body.clone().unwrap_or_default();
             if let Some(state) = app.try_state::<UpdateState>() {
-                *state.0.lock().unwrap() =
+                // Poison-tolerant: recover the guard rather than panic. A panic here would
+                // turn a SUCCESSFUL check into a message-less IPC rejection (the very D-022
+                // symptom); the stored value is a plain Option, safe to write through poison.
+                *state.0.lock().unwrap_or_else(|p| p.into_inner()) =
                     Some(AvailableUpdate { version: version.clone(), notes: notes.clone() });
             }
             serde_json::json!({ "state": "available", "version": version, "notes": notes })
         }
         Ok(None) => {
             if let Some(state) = app.try_state::<UpdateState>() {
-                *state.0.lock().unwrap() = None; // we're current
+                *state.0.lock().unwrap_or_else(|p| p.into_inner()) = None; // we're current
             }
             serde_json::json!({ "state": "uptodate" })
         }
-        Err(e) => serde_json::json!({ "state": "error", "error": e.to_string() }), // fail-soft
+        Err(e) => {
+            let d = e.to_string();
+            let d = if d.trim().is_empty() { "no detail from updater".to_string() } else { d };
+            serde_json::json!({ "state": "error", "error": format!("update check failed: {d}") }) // fail-soft
+        }
     }
 }
 
@@ -513,6 +530,11 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
+        // D-010: open the browser sign-in URL in the OS default browser. The webview
+        // is a remote http origin that swallows window.open('_blank'); the frontend
+        // (open-external.ts) invokes plugin:opener|open_url instead. Scope is granted
+        // in capabilities/default.json (open_url for http/https only).
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let home = mycelium_home(app);
             let key_source =

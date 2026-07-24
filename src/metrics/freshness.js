@@ -17,7 +17,7 @@
 
 const HOUR = 3600000;
 
-// V1 freshness budgets — the subset of reference/core/metric-budgets.js whose
+// V1 freshness budgets — the subset of the canonical core module whose
 // tables exist in the V1 schema. Era-anchored tables (cognitive_metrics_harmonic)
 // use a pipeline_state probe; the rest use MAX(timestamp_column).
 export const METRIC_BUDGETS = Object.freeze([

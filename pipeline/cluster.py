@@ -90,7 +90,7 @@ CACHE_POINT_IDS = CACHE_DIR / "nomic_point_ids.json"
 # spherical k-means (atoms) + Ward HAC (territories/themes/realms).
 # The FAISS k-NN graph below feeds NOISE DETECTION only. Leiden/leidenalg
 # is imported + parameterized (leiden_for_k) but NOT called in the live
-# hierarchy (rejected: imbalanced CPM output) — kept for reference/noise.
+# hierarchy (rejected: imbalanced CPM output) — kept for reference (noise).
 KNN_K = 20                       # k-NN graph neighbors (noise detection)
 LEIDEN_SEED = 42                  # fixed seed for determinism
 # Default targets (for ~45K points). Auto-scaled by dataset size in main().

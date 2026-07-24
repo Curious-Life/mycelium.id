@@ -1,7 +1,7 @@
 /**
  * BM25 scorer over an InvertedIndex.
  *
- * Ported verbatim from reference/mind-search/index/bm25.js.
+ * Ported verbatim from the canonical mind-search module.
  *
  *   score(D,Q) = Σ_t IDF(t) · (tf·(k1+1)) / (tf + k1·(1 − b + b·|D|/avgdl))
  *   IDF(t)     = ln( (N − df + 0.5)/(df + 0.5) + 1 )      (+1 → non-negative)

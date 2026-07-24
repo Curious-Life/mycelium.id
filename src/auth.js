@@ -1,6 +1,6 @@
 // better-auth instance for the single-user MCP OAuth 2.1 surface.
 //
-// Verified against spike/oauth (RESULT.md = GO; better-auth@1.6.12):
+// Verified against the OAuth spike (verdict GO; better-auth@1.6.12):
 //   - mcp() plugin provides OAuth 2.1 + DCR + PKCE; discovery advertises the
 //     real endpoints under /api/auth/mcp/*.
 //   - oidcConfig: allowDynamicClientRegistration, requirePKCE, storeClientSecret 'plain'.

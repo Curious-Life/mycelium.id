@@ -740,14 +740,23 @@
 							thinkingTokens: thinkingTokens > 0 ? thinkingTokens : undefined
 						});
 						break;
-					case 'error':
-						if (content) {
-							content += `\n\n*Error: ${event.message}*`;
-							chatMessages.updateMessage(assistantMsgId, { content });
-						} else {
-							throw new Error(event.message as string);
-						}
+					case 'error': {
+						// D-020. This used to THROW when `content` was empty - i.e. in the ONE case
+						// the branch exists for: the turn produced no text at all (a provider 401/403/
+						// 404, the classified message portal-chat.js:596-606 emits). The throw was
+						// survivable on the plain-HTTPS transport (the read loop rethrows and the outer
+						// catch paints it), but on the SECURE-CHANNEL transport this callback runs inside
+						// the WebSocket frame handler (secure-channel.ts:265): a throw there escapes the
+						// socket handler, the requestStream promise never settles, and the user gets a
+						// permanently empty bubble with no error and a stuck spinner - while Telegram, a
+						// third path, reported the same failure correctly. Rendering is now UNCONDITIONAL
+						// and never throws, so the error reaches the user identically on both transports.
+						const detail = (event.message as string) || (event.error as string) || 'Something went wrong';
+						content = content ? `${content}\n\n*Error: ${detail}*` : `*Error: ${detail}*`;
+						chatMessages.updateMessage(assistantMsgId, { content, isStreaming: false, toolsInProgress: [] });
+						connectionStatus.setStatus('error');
 						break;
+					}
 					case 'keepalive':
 						break;
 				}

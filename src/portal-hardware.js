@@ -11,6 +11,7 @@
 // route can never be used to fetch an arbitrary blob.
 
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { detectHardware } from './hardware/detect.js';
 import { recommendModels } from './hardware/recommend.js';
 import { createOllamaClient, isValidModelName, classifyOllamaFault } from './hardware/ollama.js';
@@ -55,7 +56,12 @@ export function portalHardwareRouter({ ollamaUrl, fetch = globalThis.fetch, dete
   // second, per-router layer (CLAUDE.md §2 defence in depth), never the only one.
   const gate = (req, res) => {
     if (typeof authenticatePortalRequest !== 'function') return true;
-    if (authenticatePortalRequest(req)) return true;
+    const u = authenticatePortalRequest(req);
+    // Ambient device-session cookie failing CSRF → 403 (NEVER 401: a 401 redirects
+    // the SPA to /login and a CSRF fault becomes an auth loop, #337 P1-5). Must
+    // precede the truthy check — { deny:'csrf' } is truthy but is NOT authorization.
+    if (isCsrfDeny(u)) { res.status(403).json({ ok: false, error: 'csrf' }); return false; }
+    if (u) return true;
     res.status(401).json({ ok: false, error: 'Unauthorized' });
     return false;
   };

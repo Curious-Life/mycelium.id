@@ -16,6 +16,7 @@
 // are hash-only (§1). A run id that isn't the owner's → 404.
 
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 
 /** Channel platform from a 'channel:<platform>:<id>' conversation id (telegram/discord/whatsapp). */
 function channelPlatform(convId) {
@@ -38,7 +39,7 @@ export function portalAgentActivityRouter({ db, userId, authenticatePortalReques
   if (!db) throw new Error('portalAgentActivityRouter: db required');
   if (typeof authenticatePortalRequest !== 'function') throw new Error('portalAgentActivityRouter: authenticatePortalRequest required');
   const router = express.Router();
-  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
+  const auth = (req, res) => { const u = authenticatePortalRequest(req); if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; } if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 
   // ── Timeline list: runs (history) + scheduled cycles ──
   router.get('/agent-activity', async (req, res) => {

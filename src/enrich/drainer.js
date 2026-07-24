@@ -17,6 +17,7 @@ import { createOllamaClient, classifyOllamaFault, OLLAMA_FAULT } from '../hardwa
 import { createEnrichmentService, EMBED_MAX_ATTEMPTS } from './service.js';
 import { createCategoryClassifier, DEFAULT_LABEL_MODEL } from './categories.js';
 import { createMessageEnricher } from './enricher.js';
+import { admit, CLASS } from '../core/compute-governor.js';
 
 // ── Accurate, actionable copy per fault kind (OLLAMA_FAULT) ──────────────────
 // The health surface used to hardcode "The local model runtime is not reachable." for EVERY
@@ -563,6 +564,19 @@ export function startEnrichDrainer({
   // readiness `pipeline`, categorize stage `blocked`/`waiting_embed`) so a stopped-looking stage is
   // never silent — the whole point of the pipeline-transparency design.
   let _catWaitingOnEmbed = false;
+  // COMPUTE GOVERNOR (D-001): the SIBLING of _catWaitingOnEmbed for the other refusal reason — the
+  // model slot is held by another resident lane (a describe child, clustering, chat). Same shape,
+  // same discipline: a SCHEDULING state, never a pause and never a fault, reported through status()
+  // so a refused categorize renders as `waiting`, never as a broken/silent lane (design §5 — "if
+  // refusals are not rendered as waiting, the next bug report is 'embedding stopped working'").
+  let _catWaitingOnCompute = false;
+  // D-001 (review finding #2): the ONNX embed drain (L1) is NOT an Ollama-resident lane, so it is a
+  // BULK ticket — its memory (~1 GB) plus whisper (~1–3 GB) plus a resident vision/describe model
+  // is the concurrency that a count-of-1 RESIDENT gate does NOT catch. When the BULK sum/pressure
+  // gate refuses embedding this cycle, this flag says so (scheduling `waiting`, never a fault).
+  let _embedWaitingOnCompute = false;
+  let _govDeferrals = 0;   // consecutive cycles the governor deferred categorize (log throttle only)
+  let _embedGovDeferrals = 0; // consecutive cycles the governor deferred the embed drain (log throttle)
   let _catDeferrals = 0;   // consecutive cycles deferred (log throttle only)
   let _health = 'unknown'; // last observed embed-service health: ok | loading | error | unreachable
   const embedBaseUrl = () => `http://127.0.0.1:${Number(process.env.MYCELIUM_EMBED_PORT) || 8091}`;
@@ -1131,7 +1145,28 @@ export function startEnrichDrainer({
       let embedStalledOut = false;// the loop broke on no-progress ⇒ embed CANNOT advance right now
       let embedThrew = false;     // the drain threw ⇒ same conclusion: it is not going to progress
       let embedMoved = 0;         // rows that LEFT the pending set this cycle (embedded|skipped|capped)
+      // COMPUTE GOVERNOR (D-001, review finding #2 — the operator's P7 import run): the ONNX embed
+      // drain is a BULK lane. Reserve a BULK ticket BEFORE the drain loop — refused under CRITICAL
+      // memory pressure, or under WARN pressure while a resident model is loaded (the embed×describe
+      // concurrency the operator's crash quote names), or when the BULK sum/count budget is full.
+      // Refusal is DEFER: skip embedding this cycle, re-select next cycle, render `waiting`.
+      _embedWaitingOnCompute = false;
+      let embedAdm = null;
       if (embedOk && !isEmbedPaused()) {
+        embedAdm = admit({ lane: 'embed-drain', klass: CLASS.BULK, estimateGb: 1, timeoutMs: 0 });
+        if (!embedAdm.ok) {
+          _embedWaitingOnCompute = true;
+          _embedGovDeferrals++;
+          if (_embedGovDeferrals === 1 || _embedGovDeferrals % 20 === 0) {
+            log(`[enrich] deferring the embed drain this cycle (#${_embedGovDeferrals}): the compute governor is holding capacity (${embedAdm.reason}) `
+              + '— avoiding an embed + resident-model memory pile-up (D-001). Resumes as soon as capacity frees.');
+          }
+        } else if (_embedGovDeferrals) {
+          log(`[enrich] embed compute capacity free after ${_embedGovDeferrals} deferred cycle(s) — resuming the drain`);
+          _embedGovDeferrals = 0;
+        }
+      }
+      if (embedAdm && embedAdm.ok) {
       try {
 
       // SELF-HEAL: retry rows that previously failed for a NON-content reason
@@ -1329,7 +1364,8 @@ export function startEnrichDrainer({
             + '— backlog stays put; labeling + enrichment continue (they do not use the embed service)');
         }
       }
-      } // ← end `if (embedOk)`. Everything BELOW runs even when the embed sidecar is down.
+      finally { embedAdm.release(); } // ALWAYS free the BULK embed ticket — crash-release #1
+      } // ← end `if (embedAdm && embedAdm.ok)`. Everything BELOW runs even when the embed sidecar is down.
 
       // ── EMBED FIRST, THEN CATEGORIZE (QA6) — the deferral decision ──────────────────────────────
       // The decision itself is the PURE function above (deferCategorizeForEmbed); this is only the
@@ -1381,7 +1417,34 @@ export function startEnrichDrainer({
       // pause and not a fault): _approvedModel/_approvedEnrichModel are stamped at the top of every
       // cycle and probeModelReady() still runs, so labelerHealth()/enricherHealth() keep answering
       // exactly what they answered before. The deferral is reported through status() instead.
+      // COMPUTE GOVERNOR (D-001, P1 — the reported symptom): the categorize + enrich block below is
+      // where the drainer loads Ollama models (daemon.ensureUp + ensureLabelModel + the classify/
+      // enrich passes) — a RESIDENT lane. Reserve the single model slot BEFORE the wake. If another
+      // resident lane holds it (a describe-chronicles/describe-clusters child, a clustering run, a
+      // chat turn), admission is refused and this whole block is skipped THIS CYCLE — so the drainer
+      // never loads a second Ollama model alongside a describe pass (the collision the operator's
+      // crash was made of). Refusal is DEFER: the block re-selects its pending set next cycle, no
+      // queue, no memory growth. Rendered as `waiting` via _catWaitingOnCompute → status(). The lease
+      // is 0 (no lease): a synchronous cycle holds the ticket only for its own duration and always
+      // releases in the finally, so a leaked ticket is impossible here.
+      _catWaitingOnCompute = false;
+      let catAdm = null;
       if (!isCategorizePaused() && !waitOnEmbed) {
+        catAdm = admit({ lane: 'embed-drain-categorize', klass: CLASS.RESIDENT, timeoutMs: 0 });
+        if (!catAdm.ok) {
+          _catWaitingOnCompute = true;
+          _govDeferrals++;
+          if (_govDeferrals === 1 || _govDeferrals % 20 === 0) {
+            log(`[enrich] deferring categorize + enrich this cycle (#${_govDeferrals}): the compute governor is holding the model slot for another lane `
+              + `(${catAdm.reason}) — one resident model at a time, on purpose (D-001). Resumes as soon as the slot frees.`);
+          }
+        } else if (_govDeferrals) {
+          log(`[enrich] compute slot free after ${_govDeferrals} deferred cycle(s) — resuming categorize + enrich`);
+          _govDeferrals = 0;
+        }
+      }
+      if (catAdm && catAdm.ok) {
+       try {
         // WAKE THE ON-BOX MODEL FIRST. The Ollama daemon is lazy and the enrich path is the one
         // consumer that nothing else starts it for — so without this, a vault whose owner never
         // opened local chat would leave EVERY message untagged forever (the live-vault dormancy
@@ -1423,6 +1486,7 @@ export function startEnrichDrainer({
           let tagged = 0;
           for (let i = 0; i < 8; i++) {
             if (isCategorizePaused()) break;   // same rule as the embed loop: honor it mid-run
+            if (catAdm.shouldYield()) break;   // an interactive chat turn is preempting — yield the slot between batches (§3.4)
             // BANK PER PASS, exactly like the embed loop (§3.9/R1). enrichCategoriesOnce returns
             // { scanned, enriched, failed } (service.js:194 — NO `skipped` field), so the three
             // cases are read from THOSE fields, not embed's:
@@ -1477,6 +1541,7 @@ export function startEnrichDrainer({
             // as no pause at all" — and #204's copy says "pause ANY of it", so this line is what
             // makes that sentence true (independent review HIGH-6, 2026-07-17).
             if (isCategorizePaused()) break;
+            if (catAdm.shouldYield()) break;   // interactive preemption — yield the model slot between batches (§3.4)
             // BANK PER PASS, same discipline as L1 and embed. enrichNlpOnce returns
             // { scanned, enriched, failed } (service.js:227). L2 has NO blank/skip path — every
             // scanned row either enriches (nlp_processed = 1) or is isolated to nlp_processed = -1
@@ -1507,6 +1572,11 @@ export function startEnrichDrainer({
             }
           }
         }
+       } finally {
+         // ALWAYS free the model slot — crash-release #1 (finally). A cycle throw, a pause mid-run,
+         // or a clean drain all release here, so the next resident lane (or the next cycle) can run.
+         catAdm.release();
+       }
       }
     } catch (err) {
       log(`[enrich] drain cycle error: ${String(err?.message || err)}`);
@@ -1541,7 +1611,7 @@ export function startEnrichDrainer({
     // drainer has none, so leaving it latched would let a handle nobody drives keep reporting
     // "categorize is waiting on embedding" — a block with no clock behind it, which is the frozen
     // half-truth this whole surface exists to delete.
-    stop: () => { if (timer) clearInterval(timer); timer = null; _catWaitingOnEmbed = false; if (_current === handle) _current = null; },
+    stop: () => { if (timer) clearInterval(timer); timer = null; _catWaitingOnEmbed = false; _catWaitingOnCompute = false; _embedWaitingOnCompute = false; if (_current === handle) _current = null; },
     // LIVENESS, for the activity feed. The UI used to render "Embedding messages" purely
     // from `pending > 0` — so a drainer that had been dead for a MONTH still looked busy
     // (it skipped silently every 15s because a single-threaded embed service blocked
@@ -1585,6 +1655,14 @@ export function startEnrichDrainer({
       // instead of a silent `pending` or a lying `running` with an ETA nothing is working towards.
       // A SCHEDULING state — never a pause (the owner chose nothing) and never a fault.
       categorizeWaitingOnEmbed: _catWaitingOnEmbed,
+      // D-001: the categorize/enrich stages are DEFERRED this cycle because the compute governor is
+      // holding the single model slot for another resident lane (a describe child, clustering, or a
+      // chat turn). SAME contract as categorizeWaitingOnEmbed — a scheduling `waiting`, never a
+      // pause, never a fault — so the pipeline slice renders it as `waiting`, not a stalled lane.
+      categorizeWaitingOnCompute: _catWaitingOnCompute,
+      // D-001 (finding #2): the embed drain itself is deferred this cycle by the BULK governor
+      // (memory pressure / a resident model loaded / BULK budget). Same `waiting` contract.
+      embedWaitingOnCompute: _embedWaitingOnCompute,
       health: _health,                 // ok | loading | error | unreachable
       // A model still LOADING is not a fault — it's a download. Only a real outage is.
       // ⚠️ `stalled` keys on _skips ALONE, deliberately unchanged: it drives the activity feed's

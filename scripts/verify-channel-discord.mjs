@@ -146,6 +146,144 @@ const post = async (port, body, headers) => { const r = await fetch(`http://127.
   rec('DCMD4. non-owner command swallowed (no side effects)', await cmd.handle(m('/allow', '999')) === true && calls.set.length === before);
 }
 
+// ── D-014 (QA7 P4.5): a NOT-connected Discord can never report "connected" ────
+//
+// Operator's words: "discord shows as connected even though it is not connected."
+//
+// The old chain had THREE places that could say connected without ever having seen a
+// socket: the gateway swallowed its own start failure, /healthz reported only that the
+// daemon PROCESS was alive, and the settings badge read `hasToken` (a stored credential).
+// These checks pin every link: the gateway's state machine, the honest derivation in
+// src/channels/supervisor.js, and the /healthz projection. Each one is asserted from the
+// FAILING direction — the question is never "does it say connected when it is", it is
+// "can anything say connected when it is NOT".
+//
+// MUTATION-TESTED (D-014, 2026-07-23): honestChannelConnection() short-circuited to
+//   `return out('connected')` right after the hasToken check — literally the pre-fix
+//   stored-flag rule → DH2 REDs with `{"state":"connected","connected":true}`, and
+//   DH4, DH4b, all nine DH5 fail-closed rows, DH7 and DH8 RED on the same run.
+//   (DH3 stayed green, which is the point: it is the honest POSITIVE, so the suite is
+//   not vacuous — it can distinguish "always connected" from "connected when true".)
+// MUTATION-TESTED (D-014, 2026-07-23): createDiscordGateway.start() no longer set
+//   'failed' when the discord.js loader threw (the state was left at 'connecting') →
+//   DG2 REDs ("state=connecting connected=false reason=null"). Only DG2 red — it is the
+//   check that owns the module-missing case, which is the real production shape here.
+// MUTATION-TESTED (D-014, 2026-07-23): createDiscordGateway called `set('ready')`
+//   immediately after `client.login()` resolved instead of only on ClientReady →
+//   DG3 REDs ("state=ready connected=true"). This is the subtle version of the bug:
+//   a token accepted is not a gateway session.
+// MUTATION-TESTED (D-014, 2026-07-23): createDaemonApp's /healthz dropped the
+//   `transports` field → DH6 REDs ("/healthz must carry per-transport state") and DH7
+//   REDs — and note DH7's failure output is `{"state":"unknown","connected":false}`,
+//   i.e. losing the field degrades to unknown rather than to connected. Fail-closed
+//   holds even under the mutation.
+{
+  const { createDiscordGateway } = await import('../packages/channel-daemon/transport/discord-gateway.js');
+  const { honestChannelConnection } = await import('../src/channels/supervisor.js');
+
+  // ── the gateway's own state machine ────────────────────────────────────────
+  const mkGw = (loadLib) => createDiscordGateway({ botToken: 'tok', handleInbound: async () => {}, loadLib });
+
+  const idle = mkGw(async () => { throw new Error('unused'); });
+  rec('DG1. a never-started gateway reports idle + NOT connected (never optimistic)',
+    idle.state().state === 'idle' && idle.state().connected === false, JSON.stringify(idle.state()));
+
+  // The real production shape: discord.js is an OPTIONAL dep and is not installed, so the
+  // loader throws on every start. Before D-014 this was swallowed and nothing recorded it.
+  const missing = mkGw(async () => { const e = new Error('Cannot find package \'discord.js\''); e.code = 'module_missing'; throw e; });
+  let threw = null;
+  try { await missing.start(); } catch (e) { threw = e; }
+  const ms = missing.state();
+  rec('DG2. ⭐ a gateway whose library failed to load reports state "failed" + NOT connected (and still throws to the caller)',
+    ms.state === 'failed' && ms.connected === false && ms.reason === 'module_missing' && threw !== null,
+    `state=${ms.state} connected=${ms.connected} reason=${ms.reason}`);
+
+  // login() resolving proves the TOKEN was accepted; it does NOT prove a usable gateway
+  // (DisallowedIntents kills the session after login). Only ClientReady may say connected.
+  let readyCb = null;
+  const fakeLib = {
+    GatewayIntentBits: { Guilds: 1, GuildMessages: 2, MessageContent: 4, DirectMessages: 8 },
+    Partials: { Channel: 1 },
+    Events: { MessageCreate: 'messageCreate', ClientReady: 'clientReady', ShardDisconnect: 'shardDisconnect', Invalidated: 'invalidated' },
+    Client: class { constructor() {} on() {} once(ev, cb) { if (ev === 'clientReady') readyCb = cb; } async login() { return 'tok'; } async destroy() {} },
+  };
+  const loggedIn = mkGw(async () => fakeLib);
+  await loggedIn.start();
+  const ls = loggedIn.state();
+  rec('DG3. ⭐ login() resolving does NOT mean connected — state stays "connecting" until ClientReady',
+    ls.state === 'connecting' && ls.connected === false, `state=${ls.state} connected=${ls.connected}`);
+  readyCb?.({ user: { tag: 'bot#1' } });
+  rec('DG4. ClientReady is the ONLY transition into connected', loggedIn.state().state === 'ready' && loggedIn.state().connected === true);
+  await loggedIn.stop();
+  rec('DG5. stop() drops back to idle + NOT connected (a stopped gateway never keeps saying ready)',
+    loggedIn.state().state === 'idle' && loggedIn.state().connected === false);
+
+  // ── the honest derivation the settings UI renders ──────────────────────────
+  const OK = (transports) => ({ status: 'ok', message: null, detail: null, transports });
+  const conn = (a) => honestChannelConnection({ platform: 'discord', ...a });
+
+  rec('DH1. no token → not-configured (and not connected)',
+    conn({ hasToken: false, enabled: true, health: OK({}) }).state === 'not-configured');
+
+  // ⭐ THE DEFECT. A stored bot token + a RUNNING daemon whose Discord gateway failed.
+  // This is the exact live state the operator saw painted as "Connected".
+  const failedGw = conn({ hasToken: true, enabled: true, health: OK({ discord: { state: 'failed', connected: false, reason: 'module_missing', message: 'discord.js missing' } }) });
+  rec('DH2. ⭐ a stored token + a running daemon + a FAILED gateway → "failed", NEVER connected',
+    failedGw.state === 'failed' && failedGw.connected === false && failedGw.reason === 'module_missing', JSON.stringify(failedGw));
+
+  const readyGw = conn({ hasToken: true, enabled: true, health: OK({ discord: { state: 'ready', connected: true } }) });
+  rec('DH3. a LIVE gateway → connected (the honest positive still works — the check is not vacuous)',
+    readyGw.state === 'connected' && readyGw.connected === true, JSON.stringify(readyGw));
+
+  // Cross-platform leak: a healthy TELEGRAM transport must not make Discord look connected.
+  const tgOnly = conn({ hasToken: true, enabled: true, health: OK({ telegram: { state: 'ready', connected: true } }) });
+  rec('DH4. ⭐ another platform being connected does NOT make Discord connected',
+    tgOnly.connected === false && tgOnly.state === 'unknown', JSON.stringify(tgOnly));
+
+  const disabled = conn({ hasToken: true, enabled: false, health: OK({ discord: { state: 'ready', connected: true } }) });
+  rec('DH4b. channels switched off → "off", not connected, even if a socket lingers', disabled.state === 'off' && disabled.connected === false);
+
+  for (const [label, health] of [
+    ['bridge down', { status: 'down', message: 'Bridge stopped', transports: {} }],
+    ['bridge starting', { status: 'starting', message: null, transports: {} }],
+    ['supervisor never started', { status: 'unknown', message: null, transports: {} }],
+    ['daemon ok but no transport report (older daemon)', OK({})],
+    ['gateway idle', OK({ discord: { state: 'idle', connected: false } })],
+    ['gateway connecting', OK({ discord: { state: 'connecting', connected: false } })],
+    ['gateway socket dropped', OK({ discord: { state: 'disconnected', connected: false, reason: 'socket_closed' } })],
+    ['transports field absent entirely', { status: 'ok', message: null }],
+    ['a LYING transport (connected:true but state not ready)', OK({ discord: { state: 'failed', connected: true } })],
+  ]) {
+    const r = conn({ hasToken: true, enabled: true, health });
+    rec(`DH5. fails closed — ${label} → NOT connected`, r.connected === false && r.state !== 'connected', JSON.stringify(r));
+  }
+
+  // ── /healthz actually carries the per-transport state (the projection) ─────
+  {
+    const app = createDaemonApp({
+      telegramSendHandler: (_q, s) => s.json({ ok: true }), getActiveTurn: () => null,
+      getTransports: () => ({ discord: { state: 'failed', connected: false, reason: 'module_missing', message: 'x' } }),
+    });
+    const srv = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+    const body = await (await fetch(`http://127.0.0.1:${srv.address().port}/healthz`)).json();
+    rec('DH6. ⭐ /healthz carries `transports` so the supervisor can read per-platform truth',
+      body.transports?.discord?.state === 'failed' && body.transports.discord.connected === false, JSON.stringify(body.transports));
+    // …and the honest derivation over that REAL body still refuses "connected".
+    const viaWire = honestChannelConnection({ platform: 'discord', hasToken: true, enabled: true, health: { status: 'ok', transports: body.transports } });
+    rec('DH7. ⭐ end-to-end: a real /healthz body from a failed gateway renders "failed", never "Connected"',
+      viaWire.state === 'failed' && viaWire.connected === false, JSON.stringify(viaWire));
+    // A daemon with NO transport reporter (the pre-fix shape) must degrade to unknown, not connected.
+    const app2 = createDaemonApp({ telegramSendHandler: (_q, s) => s.json({ ok: true }), getActiveTurn: () => null });
+    const srv2 = await new Promise((r) => { const s = app2.listen(0, '127.0.0.1', () => r(s)); });
+    const body2 = await (await fetch(`http://127.0.0.1:${srv2.address().port}/healthz`)).json();
+    const viaWire2 = honestChannelConnection({ platform: 'discord', hasToken: true, enabled: true, health: { status: 'ok', transports: body2.transports } });
+    rec('DH8. ⭐ a daemon that reports NO transports degrades to "unknown" — absence of evidence is not connection',
+      viaWire2.connected === false && viaWire2.state === 'unknown', JSON.stringify(viaWire2));
+    await new Promise((r) => srv.close(r));
+    await new Promise((r) => srv2.close(r));
+  }
+}
+
 const passed = ledger.filter(Boolean).length;
 console.log(`\n${passed}/${ledger.length} checks passed`);
 if (passed !== ledger.length) { console.log('VERDICT: NO-GO'); process.exit(1); }

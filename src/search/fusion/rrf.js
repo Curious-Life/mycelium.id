@@ -1,7 +1,7 @@
 /**
  * Reciprocal Rank Fusion (Cormack, Clarke & Büttcher 2009).
  *
- * Ported verbatim from reference/mind-search/fusion/rrf.js.
+ * Ported verbatim from the canonical mind-search module.
  *
  *   RRF(d) = Σ_{L ∈ lists} 1/(k + rank_L(d))   (ranks 1-indexed; k=60)
  *

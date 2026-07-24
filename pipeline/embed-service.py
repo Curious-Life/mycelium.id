@@ -2,7 +2,7 @@
 """
 Local Embedding Service — Nomic v1.5 ONNX (768D, search-side).
 
-Ported verbatim-in-spirit from reference/pipeline/embed-service.py for the
+Ported verbatim-in-spirit from the canonical pipeline service for the
 self-hosted V1 build. Runs the Nomic v1.5 ONNX file (~170MB int8 quantized)
 configured for retrieval:
 

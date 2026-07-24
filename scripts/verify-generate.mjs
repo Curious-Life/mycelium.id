@@ -104,7 +104,13 @@ exit 1
 
     // ── G4 error path ──
     process.env.MYCELIUM_CLUSTER_SCRIPT = FAIL;
-    const g4 = await post('/mycelium/generate');
+    // D-001 compute governor: G1's SUCCESSFUL completion fires the background chronicle pass, which
+    // now holds the single RESIDENT model slot (clustering + describe are mutually exclusive by
+    // design — the crash was concurrent model loads). A fresh Generate is transiently refused
+    // `busy` until that pass releases. Retry the trigger until the slot frees (a real client's
+    // retry-on-busy), so this gate tests the ERROR PATH, not the transient serialization.
+    let g4 = await post('/mycelium/generate');
+    for (let i = 0; i < 60 && !g4.body?.jobId; i++) { await sleep(150); g4 = await post('/mycelium/generate'); }
     let err = null;
     for (let i = 0; i < 40; i++) {
       const s = await get(`/mycelium/generate/status/${g4.body?.jobId}`);
@@ -139,6 +145,36 @@ exit 1
       rec(`G6e. the wire auto-gen floor is the manual floor (5, was 25) — got ${wireFloor}`, wireFloor === 5);
       rec('G6f. a vault AT the manual floor (5 embedded) auto-fires under the wire floor',
         Number.isFinite(wireFloor) && shouldAutoGenerate({ embedded: 5, points: 0, clusteringRunning: false, min: wireFloor }) === true);
+    }
+
+    // ── G7 ⭐ AUTO-REBUILD PAST A DRIFT THRESHOLD (defect D-004 ↻1) ─────────────────
+    // `points === 0` alone meant "auto-generate exactly once, ever": a map built on day one
+    // could never catch up, which is the operator's 369-point map under a 2510-message vault.
+    // The gate holds all three edges against each other — fires when the map has fallen
+    // behind, HOLDS when it has not (or the caller has not opted in), and never fires while a
+    // run is in flight.
+    //
+    // MUTATION-TESTED: src/jobs.js shouldAutoGenerate reverted to the pre-fix
+    //   `!clusteringRunning && embedded >= min && points === 0` → G7a REDs ("a stale map did
+    //   not auto-rebuild"); G7b/G7c/G7d stay GREEN, so the failing row is the defect's.
+    // MUTATION-TESTED: the `builtAtEmbedded === undefined ⇒ false` opt-in guard removed
+    //   (undefined treated as null) → G7b REDs, proving existing callers cannot be silently
+    //   opted into spawning heavy re-clusters.
+    // MUTATION-TESTED: src/server-rest.js drops `builtAtEmbedded` from its shouldAutoGenerate
+    //   call → G7e REDs (the wire no longer opts in, so the auto-rebuild is dead on arrival).
+    rec('G7a. ⭐ fires: the map fell far behind the embedded set (2510 embedded / 369 mapped — the report)',
+      shouldAutoGenerate({ embedded: 2510, points: 369, clusteringRunning: false, min: 5, builtAtEmbedded: 369 }) === true);
+    rec('G7b. holds: a caller that does not opt in keeps the old behaviour exactly (no surprise re-cluster)',
+      shouldAutoGenerate({ embedded: 2510, points: 369, clusteringRunning: false, min: 5 }) === false);
+    rec('G7c. holds: the map is current — drift under the tolerance must NOT re-cluster on every settle',
+      shouldAutoGenerate({ embedded: 2510, points: 2490, clusteringRunning: false, min: 5, builtAtEmbedded: 2500 }) === false);
+    rec('G7d. holds: a run is already in flight (single-flight still wins over drift)',
+      shouldAutoGenerate({ embedded: 2510, points: 369, clusteringRunning: true, min: 5, builtAtEmbedded: 369 }) === false);
+    {
+      const src = readFileSync(path.resolve('src/server-rest.js'), 'utf8');
+      rec('G7e. the WIRE opts in — maybeAutoGenerate passes the recorded freshness baseline',
+        /shouldAutoGenerate\(\{[\s\S]{0,400}?builtAtEmbedded:\s*readGenerateStats\(\)/.test(src),
+        'without this the pure function above is correct and never consulted');
     }
   } finally {
     srv.server.close(); try { srv.close?.(); } catch {}

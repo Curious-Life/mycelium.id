@@ -10,6 +10,7 @@
 // portalMeasurementRouter's /frequency/series so ClaimsView can reuse
 // TimeSeries.svelte. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.9.
 import express from 'express';
+import { isCsrfDeny } from './http/require-vault-auth.js';
 import { toConfidence } from './claims/confidence.js';
 
 const VALID_GRANULARITIES = new Set(['day', 'week', 'month', 'quarter']);
@@ -24,6 +25,7 @@ export function portalClaimsRouter({ db, userId, authenticatePortalRequest }) {
   const fail = (res, code = 500, error = 'request failed') => res.status(code).json({ error });
   const owner = (req, res) => {
     const u = authenticatePortalRequest(req);
+    if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; }
     if (!u || !u.id) { res.status(401).json({ error: 'Unauthorized' }); return null; }
     return u;
   };

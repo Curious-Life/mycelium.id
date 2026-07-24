@@ -1,7 +1,7 @@
 /**
  * DB → mind-search rehydrate.
  *
- * Ported from reference/mind-search/d1-loader.js, adapted for V1's encrypted
+ * Ported from the canonical mind-search module, adapted for V1's encrypted
  * SQLite db layer. In canonical this paginated D1 messages and decrypted the
  * embedding_768 vector envelope per row. Here we read via the assembled db
  * namespace's `rawQuery(sql, params) -> { results }` (the same engine as
