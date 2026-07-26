@@ -26,6 +26,7 @@
 import { routeLevel } from '../claims/route.js';
 import { renderClaimsBlock } from '../claims/support-path.js';
 import { toConfidence } from '../claims/confidence.js';
+import { renderRef } from '../core/item-ref.js';
 
 export function createMindscapeDomain(deps) {
   if (!deps) throw new TypeError('createMindscapeDomain: deps required');
@@ -92,8 +93,10 @@ export function createMindscapeDomain(deps) {
     const category = (args.query || '').trim() || null;
     const rows = await db.facts.list({ userId, category, limit: 100 });
     if (!rows.length) return category ? `No facts in category "${category}".` : 'No facts remembered yet.';
+    // D-040 ↻1: `category/key` is NOT the id forget/mark take — a fact was un-addressable
+    // from the one surface that lists facts. The compact ref rides each row.
     const lines = rows
-      .map((f) => `- ${f.pinned ? '📌 ' : ''}${f.sensitive ? '🔒 ' : ''}**${f.category}/${f.key}**: ${(f.value || '').slice(0, 300)}`)
+      .map((f) => `- ${renderRef('fact', f.id)} ${f.pinned ? '📌 ' : ''}${f.sensitive ? '🔒 ' : ''}**${f.category}/${f.key}**: ${(f.value || '').slice(0, 300)}`)
       .join('\n');
     return `## Facts (${rows.length})\n${lines}`;
   }
@@ -111,9 +114,11 @@ export function createMindscapeDomain(deps) {
     const lines = [];
     for (const e of rows.slice(0, 30)) {
       const links = showLinks ? await db.entities.linksFor({ userId, entityId: e.id }) : [];
-      const linkStr = links.length ? `\n  ↳ ${links.map((l) => `${l.ref_type}:${l.ref_id}`).join(', ')}` : '';
+      // Linked items render the SAME ref shape, so the dossier is actionable too.
+      const linkStr = links.length ? `\n  ↳ ${links.map((l) => renderRef(l.ref_type, l.ref_id) || `${l.ref_type}:${l.ref_id}`).join(', ')}` : '';
       const mentions = e.mention_count ? ` (${e.mention_count} mentions)` : '';
-      lines.push(`- ${e.pinned ? '📌 ' : ''}${e.sensitive ? '🔒 ' : ''}**${e.type}: ${e.name}**${e.summary ? ` — ${(e.summary || '').slice(0, 200)}` : ''}${mentions}${linkStr}`);
+      // D-040 ↻1: `type: name` is not the entity id — the ref makes the row addressable.
+      lines.push(`- ${renderRef('entity', e.id)} ${e.pinned ? '📌 ' : ''}${e.sensitive ? '🔒 ' : ''}**${e.type}: ${e.name}**${e.summary ? ` — ${(e.summary || '').slice(0, 200)}` : ''}${mentions}${linkStr}`);
     }
     return `## Entities (${rows.length})\n${lines.join('\n')}`;
   }

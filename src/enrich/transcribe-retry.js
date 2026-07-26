@@ -26,6 +26,9 @@
 const DEFAULT_INTERVAL_MS = 20000;
 const PER_CYCLE = Number(process.env.MYCELIUM_TRANSCRIBE_RETRY_BATCH) || 2; // decodes are heavy — a couple per cycle
 const ATTEMPT_CAP = Number(process.env.MYCELIUM_TRANSCRIBE_RETRY_CAP) || 3;
+// A long recording legitimately needs several resume passes; 20 covers a multi-hour file at the
+// bounded per-pass budget while still terminating if coverage ever stops being monotonic.
+const PASS_CEILING = Number(process.env.MYCELIUM_TRANSCRIBE_PASS_CEILING) || 20;
 
 let _current = null;
 
@@ -45,6 +48,7 @@ export function startTranscribeRetry({
   log = (m) => process.stderr.write(`${m}\n`),
 } = {}) {
   const attempts = new Map();   // attachmentId → counted decode attempts (compute-busy NOT counted)
+  const passes = new Map();     // attachmentId → EVERY pass this boot, progress or not (hard ceiling)
   const capped = new Set();     // attachmentId → gave up THIS boot (ATTEMPT_CAP reached)
   let running = false;
   let pending = false;
@@ -76,18 +80,34 @@ export function startTranscribeRetry({
       catch { ids = []; }
       _lastPendingCount = ids.length;
       const work = ids.filter((id) => !capped.has(id)).slice(0, PER_CYCLE);
-      let done = 0, busy = 0;
+      let done = 0, busy = 0, resumed = 0;
       for (const id of work) {
+        passes.set(id, (passes.get(id) || 0) + 1);
         let r;
         try { r = await doTranscribe(id); } catch { r = { ok: false, reason: 'failed' }; }
         if (r?.ok) { attempts.delete(id); done++; continue; }
         if (r?.reason === 'compute-busy') { busy++; continue; } // capacity, not a failure — retry next cycle, do NOT count
+        // ── D-076: A RESUME THAT ADVANCED IS PROGRESS, NOT A FAILED ATTEMPT ────────────────────
+        // A 30-minute recording can legitimately need SEVERAL passes to finish: each live-turn or
+        // drain pass is bounded, and the row now resumes from its recorded coverage. Counting those
+        // passes against ATTEMPT_CAP would abandon the file after 3 cycles with, say, 12 of 30
+        // minutes transcribed — the same truncation this defect is about, arrived at differently.
+        // The exemption is STRICTLY GATED on `progressed`, which transcribe-attachment.js sets only
+        // when coverage moved forward by more than half a second. A pass that advances nothing IS
+        // counted, so a wedged file can never loop forever.
+        // ⚠️ AND A GLOBAL CEILING INDEPENDENT OF `progressed`. The exemption's termination argument
+        // rests on coverage being monotonic, which is now enforced in three places — but a loop
+        // guard that depends on a property enforced elsewhere is one refactor away from being no
+        // guard at all (adversarial review round 2, LOW-8). `passes` counts EVERY pass on an
+        // attachment this boot and caps it regardless of progress, so the worst case is bounded by
+        // arithmetic rather than by an invariant held in another file.
+        if (r?.partial && r?.progressed && (passes.get(id) || 0) < PASS_CEILING) { attempts.delete(id); resumed++; continue; }
         // A real decode outcome (no-speech / engine-error / service-down). Count it; cap eventually.
         const n = (attempts.get(id) || 0) + 1;
         attempts.set(id, n);
         if (n >= ATTEMPT_CAP) { capped.add(id); attempts.delete(id); }
       }
-      if (done || busy) log(`[transcribe-retry] transcribed ${done}, ${busy} deferred (compute-busy), ${capped.size} capped this boot`);
+      if (done || busy || resumed) log(`[transcribe-retry] transcribed ${done}, ${resumed} advanced (partial, resuming), ${busy} deferred (compute-busy), ${capped.size} capped this boot`);
     } catch (err) {
       log(`[transcribe-retry] cycle error: ${String(err?.message || err)}`);
     } finally {
@@ -104,7 +124,7 @@ export function startTranscribeRetry({
     nudge: () => cycle(),
     stop: () => { if (timer) clearInterval(timer); timer = null; if (_current === handle) _current = null; },
     // Reset the per-boot caps (the retry-failed route / a model swap should re-attempt).
-    resetCaps: () => { capped.clear(); attempts.clear(); },
+    resetCaps: () => { capped.clear(); attempts.clear(); passes.clear(); },
     status: () => ({ alive: true, running, lastCycleAt: _lastCycleAt, pending: _lastPendingCount, capped: capped.size }),
   };
   _current = handle;

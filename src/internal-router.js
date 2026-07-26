@@ -15,6 +15,7 @@ import { createEgressAuditSink } from './inference/egress.js';
 import { getBlob as realGetBlob } from './ingest/blob-store.js';
 import { describeImage as realDescribeImage } from './enrich/describe-image.js';
 import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audio.js';
+import { admitTranscribe, LIVE_DECODE_BUDGET_MS } from './enrich/transcribe-attachment.js';
 import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
 import { clampStored } from './enrich/text-limits.js';
 import { createPairingStore } from './channels/pairing-store.js';
@@ -428,8 +429,112 @@ export function internalRouter({ db, userId, enrich = {}, voiceRenderer } = {}) 
         contextText = await withRetry('vision', () => describeImage({ bytes, timeoutMs: Number(process.env.MYCELIUM_VISION_TIMEOUT_MS) || 240_000 }));
         if (contextText) await db.attachments.update(attachmentId, { description: contextText });
       } else if (kind === 'audio' || kind === 'voice') {
-        contextText = await withRetry('transcribe', () => transcribeAudio({ bytes, mimeType: fileType, fileName }));
-        if (contextText) await db.attachments.update(attachmentId, { transcript: contextText });
+        // ════════════════════════════════════════════════════════════════════════════════════
+        //  THE LIVE VOICE-NOTE TURN — INTERACTIVE, and until now UNGOVERNED (D-068, D-001 family)
+        // ════════════════════════════════════════════════════════════════════════════════════
+        // THIS ROUTE *IS* THE LIVE-TURN BOUNDARY, which is why the class is set here and not
+        // inferred inside the transcriber. Its only caller is the channel daemon's media stage
+        // (packages/channel-daemon/media.js), which runs BEFORE capture and BEFORE the agent
+        // turn and AWAITS this call — a human is sitting in the chat watching a typing
+        // indicator. Nothing else calls it. Every OTHER transcription entry point (import, the
+        // portal Transcribe button, the background retry drain) keeps its BULK ticket.
+        //
+        // TWO defects close here, and they are the same line:
+        //   1. PRIORITY (the operator's report — "treat chat messages as primary"). A voice
+        //      note on the critical path now PREEMPTS a background describe/enrich pass
+        //      instead of queueing behind it.
+        //   2. AN UNGOVERNED HEAVY LANE. transcribeAudio() took NO ticket at all — so a ~1-3 GB
+        //      whisper decode could run flat out beside the BULK embed drain AND a RESIDENT
+        //      vision/describe model, on the ONE path where a human is waiting. That is the
+        //      exact two-heavy-models shape D-001 exists to prevent, and the C10 anti-rot scan
+        //      could not see it (it greps spawn/localInfer/localStream; this reaches whisper
+        //      over HTTP). Gate C18 now pins the class of this call site directly.
+        //
+        // admitTranscribe is INTERACTIVE-PREFERRED with a BULK FALLBACK, so a background holder
+        // that will not yield inside the preempt budget costs this decode its PRIORITY, never the
+        // decode itself. Only a BULK refusal (real memory pressure / a full BULK budget) refuses
+        // here — and then the turn proceeds without the transcript, the attachment row keeps
+        // `transcript = NULL`, and the background drain (transcribe-retry.js) picks it up.
+        //
+        // ⚠️ "THE DRAIN WILL RECOVER IT" IS NOT UNIVERSALLY TRUE — do not restore that claim. Two
+        // configurations where it structurally cannot (QA9 adversarial review, HIGH-2): a vault
+        // with an audio-capable Ollama and NO Whisper service (both the drain loop and
+        // transcribeAttachment hard-gate on transcriber health `ok`, which the LIVE path does not
+        // need), and an attachment stored with a NULL `file_type` (db/attachments.js
+        // listPendingTranscription filters on `file_type LIKE 'audio/%' …`, so it is never
+        // selected). The BULK fallback exists precisely so those cases almost never reach a
+        // refusal; they are recorded as residuals rather than claimed fixed.
+        const adm = await admitTranscribe({ interactive: true });
+        if (!adm.ok) {
+          console.log('[internal-router] attachment-context transcribe deferred — compute busy; the background drain will retry');
+          return res.json({ ok: true, contextText: null, reason: 'compute-busy' });
+        }
+        // ⚠️ THE DECODE MUST BE BOUNDED, AND THIS IS WHY (D-001, review CRITICAL-1). An INTERACTIVE
+        // ticket occupies the ONE model slot. Unbounded, the hold time is transcribe-long.js's 2 h
+        // default × withRetry's 2 attempts ≈ 4 h — during which every resident lane is refused AND
+        // the ticket's lease would expire under a live decode and let the drainer load a SECOND
+        // resident model beside it. The AbortSignal caps the hold; INTERACTIVE_LEASE_MS is derived
+        // from that same bound (× attempts × 2) so the lease can never fire first; and real
+        // per-window/per-segment progress heartbeats the ticket so a genuinely-advancing decode
+        // re-arms its own lease (design §5: heartbeats from progress, never from a timer).
+        // A recording too long for a LIVE turn is not lost — it returns null here (the turn
+        // proceeds) and the background BULK drain transcribes it with the full 3 h budget.
+        // ══════════════════════════════════════════════════════════════════════════════════════
+        //  D-076: A LIVE TURN IS BOUNDED, SO IT PRODUCES PARTIALS BY DESIGN — say so on the row
+        // ══════════════════════════════════════════════════════════════════════════════════════
+        // LIVE_DECODE_BUDGET_MS is 4 minutes, which is CORRECT for a human waiting in a chat and
+        // is a D-001 safety property (see transcribe-attachment.js). It also means a 30-minute
+        // recording CANNOT finish here. That was survivable only if the row stayed resumable — and
+        // it did not: this line wrote `transcript` with no coverage, and the drain's
+        // `transcript IS NULL` predicate then excluded the row FOREVER. The bounded live turn was
+        // therefore the most reliable way to permanently truncate a long recording.
+        //
+        // Coverage now rides the same UPDATE as the text, so the background drain finishes the
+        // remainder with its full budget. Nothing about the ticket, the class, or the bound changes.
+        let liveCoverage = null;
+        let liveFault = null;
+        const budget = AbortSignal.timeout(LIVE_DECODE_BUDGET_MS);
+        try {
+          contextText = await withRetry('transcribe', () => transcribeAudio({
+            bytes, mimeType: fileType, fileName,
+            signal: budget,
+            onProgress: () => adm.heartbeat(),
+            onCoverage: (c) => { liveCoverage = c; },
+            onFault: (reason) => { liveFault = reason; },
+          }));
+        } finally { adm.release(); }   // crash-release #1 — the single model slot is never leaked
+        if (contextText) {
+          const { writeCoverage, readCoverage, coverageDominates } = await import('./enrich/transcript-coverage.js');
+          // RE-READ before merging. `row` was fetched before a decode that can run four minutes, and
+          // writeCoverage only preserves keys present in the snapshot it is given — so any metadata
+          // written meanwhile (including by the background drain, which can hold a BULK ticket on
+          // this same attachment concurrently) would be silently dropped (second adversarial review,
+          // LOW-6). Fail soft: if the re-read fails, fall back to the snapshot we already have.
+          const fresh = await db.attachments.getById(attachmentId, userId).catch(() => null);
+          // ⚠️ AND IT MUST NOT DOWNGRADE WHAT IS ALREADY THERE. This route and the background drain
+          // transcribe the SAME attachment concurrently BY DESIGN — the live turn holds INTERACTIVE
+          // (the model slot) while the drain holds BULK (the sum gate), so the governor does not and
+          // cannot serialize them, and nothing else keys on the attachment id. Whichever finishes
+          // LAST used to win: a drain pass that completed a 30-minute transcript was replaced by
+          // this route's ≤4-minute partial, `complete:true` reverted to `incomplete:1`, and the file
+          // was re-queued for another full decode. Both adversarial reviews found this independently
+          // and it is the last write in the system that lacked the guard.
+          const liveNext = { complete: liveCoverage?.complete === true, coveredSec: liveCoverage?.coveredSec ?? 0 };
+          if (coverageDominates(readCoverage(fresh?.metadata), liveNext)) {
+            console.log('[internal-router] attachment-context transcript kept — stored coverage already dominates this live pass');
+          } else await db.attachments.update(attachmentId, {
+            transcript: contextText,
+            metadata: writeCoverage(fresh?.metadata ?? row?.metadata ?? null, {
+              complete: liveCoverage?.complete === true,
+              coveredSec: liveCoverage?.coveredSec ?? 0,
+              durationSec: liveCoverage?.durationSec ?? 0,
+              segments: liveCoverage?.segments ?? 0,
+              gaps: liveCoverage?.gaps ?? [],
+              engine: liveCoverage?.engine ?? 'live-turn',
+              fault: liveCoverage?.complete === true ? null : (liveFault || 'live-budget'),
+            }),
+          });
+        }
       } else if (kind === 'text') {
         const text = bytes.toString('utf8').replace(/\u0000/g, '').trim();
         // Store the FULL decoded text; clampStored only guards a pathological

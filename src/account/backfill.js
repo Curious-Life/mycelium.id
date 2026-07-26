@@ -2,7 +2,7 @@
 //
 // Converts a column's encrypted wrapped-DEK envelopes to PLAINTEXT-inside-SQLCipher
 // (content) or RAW little-endian float32 bytes (vectors). Used by Stage A (vectors)
-// and Stage B/C (content). @see docs/DESIGN-sqlcipher-backfill-engine-2026-06-19.md
+// and Stage B/C (content). @see the SQLCipher backfill-engine design
 //
 // Runs IN-APP on the app's own keyed better-sqlite3 handle (`db._sqlite`) — NOT a
 // spawned child: a JS process opens SQLCipher directly, and a second writer would

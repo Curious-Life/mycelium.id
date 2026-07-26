@@ -10,7 +10,7 @@
 // the scattered magic numbers (1024 / 4096 / 700 / 1500 / 300 / 8192). Pure
 // arithmetic — no I/O, no secrets, fail-safe (over-reserves, never under).
 //
-// See docs/TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md.
+// See the text-generation abstraction design.
 
 /**
  * Cheap token estimate (~4 chars/token). v1 heuristic; a real tokenizer is a

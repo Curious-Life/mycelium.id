@@ -7,7 +7,7 @@
 # (they're app resources, not sidecars), and the emitted .dmg wraps the
 # unsigned .app. So the correct order is: deep-sign the .app → notarize+staple
 # the .app → rebuild the .dmg from the stapled .app → notarize+staple the .dmg.
-# See docs/MAC-APP-RELEASE-RUNBOOK-2026-06-05.md §A.
+# See the Mac-app release runbook §A.
 #
 # Prereqs (one-time):
 #   - "Developer ID Application" cert in the login keychain

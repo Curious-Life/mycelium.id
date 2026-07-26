@@ -1,6 +1,6 @@
 // src/remote/runtime.js — render the on-disk configs the bundled sidecars consume.
 //
-// The remote transport (docs/REMOTE-CONNECT-TRANSPORT-DESIGN) terminates TLS on
+// The remote transport (the remote-connect transport design) terminates TLS on
 // THIS Mac (Caddy) and reaches the relay via a passthrough reverse tunnel (frpc),
 // so the relay only ever forwards ciphertext. This module renders:
 //   - frpc.toml  : FRP v1 client config (reverse tunnel, type=https passthrough)

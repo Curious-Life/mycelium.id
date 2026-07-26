@@ -18,7 +18,7 @@ description: >-
 
 ## Why
 
-`M-001` in `docs/QA-DEFECT-LEDGER.md`. Three gates were found green for the wrong reason in one
+`M-001` in the QA defect ledger. Three gates were found green for the wrong reason in one
 session:
 
 | Gate | Why it was green |

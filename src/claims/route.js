@@ -10,7 +10,7 @@
 // Additive only: routing never removes recall — it picks how DEEP to render the
 // support path, while the existing flat layers are still searched.
 //
-// See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.7.
+// See the persona-claims design §3.7.
 
 const EVENT = /\b(when|what time|which day|date|yesterday|today|last (week|month|night|time)|did i|where did|who did|how many)\b/i;
 const CLAIM = /\b(why|values?|believe|principles?|boundar\w+|character|personality|identity|care about|motivat\w*|stand for|matter to me|who am i|tend to be)\b/i;

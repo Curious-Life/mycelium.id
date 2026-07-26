@@ -1,6 +1,6 @@
 /**
  * Phase-color interpolation for the Mindscape Pulses visualization
- * (Wave M1 of docs/MINDSCAPE-PULSES-PLAN.md).
+ * (Wave M1 of the mindscape pulses plan).
  *
  * Each territory has a daily history of {phase, vitality} samples
  * from the `territory_vitality` table. Given a scrub time `t`, we

@@ -11,7 +11,7 @@
     - allow-dyld-environment-variables              → main.rs sets PATH/HF_HOME/etc. on children
     - disable-library-validation                    → load bundled node/python, the native
       better_sqlite3.node, and the caddy/frpc sidecars (not all team-signed)
-  See docs/MAC-APP-RELEASE-RUNBOOK-2026-06-05.md §A.
+  See the Mac-app release runbook §A.
 -->
 <plist version="1.0">
 <dict>

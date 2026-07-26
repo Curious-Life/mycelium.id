@@ -29,6 +29,7 @@ import { processClaudeCodeExport } from './ingest/import-parsers.js';
 import { importHermes } from './ingest/hermes-import.js';
 import { importOpenClaw } from './ingest/openclaw-import.js';
 import { importLocalFiles } from './ingest/local-files-import.js';
+import { normalizeCategorySelection } from './ingest/file-categories.js';
 import { detectSources, probeSweepAccess, readClaudeCodeEntries, assertImportPathAllowed, hermesPaths, openClawPaths, localSweepRoots } from './ingest/detect-sources.js';
 import { captureMessage } from './ingest/capture.js';
 import { getImportSource, importCatalog } from './ingest/registry.js';
@@ -55,6 +56,31 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   // Per-file/total caps live in importObsidianVault.
   const limitMb = Number(process.env.MYCELIUM_OBSIDIAN_IMPORT_LIMIT_MB) || 256;
   router.use(express.json({ limit: `${limitMb}mb` }));
+  // A malformed body must answer like every other bad input on these routes: a terse JSON
+  // error. Without this, body-parser's default handler renders an HTML page carrying the
+  // error's STACK and absolute server paths straight into the response — a CLAUDE.md §1
+  // leak, reachable with no valid JSON and no auth-bearing content.
+  //
+  // ⚠️ DEFAULT-DENY ON STATUS, NOT AN ENUMERATION OF err.type. The first version listed
+  // `entity.parse.failed` and `entity.too.large`, and an independent review then leaked the
+  // three sibling shapes it had not thought of, on the same route:
+  //   • `content-type: application/json; charset=utf-99` → UnsupportedMediaTypeError (415)
+  //   • `content-encoding: br-bogus`                      → UnsupportedMediaTypeError (415)
+  //   • `content-encoding: gzip` + a non-gzip body        → Error: incorrect header check (400)
+  // A hand-maintained list of failure modes rots (ledger M-002); anything body-parser marks
+  // as a client error gets one terse sentence, and anything else is still a 500 with no body
+  // from us. This layer precedes the routes, so it only ever sees body-parsing failures —
+  // route errors reach their own try/catch and the default handler unchanged (verified).
+  // eslint-disable-next-line no-unused-vars -- express identifies an error handler by arity
+  router.use((err, _req, res, next) => {
+    const status = Number(err?.status || err?.statusCode) || 0;
+    if (status < 400 || status >= 500) return next(err);
+    const TERSE = {
+      413: 'request body too large',
+      415: 'unsupported content type or encoding',
+    };
+    return res.status(status).json({ ok: false, error: TERSE[status] || 'invalid request body' });
+  });
 
   // ── Generic import surface (registry-driven, async) ──────────────────────────
   // ONE async background job for every registry source with a `run` — same
@@ -293,7 +319,11 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   // carry publicJob's `key`, `cancelled` and `result`. Harmless (asSweep in detect.ts spreads
   // the body, and all three are content-free on an authed route), but it is a real shape
   // change, recorded here rather than left for someone to find.
-  let sweepMeta = { roots: 0, truncated: false };
+  // `categories` is echoed back so the UI can PROVE what the running/finished sweep
+  // was actually allowed to touch, rather than trusting that its own request stuck
+  // (D-070 — the user's report was "it imported everything anyway", and the client
+  // had no way to tell). It is also what makes the re-attach check below possible.
+  let sweepMeta = { roots: 0, truncated: false, categories: [] };
   const publicSweep = () => {
     const p = sweep.progress();
     return p.status === 'idle' ? { status: 'idle' } : { ...p, ...sweepMeta };
@@ -301,9 +331,35 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
 
   router.post('/import/local-files', async (req, res) => {
     try {
-      // Already running → just report progress (idempotent; a re-click re-attaches).
-      if (sweep.isRunning()) return res.json({ ok: true, ...publicSweep() });
-      const categories = Array.isArray(req.body?.categories) ? req.body.categories : undefined;
+      // ── CONSENT GATE (D-070), evaluated BEFORE the re-attach ──────────────────
+      // Fail-closed: the selection is required and is never widened. `undefined`
+      // used to flow straight into importLocalFiles' `: allCats` branch, so a
+      // client that sent no categories — including our own, which dropped an
+      // all-deselected selection to `{}` — imported every photo, video and audio
+      // file on the machine.
+      const categories = normalizeCategorySelection(req.body?.categories);
+      if (!Array.isArray(req.body?.categories)) {
+        return res.status(400).json({ ok: false, error: 'categories required — an explicit selection of what to import' });
+      }
+      if (!categories.length) {
+        return res.status(400).json({ ok: false, error: 'no categories selected — nothing to import' });
+      }
+      // Already running → re-attach ONLY if the running job carries the SAME
+      // consent. A re-click with a DIFFERENT selection previously got `ok:true`
+      // plus the old job's progress: the UI reported success while the sweep
+      // carried on importing categories the user had just switched off.
+      if (sweep.isRunning()) {
+        const running = sweepMeta.categories || [];
+        const same = running.length === categories.length && running.every((c, i) => c === categories[i]);
+        if (!same) {
+          return res.status(409).json({
+            ok: false,
+            error: `an import is already running for: ${running.join(', ') || 'unknown'} — cancel it before importing a different selection`,
+            ...publicSweep(),
+          });
+        }
+        return res.json({ ok: true, ...publicSweep() });
+      }
       const folderPath = req.body?.folderPath;
       let roots;
       if (typeof folderPath === 'string' && folderPath) {
@@ -316,7 +372,7 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
         }
         if (!roots.length) return res.status(400).json({ ok: false, error: 'no sweepable folders found' });
       }
-      sweepMeta = { roots: roots.length, truncated: false };
+      sweepMeta = { roots: roots.length, truncated: false, categories };
       // Start the job and return immediately — the work runs detached inside the runner.
       sweep.start({
         key: 'local-files',

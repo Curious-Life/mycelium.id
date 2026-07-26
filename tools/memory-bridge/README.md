@@ -4,7 +4,7 @@ Make **any** AI agent use your Mycelium vault as a universal memory layer: on ev
 turn the agent **pulls** context from the vault and **pushes** both your message and
 the assistant's reply back in — reliably, not at the model's discretion.
 
-Design: `docs/UNIVERSAL-MEMORY-LAYER-DESIGN-2026-06-11.md`.
+Design: the universal-memory-layer design.
 Gate: `npm run verify:memory-bridge`.
 
 ## The whole contract (two HTTP calls)

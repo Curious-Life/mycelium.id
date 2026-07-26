@@ -1,5 +1,5 @@
 // src/crypto/e2e-session.js — the E2E session between a paired phone and the Mac
-// (docs/E2E-REACHABILITY-DESIGN-2026-07-19.md §2.1, Phase 2). This is the layer that
+// (the E2E-reachability design §2.1, Phase 2). This is the layer that
 // makes confidentiality terminate on the two DEVICES: whatever carries the frames (a
 // dumb relay, Cloudflare, plain HTTP) only ever sees ciphertext.
 //

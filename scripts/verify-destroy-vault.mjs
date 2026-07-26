@@ -1,5 +1,5 @@
 // verify:destroy-vault — the node-side factory-reset wipe engine
-// (src/account/destroy.js, design docs/DATA-DESTROY-VAULT-DESIGN-2026-07-03.md).
+// (src/account/destroy.js; see the destroy-vault design).
 //
 //   D1  verifyRecoveryKey: correct→true, wrong/short/non-string→false (constant-time)
 //   D2  destroyTargets illustrative list names key artifacts incl. snapshots

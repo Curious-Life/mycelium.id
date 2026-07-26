@@ -1,6 +1,6 @@
 // src/federation/transport.js — the federation TRANSPORT seam.
 //
-// P1 of the federation redesign (docs/FEDERATION-TRANSPORT-REDESIGN-DESIGN-2026-07-18.md):
+// P1 of the federation redesign (the federation-transport redesign):
 // extract the ONE place that resolves a peer's endpoint + frames and sends a SIGNED
 // federation envelope, so a second transport (relay store-and-forward, P3) can slot in
 // behind the same interface. This is a BEHAVIOR-NEUTRAL extraction of the two closures

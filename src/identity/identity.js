@@ -21,7 +21,7 @@ const HKDF_INFO = "mycelium-identity-v1";
 // signing key, so the box derives a fresh X25519 keypair rather than the
 // Ed25519→X25519 birational conversion the W3C did:key spec warns against (key
 // separation). Used to seal the per-space Content Encryption Key to this member
-// (E2E "Space Key Lockbox", docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md).
+// (E2E "Space Key Lockbox", the shared-spaces E2E design).
 const KEYAGREEMENT_HKDF_INFO = "mycelium-keyagreement-v1";
 // PKCS8 DER prefix for an X25519 private key carrying a 32-byte seed (OID 1.3.101.110).
 const X25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");

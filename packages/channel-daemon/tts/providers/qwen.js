@@ -51,6 +51,18 @@ function renderUrl() {
 }
 function getDefaultVoice() { return process.env.QWEN_TTS_VARIANT || ''; }
 
+// The vault's allowlisted render reasons (src/tts/voice-render.js UPSTREAM_REASONS)
+// → this module's TTS error codes. Anything not listed falls back to the HTTP status,
+// so an unknown vault token can never masquerade as a known state.
+const VAULT_REASON_CODES = {
+  'voice-sample-pending': 'voice-sample-pending',
+  'voice-runtime-missing': 'voice-runtime-missing',   // TERMINAL — this Mac cannot run MLX
+  'model-unavailable': 'voice-model-unavailable',     // retryable — the model failed to load
+  'synth-failed': 'voice-synth-failed',              // the render itself threw (the D-003 residual)
+  'bad-ref-audio': 'voice-sample-unreadable',
+  'render-service-unreachable': 'render-service-unreachable',
+};
+
 export const qwenProvider = {
   name: 'qwen',
   // Qwen handles long text but quality + latency are best in sentence-ish chunks;
@@ -95,11 +107,17 @@ export const qwenProvider = {
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => '');
       // Surface the vault's honest states so the caller drops the voice reply and
-      // delivers text, never a fabricated audio. 501 = no frozen sample yet;
-      // 503 = MLX service down / not Apple Silicon / model not downloaded.
-      const code = resp.status === 501 ? 'voice-sample-pending'
-        : resp.status === 503 ? 'render-service-unavailable'
-        : undefined;
+      // delivers text, never a fabricated audio. The vault now names the REASON
+      // (already allowlisted + sanitized by src/tts/voice-render.js), so prefer it
+      // over the bare HTTP status — a 503 "the model failed to load" and a 503 "this
+      // Mac cannot run MLX" have completely different remedies, and collapsing them
+      // is what kept D-003 alive across three QA cycles. Fall back to the status.
+      let vaultError = null;
+      try { vaultError = JSON.parse(errBody)?.error || null; } catch { /* not JSON */ }
+      const code = VAULT_REASON_CODES[vaultError]
+        || (resp.status === 501 ? 'voice-sample-pending'
+          : resp.status === 503 ? 'render-service-unavailable'
+            : undefined);
       throw new TTSProviderError({ provider: 'qwen', status: resp.status, code, body: errBody.slice(0, 200) });
     }
     const audio = Buffer.from(await resp.arrayBuffer());

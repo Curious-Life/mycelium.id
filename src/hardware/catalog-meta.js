@@ -7,7 +7,7 @@
 // quant, popularity, recency — but NO emotional-intelligence / warmth signal.
 // Companion-suitability for personal growth is fundamentally a human judgment;
 // we encode it here (reviewed in PR diffs) and let objective signals only adjust.
-// See docs/DYNAMIC-CATALOG-DESIGN-2026-06-05.md §3.
+// See the dynamic-catalog design §3.
 
 // ── Family-prior warmth (0..1): the dominant companion-quality signal ─────────
 // Higher = warmer / more emotionally attuned for a personal companion & self-

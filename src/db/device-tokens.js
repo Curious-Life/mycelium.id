@@ -1,6 +1,6 @@
 /**
  * Device tokens namespace — per-device bearer credentials for paired phones
- * (docs/PHONE-QR-PAIRING-DESIGN-2026-07-19.md, Unit A).
+ * (the phone QR-pairing design, Unit A).
  *
  * A paired phone (QR-scanned + owner-approved on the Mac) gets its OWN token,
  * minted here and sealed to the phone over the pairing channel (src/portal-pair.js).

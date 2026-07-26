@@ -107,7 +107,7 @@ Python, no model download. First launch creates the encrypted vault under
 
 **Unsigned build:** the app is ad-hoc-signed, not notarized, so Gatekeeper warns on
 first open — **right-click → Open** once to allow it. (Developer-ID notarization is a
-later milestone; see `docs/DESIGN-packaged-app-distribution-2026-06-02.md`.)
+later milestone; see the packaged-app distribution design.)
 
 ## How the self-contained bundle works (implemented)
 

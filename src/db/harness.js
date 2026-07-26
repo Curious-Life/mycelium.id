@@ -1,5 +1,5 @@
 // src/db/harness.js — the native agent harness state layer (Phase 5, Step 2).
-// Backs docs/NATIVE-AGENT-HARNESS-SPEC-2026-06-17.md §5.4/§5.6/§6 + migration 0019.
+// Backs the native-agent harness spec §5.4/§5.6/§6 + migration 0019.
 //
 // Three concerns over three tables:
 //   • scheduled_tasks       — autonomous wake-cycles (the executor D5 dropped). Encrypted

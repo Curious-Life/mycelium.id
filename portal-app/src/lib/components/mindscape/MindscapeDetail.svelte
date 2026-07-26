@@ -8,6 +8,15 @@
 	// D-004: embedded-vs-mapped + the rebuild control. Mounted on the REALM LIST — the surface a
 	// user with a built map actually looks at, and the one where "369 of 2510" was invisible.
 	import MapFreshness from './MapFreshness.svelte';
+	// QA9 — the ONE collapse-header pattern, shared with PipelineStatus and taken from the live
+	// process indicator (StatusPopover's vault-pill). Not a second implementation.
+	import CollapsibleHeader from './CollapsibleHeader.svelte';
+
+	// The Mindscape section's own disclosure. Default OPEN — it is the rail's primary content; the
+	// collapse exists so a user working in the pipeline/measure sections can get it out of the way,
+	// not to hide it by default. Stored as WHERE the user collapsed (a nav key) rather than as a
+	// boolean, so a navigation re-opens it by construction — see `sectionExpanded` below.
+	let collapsedAtNavKey = $state<string | null>(null);
 
 	// Per-territory "describe more": deepen narration coverage for just this territory
 	// (POST /mycelium/describe-more {territoryId} → spawns describe-chronicles.js as a
@@ -413,6 +422,25 @@
 		return 'realms';
 	});
 
+	// ── QA9: a NAVIGATION always re-opens the section ────────────────────────────────────────
+	// Collapsing while drilled in hides the breadcrumb, the Back button and the whole card — which
+	// is correct, the user asked for it. What is NOT correct is staying collapsed through a
+	// navigation the user performs somewhere ELSE: clicking a point in the 3D canvas, the unified
+	// back gesture (`lib/nav/back-intent.ts`), or a deep link all change the drill level, and a
+	// collapsed rail answers that with an apparently empty panel. Collapse is a "get this out of
+	// my way", not a "stop showing me what I just selected" (independent review M-3).
+	//
+	// Expressed as a DERIVATION, not an $effect: we remember WHICH nav position the user collapsed
+	// at, so "expanded" is simply "you are not where you collapsed". Any level or selection change
+	// re-opens for free, a plain collapse (which moves no coordinate) is honoured, and there is no
+	// effect ordering or dependency-tracking question to get wrong. The first attempt WAS an
+	// $effect comparing against a plain `let`, and it silently never fired — measured in a real
+	// browser: collapse, then drillIntoRealm() from outside the rail, and the section stayed shut.
+	const navKey = $derived(
+		`${navLevel}:${msState.selectedRealmId}:${msState.selectedSemanticThemeId}:${msState.selectedTerritoryId}`,
+	);
+	const sectionExpanded = $derived(collapsedAtNavKey !== navKey);
+
 	// Selected activity bar (hover is owned by the ActivityBars component now).
 	let selectedActivity = $state<{ month: string; count: number } | null>(null);
 	let selectedActivityChronicle = $state<{ theme: string; signature: string; narrative: string } | null>(null);
@@ -458,6 +486,27 @@
 	     a stable region whose text changes is the robust pattern. Choices announce politely —
 	     a choice is not an alert. -->
 	<div class="sr-live" aria-live="polite">{announceText}</div>
+
+	<!-- QA9: the Mindscape section gets the SAME whole-header disclosure as the pipeline card and
+	     the live process indicator — one pattern, one component (CollapsibleHeader). It stays
+	     OUTSIDE the {#if sectionExpanded} below so collapsing can never hide its own way back.
+	     Default open: this is the rail's primary content, not an optional detail.
+	     A FUNCTION BINDING, because `sectionExpanded` is derived, not stored: collapsing records
+	     the nav position it happened at, expanding clears it. That is what makes a navigation
+	     re-open the section by construction rather than by an effect racing the store. -->
+	<CollapsibleHeader
+		bind:expanded={() => sectionExpanded, (v) => (collapsedAtNavKey = v ? null : navKey)}
+		label="the mindscape navigator"
+		testid="mindscape-section-toggle"
+		extraClass="rail-section-header"
+	>
+		<span class="rail-section-title">Mindscape</span>
+		{#if totalRealms > 0}
+			<span class="rail-section-sub">{totalRealms} {totalRealms === 1 ? 'area' : 'areas'}</span>
+		{/if}
+	</CollapsibleHeader>
+
+	{#if sectionExpanded}
 	<!-- Breadcrumb — hidden at the realms root (a lone "Mycelium" there just
 	     duplicates the page). Shown only once drilled in, as a back-path. -->
 	{#if navLevel !== 'realms'}
@@ -1167,19 +1216,55 @@
 			</div>
 		{/if}
 	</div>
+	{/if}
 </div>
 
 <style>
 	.mindscape-nav {
-		height: 100%;
+		/* D-034 ↻1. This used to be `height: 100%; overflow: hidden`, which is what made #350's
+		   fix unreachable: as one of FIVE stacked sections in the rail it claimed the rail's
+		   ENTIRE height, so its own bottom edge sat below the panel's clip line and the three
+		   sections after it were off-screen at every scroll position. It is now a normal
+		   content-sized block inside the rail's single scroll port (`.nav-rail`,
+		   MindscapeView.svelte). No `height`, no `overflow` — the section must be exactly as tall
+		   as what is in it and let the rail scroll it.
+		   ⚠️ `overflow` MUST NOT COME BACK, on any axis, and not to clip the `border-radius`
+		   below either — beyond re-creating the nested scroller, any overflow here makes THIS box
+		   the nearest scrollport and the sticky `.breadcrumb` would pin to it instead of to the
+		   rail, i.e. stop working. verify:mindscape-rail S4 fails the build on any of the three
+		   overflow properties. */
 		display: flex;
 		flex-direction: column;
 		background: var(--color-elevated);
-		overflow: hidden;
+		border: 1px solid var(--color-border);
+		border-radius: 10px;
 	}
 
-	/* Breadcrumb */
+	/* The rail-section header (QA9) — the label + count inside <CollapsibleHeader>. The button
+	   chrome and the caret belong to that component; only the CONTENT is styled here. */
+	.rail-section-title {
+		font-size: 0.74rem;
+		font-weight: 600;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		color: var(--color-text-secondary);
+	}
+	.rail-section-sub {
+		font-size: 0.68rem;
+		color: var(--color-text-tertiary);
+	}
+	:global(.mindscape-nav > .rail-section-header) {
+		padding: 10px 14px;
+	}
+
+	/* Breadcrumb — sticky so the drill path stays on screen while the rail scrolls. It used to
+	   be pinned by `flex-shrink: 0` against a full-height section; that section is gone (see
+	   `.mindscape-nav`), so `position: sticky` is what preserves the affordance. */
 	.breadcrumb {
+		position: sticky;
+		top: 0;
+		z-index: 2;
+		background: var(--color-elevated);
 		display: flex;
 		align-items: center;
 		gap: 4px;
@@ -1240,17 +1325,18 @@
 		background: rgba(229, 184, 76, 0.06);
 	}
 
-	/* Scrollable content area */
+	/* The section's content — NOT a scroll port any more (D-034 ↻1).
+	   #350 made this box scroll (`flex: 1; overflow-y: auto; min-height: 0`) and that part
+	   worked: measured scrollHeight 1507 vs clientHeight 860. It fixed the wrong box. Its parent
+	   claimed the whole rail height while sitting BELOW the pipeline card, so this scroller's own
+	   bottom edge was already past the panel's clip line — the last stretch of every list was cut
+	   off no matter how far you scrolled, and the sections after it were unreachable entirely.
+	   Two nested scrollers were also the "only partially scrollable" feel: the wheel would stop
+	   dead at this box's end with more rail still below.
+	   There is now ONE scroller, `.nav-rail` in MindscapeView.svelte, at the level that governs
+	   every section and every drill level. This box just holds content. */
 	.nav-content {
-		flex: 1;
-		overflow-y: auto;
-		/* D-034. `overflow-y: auto` alone does NOT make a flex child scroll. A flex item's
-		   default `min-height: auto` lets it grow to its content instead of shrinking to its
-		   flex basis, so the box is always exactly as tall as what is inside it and there is
-		   never any overflow to scroll. The detail panel therefore rendered its full height
-		   and the content below the fold was simply unreachable. `min-height: 0` restores the
-		   shrink so the overflow rule above can actually take effect. */
-		min-height: 0;
+		display: block;
 	}
 
 	/* Section header (realm/theme summary) */

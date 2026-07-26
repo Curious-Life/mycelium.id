@@ -13,7 +13,7 @@ import { mindDir, voiceSamplesRoot } from '../paths.js';
 import {
   generateUserMaster, deriveSystemKey, normalizeKey,
   writeKeychain, readUserMaster, deleteKeychain, keychainAvailable,
-  onePasswordAvailable, saveRecoveryKeyToKeychain, saveRecoveryKeyTo1Password, openInStore,
+  saveRecoveryKeyToKeychain, openInStore,
 } from './keystore.js';
 import {
   sealKeys, unsealKeys, lockExists, readLock, writeLock, removeLock, MIN_PASSPHRASE_LENGTH,
@@ -74,7 +74,6 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       // null when the vault is open or genuinely uncreated.
       bootError: (typeof getBootError === 'function' ? getBootError() : null) || null,
       keychainAvailable: keychainAvailable(),
-      onePasswordAvailable: onePasswordAvailable(),
     });
   });
 
@@ -108,7 +107,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
     // (completeBoot → ensureVaultSchema), so device loss = total data loss even
     // with the key. Require the vault to be present first: restore a .myvault
     // backup (POST /restore-backup) — or hand-copy the data dir — THEN paste the
-    // key. See docs/VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md §4.
+    // key. See the vault-backup and remote-access design §4.
     if (!existsSync(kcvPath)) {
       return res.status(409).json({
         error: 'no_vault',
@@ -150,39 +149,26 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
     res.json({ recoveryKey: key });
   });
 
-  // One-click "save my recovery key" to the Keychain or 1Password. The key is
-  // read server-side and handed to the chosen store — it never returns to the
-  // client. { target: 'keychain' | '1password' }.
+  // One-click "save a copy to this Mac's Keychain". The key is read server-side
+  // and handed to Keychain Access — it never returns to the client. This is an
+  // ON-DEVICE CONVENIENCE, NOT a backup: a login-Keychain item lives on this Mac,
+  // so it is gone if the machine is lost. The only real backup is an OFF-machine
+  // copy of the 64-hex key (download/print/copy-into-a-syncing-manager), which is
+  // why this does NOT satisfy the onboarding backup gate. { target: 'keychain' }.
+  // (D-027: the former `target:'1password'` op-CLI branch was removed — it blamed
+  // the user for a per-process authorization limit a GUI app cannot satisfy.)
   router.post('/recovery-key/save', (req, res) => {
     const key = readUserMaster();
     if (!key) return res.status(404).json({ error: 'no_key' });
     const target = req.body?.target;
+    if (target !== 'keychain') return res.status(400).json({ error: 'bad_target' });
     try {
-      if (target === 'keychain') saveRecoveryKeyToKeychain(key);
-      else if (target === '1password') saveRecoveryKeyTo1Password(key);
-      else return res.status(400).json({ error: 'bad_target' });
-      openInStore(target); // best-effort: reveal it natively so the user SEES it
-      return res.json({ ok: true, opened: target, item: 'Mycelium Recovery Key' });
+      saveRecoveryKeyToKeychain(key);
+      openInStore('keychain'); // best-effort: reveal it natively so the user SEES it
+      return res.json({ ok: true, opened: 'keychain', item: 'Mycelium Recovery Key' });
     } catch (err) {
-      // 1Password: map the keystore's `.code` (op_not_installed / op_signed_out)
-      // to a SPECIFIC, actionable message with the CLI-install link, instead of
-      // the old generic "is it installed and signed in?" (ON-2). The install/setup
-      // URL is the frontend's job to render as a hyperlink; the text carries it too
-      // for the non-hyperlink surfaces (channels, logs).
-      const OP_DOCS = 'https://developer.1password.com/docs/cli/get-started/';
-      let msg;
-      if (target === '1password') {
-        if (err?.code === 'op_not_installed') {
-          msg = `Couldn't save to 1Password — the 1Password CLI (\`op\`) isn't installed. Install it: ${OP_DOCS}`;
-        } else if (err?.code === 'op_signed_out') {
-          msg = 'Couldn\'t save to 1Password — the `op` CLI is installed but not signed in. Turn on "Integrate with 1Password CLI" in the 1Password app (Settings → Developer), or run `op signin`, then try again.';
-        } else {
-          msg = `Couldn't save to 1Password. Make sure the 1Password CLI (\`op\`) is installed and signed in: ${OP_DOCS}`;
-        }
-      } else {
-        msg = sanitizeErr(err);
-      }
-      return res.status(500).json({ error: 'save_failed', message: msg });
+      // sanitizeErr logs key-free server-side and returns only a generic message.
+      return res.status(500).json({ error: 'save_failed', message: sanitizeErr(err) });
     }
   });
 

@@ -1,5 +1,5 @@
 // verify:attachment-context — the loopback extraction route (step 3 of
-// docs/CHANNEL-INBOUND-MEDIA-DESIGN-2026-06-10.md). Real temp vault + REAL
+// the channel inbound-media design). Real temp vault + REAL
 // encrypted blob round-trip (putBlob → getBlob); the models are faked (DI seam)
 // so the gate runs without Ollama. Proves:
 //   A1 image → caption returned + stored ENCRYPTED in attachments.description

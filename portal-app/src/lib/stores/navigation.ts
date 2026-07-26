@@ -62,6 +62,21 @@ export interface NavigationState {
 	// Doc-scope context — null when chat is not scoped to a specific
 	// library document.
 	docScope: DocScope | null;
+
+	/**
+	 * D-073 — one-shot "open the WHOLE chat, not just the input bar" ticket.
+	 *
+	 * ChatFloat auto-expands its messages area only when the thread is EMPTY
+	 * (ChatFloat.svelte's auto-expand effect). The onboarding greeting loads the just-persisted
+	 * first message into the store BEFORE it opens the chat, so by the time the chat becomes
+	 * visible the thread is no longer empty and it opened COLLAPSED: the operator saw only the
+	 * input field and had to click in to discover the agent's introduction.
+	 *
+	 * A counter, not a boolean, precisely because the expansion must be an EVENT and not a
+	 * state: ChatFloat expands once per increment. A user who deliberately collapses the chat
+	 * stays collapsed — no later message can re-open it, because nothing increments this again.
+	 */
+	chatExpandTicket: number;
 }
 
 const defaultState: NavigationState = {
@@ -78,13 +93,16 @@ const defaultState: NavigationState = {
 	timelineZoom: 'quarter',
 	spaceScope: null,
 	docScope: null,
+	chatExpandTicket: 0,
 };
 
 function loadFromStorage(): NavigationState {
 	if (!browser) return defaultState;
 	try {
 		const stored = localStorage.getItem(STORAGE_KEY);
-		if (stored) return { ...defaultState, ...JSON.parse(stored) };
+		// `chatExpandTicket` is an EVENT counter, not state (D-073). A restored value would be a
+		// request nobody made, replayed on every load, so it always starts from the default.
+		if (stored) return { ...defaultState, ...JSON.parse(stored), chatExpandTicket: 0 };
 	} catch {}
 	return defaultState;
 }
@@ -100,7 +118,9 @@ function createNavigationStore() {
 		if (saveTimeout) clearTimeout(saveTimeout);
 		saveTimeout = setTimeout(() => {
 			try {
-				localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+				// Never persist the one-shot expand ticket — see loadFromStorage.
+				const { chatExpandTicket: _drop, ...persistable } = state;
+				localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable));
 			} catch {}
 		}, 500);
 	});
@@ -132,6 +152,19 @@ function createNavigationStore() {
 
 		toggleChat() {
 			update((s) => ({ ...s, chatOpen: !s.chatOpen }));
+		},
+
+		/**
+		 * D-073 — open the chat AND expand its message area, for a message the user has not
+		 * seen yet (the onboarding greeting). `setChatOpen(true)` alone renders the input bar
+		 * over a collapsed thread, which is what made the agent's introduction look missing.
+		 *
+		 * Deliberately NOT wired to ordinary incoming messages: it is called from the
+		 * first-contact path only, and ChatFloat honours exactly one expansion per call, so it
+		 * can never fight a user who chose to collapse the chat.
+		 */
+		openChatExpanded() {
+			update((s) => ({ ...s, chatOpen: true, chatExpandTicket: s.chatExpandTicket + 1 }));
 		},
 
 		// Mindscape

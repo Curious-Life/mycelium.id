@@ -7,7 +7,7 @@
 # secure timestamp. We find every Mach-O (by content, not extension — the bundled
 # node/python binaries have no suffix), sign them inner-first, then sign the .app
 # itself with the hardened-runtime entitlements. See
-# docs/MAC-APP-RELEASE-RUNBOOK-2026-06-05.md §A.
+# the Mac-app release runbook §A.
 #
 # Usage:
 #   APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \

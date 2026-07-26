@@ -18,7 +18,7 @@
 	src/inference/claude-cli-status.js via GET /portal/providers/harness. The
 	"latest version" is best-effort: offline it is null and the copy degrades to
 	"installed, v2.1.198" — never a wall, and it never gates selection.
-	See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+	See the harness-CLI design.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';

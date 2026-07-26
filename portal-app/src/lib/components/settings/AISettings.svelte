@@ -1,6 +1,6 @@
 <!--
 	Connect & manage providers — DEMOTED to a pure connection surface by the Intelligence
-	redesign (docs/INTELLIGENCE-SCREEN-REDESIGN-2026-07-17.md Part I, P3/§9). It keeps the
+	redesign (the Intelligence-screen redesign Part I, P3/§9). It keeps the
 	Local/Cloud connect lanes, the #133 Claude ladder, the subscription card (+ the §4g
 	sensitive-work opt-in), web access, and the connected-providers list. It has LOST the
 	active-model hero, every per-task/per-function assignment control, the assistant
@@ -175,34 +175,89 @@
 	let subSensitiveBusy = $state(false);
 	let webSearchOn = $state(true);       // owner web access (Anthropic-run search) — default on
 	let webSearchBusy = $state(false);
-	// Model choice for the subscription. Persisted as the provider row's model_preference;
-	// empty falls back to the chat default (Opus 4.8). A curated CURRENT list is the
-	// reliable baseline; `pullSubModels` best-effort augments it from Anthropic (the OAuth
-	// token may lack models:list scope, so a failed pull just leaves the curated list).
-	const CLAUDE_SUB_MODELS: { id: string; label: string }[] = [
-		{ id: 'claude-opus-4-8', label: 'Opus 4.8 · recommended · most capable' },
-		{ id: 'claude-sonnet-5', label: 'Sonnet 5 · balanced' },
-		{ id: 'claude-fable-5', label: 'Fable 5 · creative' },
-		{ id: 'claude-haiku-4-5', label: 'Haiku 4.5 · fastest' },
-	];
-	let subModelsPulled = $state<string[]>([]);
+	// ── Model choice for the subscription — DISCOVERED, never a roster (D-074) ───────────────
+	// This used to be a four-entry `CLAUDE_SUB_MODELS` array typed into this file, with the
+	// server's answer merely APPENDED after it. The roster was the defect: when Anthropic
+	// shipped a newer Opus the picker still led with the old ids, and when the OAuth token
+	// lacked models:list scope the pull failed SILENTLY, leaving a stale list that looked
+	// exactly like a live one. Hand-maintained enumerations rot (meta-defect M-002) and this
+	// one rotted invisibly.
+	//
+	// Now: the options ARE the server's answer (GET /portal/providers/:id/models →
+	// src/inference/model-catalog.js). The server labels every answer — `source` live/cache/
+	// fallback and `stale` — and this component RENDERS that label instead of hiding it. A
+	// fallback list is still selectable (never a dead end) but is always visibly qualified.
+	//
+	// ⚠️ DO NOT reintroduce a literal model list here. The dated floor lives in ONE place
+	// (src/inference/model-registry.js) and the server derives the fallback from it;
+	// verify:providers P16* and verify:intelligence-flow F25 both fail if this list stops
+	// being the provider's answer.
+	type SubModels = { models: string[]; source: string; stale: boolean; error: string | null; defaultModel: string | null; loaded: boolean };
+	let subModels = $state<SubModels>({ models: [], source: 'fallback', stale: true, error: null, defaultModel: null, loaded: false });
 	let subModelsPulling = $state(false);
-	const subModelOptions = $derived.by(() => {
-		const seen = new Set(CLAUDE_SUB_MODELS.map((m) => m.id));
-		const extra = subModelsPulled.filter((id) => !seen.has(id)).map((id) => ({ id, label: id }));
-		return [...CLAUDE_SUB_MODELS, ...extra];
+	// Cosmetic only, and ALGORITHMIC on purpose: `claude-opus-4-8` → "Opus 4.8". It decorates
+	// whatever id the provider returned — an id it has never seen still renders (as itself),
+	// so this can never gate which models are offered. That distinction is the whole point:
+	// a lookup TABLE here would be the roster again, wearing a label's clothes.
+	function prettyModel(id: string): string {
+		// A trailing 8-digit date is a snapshot suffix, not a version component — `claude-sonnet-4-5
+		// -20250929` must not render "Sonnet 4.5.20250929". But it must not be DROPPED either: the
+		// floating alias and the pinned snapshot are different values, and rendering both as
+		// "Opus 4.1" gives two identical labels the user cannot tell apart — the pin becomes
+		// invisible (independent review ×2, LOW). Keep it, demoted.
+		// Anything the pattern doesn't recognise falls through to the raw id — the whole point: an
+		// unknown model still renders, so this can never gate what is offered.
+		const m = /^claude-([a-z]+)((?:-\d+)+?)(?:-(\d{8}))?$/.exec(id);
+		if (!m) return id;
+		const family = m[1][0].toUpperCase() + m[1].slice(1);
+		const version = m[2].slice(1).split('-').join('.');
+		return m[3] ? `${family} ${version} (${m[3]})` : `${family} ${version}`;
+	}
+	const subModelOptions = $derived(subModels.models.map((id) => ({ id, label: prettyModel(id) })));
+	// Honest state (never "a stale list dressed as live"). null ⇒ the list is current.
+	const subModelsNote = $derived.by(() => {
+		if (!subModels.loaded) return null;
+		if (!subModels.stale) return null;
+		// One branch per CATEGORY the server can send (they are tokens, never prose — see the route).
+		const why = subModels.error === 'auth_rejected' ? "your Claude login can't list models"
+			: subModels.error === 'timeout' || subModels.error === 'unreachable' ? "couldn't reach Anthropic"
+				: subModels.error === 'not_activated' ? 'this connection is not activated yet'
+					: subModels.error === 'rate_limited' ? 'Anthropic rate-limited the request'
+						: subModels.error === 'empty_list' ? 'Anthropic returned no models'
+							: 'the live list is unavailable';
+		// An EMPTY fallback (e.g. a pending row, or a base_url provider we have no dated rows for)
+		// must not claim to be "showing known models" while showing none (independent review, LOW).
+		if (!subModels.models.length) return `No models to show — ${why}.`;
+		return subModels.source === 'cache'
+			? `Showing the last list we saw — ${why}. Refresh to try again.`
+			: `Showing known models — ${why}, so this may not be everything your plan offers.`;
 	});
-	async function pullSubModels() {
+	async function pullSubModels(force = false) {
 		if (!subStatus?.providerId) return;
 		subModelsPulling = true;
 		try {
-			const r = await api(`/portal/providers/${subStatus.providerId}/models`);
+			const r = await api(`/portal/providers/${subStatus.providerId}/models${force ? '?refresh=1' : ''}`);
 			const j = await r.json().catch(() => ({}));
-			if (j?.ok && Array.isArray(j.models)) subModelsPulled = j.models.filter((m: string) => /claude/i.test(m));
-		} catch { /* leave the curated list */ } finally { subModelsPulling = false; }
+			subModels = {
+				models: Array.isArray(j?.models) ? j.models : [],
+				source: typeof j?.source === 'string' ? j.source : 'fallback',
+				// Absent `stale` is treated as STALE, not fresh: an older/newer backend that
+				// omits the field must not be read as "this is live" (fail-closed on honesty).
+				stale: j?.stale !== false,
+				error: typeof j?.error === 'string' ? j.error : null,
+				// The SERVER's chat default (src/agent/harness.js), so the "use the default" option can
+				// name the model instead of asserting a plan-derived default it cannot know.
+				defaultModel: typeof j?.defaultModel === 'string' ? j.defaultModel : null,
+				loaded: true,
+			};
+		} catch {
+			subModels = { ...subModels, stale: true, error: 'unreachable', loaded: true };
+		} finally { subModelsPulling = false; }
 	}
 	const subProvider = $derived(providers.find((p) => p.id === subStatus?.providerId) ?? null);
-	const subModelValue = $derived(subProvider?.model_preference || 'claude-opus-4-8');
+	// '' = "use the app default" — the chat default lives server-side (src/agent/harness.js);
+	// naming a specific id here would be a one-entry roster with the same rot.
+	const subModelValue = $derived(subProvider?.model_preference || '');
 	let subModelBusy = $state(false);
 	async function setSubModel(v: string) {
 		if (!subStatus?.providerId || v === subModelValue) return;
@@ -231,9 +286,9 @@
 			// loadSub is itself an async fetch. The screen gates its claim on `loaded` instead.)
 			if (ss?.ok) { subSensitive = ss.allowed === true; seedSensitiveExempt(subSensitive); }
 			if (ws?.ok) webSearchOn = ws.enabled !== false;
-			// R4-6: eagerly widen the model list — pull the fuller Claude set the account can use so
-			// the picker shows it WITHOUT a manual "Refresh" click. Best-effort: a token lacking the
-			// models:list scope just leaves the curated CLAUDE_SUB_MODELS (the reliable baseline).
+			// Discover the account's real model list WITHOUT a manual "Refresh" click (R4-6). The
+			// server serves it cached-or-live and labels which; a token lacking the models:list
+			// scope comes back stale + qualified (subModelsNote) rather than silently curated.
 			if (subStatus?.authenticated && subStatus.providerId) void pullSubModels();
 		} catch { /* section shows the connect state */ }
 	}
@@ -697,13 +752,31 @@
 								<span class="sub-model-label">Model</span>
 								<div class="sub-model-ctl">
 									<select class="task-select" disabled={subModelBusy} value={subModelValue} onchange={(e) => setSubModel((e.currentTarget as HTMLSelectElement).value)}>
+										<!-- ⚠️ The default is SERVED (src/agent/harness.js via the models route), never a model id
+										     typed into this file — a one-entry roster rots exactly like a four-entry one. And it
+										     NAMES the model: an earlier draft read "Default for your plan", which asserted
+										     plan-derivation the app does not have and hid which model actually runs — the same
+										     class of dishonesty as the stale roster (independent review, MED).
+										     ⚠️ AND IT IS SCOPED "for chat". The served default is DEFAULT_ANTHROPIC_CHAT_MODEL;
+										     the SAME empty model_preference runs cloud.js's DEFAULT_ANTHROPIC_MODEL — a different
+										     model — on narrate/enrich. Naming one model unqualified would promise it for every job
+										     and deliver another on half of them (independent review ×2, MED). -->
+										<option value="">{subModels.defaultModel ? `App default · ${prettyModel(subModels.defaultModel)} for chat` : 'App default'}</option>
 										{#each subModelOptions as m}
 											<option value={m.id}>{m.label}</option>
 										{/each}
+										<!-- A stored preference the provider no longer lists must still SHOW as the current
+										     value; otherwise the select silently snaps to "Default" and the user reads back
+										     a choice they never made. -->
+										{#if subModelValue && !subModels.models.includes(subModelValue)}
+											<option value={subModelValue}>{prettyModel(subModelValue)}</option>
+										{/if}
 									</select>
-									<button class="link-btn dim-link" disabled={subModelsPulling} onclick={pullSubModels} title="Fetch the models your account can use">{subModelsPulling ? '…' : 'Refresh'}</button>
+									<button class="link-btn dim-link" disabled={subModelsPulling} onclick={() => pullSubModels(true)} title="Fetch the models your account can use">{subModelsPulling ? '…' : 'Refresh'}</button>
 								</div>
 							</div>
+							<!-- D-074: a list that is NOT a current answer says so, right where it is used. -->
+							{#if subModelsNote}<p class="sub-model-note">{subModelsNote}</p>{/if}
 							<button class="sub-toggle" role="switch" aria-checked={subSensitive} disabled={subSensitiveBusy} onclick={() => setSubSensitive(!subSensitive)}>
 								<span class="toggle sm" class:on={subSensitive}><span class="knob"></span></span>
 								<span class="sub-toggle-body"><span class="sub-toggle-title">Also use it for sensitive work</span><span class="sub-toggle-sub">Let your subscription process persona &amp; claim analysis — otherwise kept on-device/EU. Off by default.</span></span>
@@ -888,6 +961,9 @@
 	.sub-model-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 0.55rem; }
 	.sub-model-label { font-size: 0.74rem; color: var(--color-text-secondary); }
 	.sub-model-ctl { display: flex; align-items: center; gap: 0.5rem; }
+	/* The honest-state line for a list that is NOT a current answer (D-074). Muted, not red:
+	   a fallback list is a degraded state the user can act on (Refresh), not a fault. */
+	.sub-model-note { margin: 0.3rem 0 0; font-size: 0.72rem; color: var(--color-text-secondary); line-height: 1.35; }
 	.sub-toggle { display: flex; align-items: flex-start; gap: 0.6rem; margin-top: 0.55rem; padding: 0; background: none; border: none; cursor: pointer; text-align: left; font-family: inherit; }
 	.sub-toggle:disabled { opacity: 0.6; }
 	.toggle.sm { width: 30px; height: 17px; }

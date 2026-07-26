@@ -1,6 +1,6 @@
 -- 0044 — Shared spaces E2E: the signed, totally-ordered CIPHERTEXT oplog + sealed CEKs.
 --
--- The E2E "Space Key Lockbox" (docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md): a space's
+-- The E2E "Space Key Lockbox" (the shared-spaces E2E design): a space's
 -- content is replicated as an append-only, owner-Ed25519-signed log whose payloads are
 -- END-TO-END ciphertext under a per-space Content Encryption Key (CEK). Members hold the
 -- CEK (distributed as sealed key-grants); the owner box / relay / tunnel see ONLY

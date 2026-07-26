@@ -1,5 +1,5 @@
 // verify:intelligence-flow — the Intelligence pane as a FLOW (Part I of
-// docs/INTELLIGENCE-SCREEN-REDESIGN-2026-07-17.md), MOUNTED and driven for real.
+// the Intelligence-screen redesign), MOUNTED and driven for real.
 //
 // Covers the client half of the acceptance criteria: A5 (STATE A/B polarity), A2's render
 // (the stated total), A3 (no second assignment surface — the REAL demoted AISettings is
@@ -10,8 +10,26 @@
 //
 // Everything asserted here comes from portal-app/test/mount-intelligence-flow.mjs — real
 // compiler, real DOM, real clicks; the bundle fixture is produced by the REAL composeBundle.
+//
+// MUTATION-TESTED: restoring the deleted `CLAUDE_SUB_MODELS` roster in AISettings.svelte and
+//   merging the served list after it (the pre-D-074 shape) → F25 RED (the picker offered
+//   claude-opus-4-8 / claude-sonnet-5 / claude-fable-5 / claude-haiku-4-5, none of which the
+//   provider returned).
+// MUTATION-TESTED: making `subModelsNote` always null — i.e. rendering a fallback list with no
+//   qualifier → F25b RED.
+// MUTATION-TESTED: dropping the `?refresh=1` from the Refresh button (so it re-reads the
+//   server's TTL cache) → F25c RED.
+// MUTATION-TESTED: removing the claude-sonnet-5 / claude-fable-5 rows from MODEL_REGISTRY (the
+//   state this fix shipped in before review) → F25d RED — the offline floor offers less than the
+//   roster it replaced.
+// MUTATION-TESTED: relabelling the empty option back to "Default for your plan" → F25e RED.
+// MUTATION-TESTED: dropping the "for chat" scope from that label (naming the chat default as if
+//   it governed every job) → F25e RED.
+// All five restored; the suite returns GREEN on the restored tree.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+// The REAL fallback derivation (F25d asserts on the product, not on a fixture mirror of it).
+import { fallbackModelsFor } from '../src/inference/model-catalog.js';
 
 const ledger = [];
 const rec = (n, p, d = '') => { ledger.push(p); console.log(`${p ? 'PASS' : 'FAIL'}  ${n}${d ? ` — ${d}` : ''}`); };
@@ -41,6 +59,12 @@ try { fault = drive('test/mount-intelligence-flow.mjs', 'fault'); } catch (e) { 
 try { disklow = drive('test/mount-intelligence-flow.mjs', 'disklow'); } catch (e) { disklow = { error: String(e?.message || e) }; }
 try { readfail = drive('test/mount-intelligence-flow.mjs', 'readfail'); } catch (e) { readfail = { error: String(e?.message || e) }; }
 try { ai = drive('test/mount-ai-settings.mjs'); } catch (e) { ai = { error: String(e?.message || e) }; }
+// D-074 — the subscription model picker, mounted with a subscription connected. Two probes: the
+// provider answered (sub), and it could not be listed so the server served the dated floor
+// (sub-stale). The default `ai` probe has no subscription, so the picker is absent there (F11).
+let aiSub = {}, aiSubStale = {};
+try { aiSub = drive('test/mount-ai-settings.mjs', 'sub'); } catch (e) { aiSub = { error: String(e?.message || e) }; }
+try { aiSubStale = drive('test/mount-ai-settings.mjs', 'sub-stale'); } catch (e) { aiSubStale = { error: String(e?.message || e) }; }
 // The auth-VALIDITY probes ("connected must mean VALID", 2026-07-18) — see the harness header.
 try { subSplit = drive('test/mount-intelligence-flow.mjs', 'sub-split'); } catch (e) { subSplit = { error: String(e?.message || e) }; }
 try { subOk = drive('test/mount-intelligence-flow.mjs', 'sub-ok'); } catch (e) { subOk = { error: String(e?.message || e) }; }
@@ -395,6 +419,96 @@ t('F15. ⭐ Refresh now hits the refresh route; failure ESCALATES to reconnect; 
   // surface must be structurally unable to contribute. windowOpens counts EVERY window.open.
   assert.equal(subSplit.subProbe?.windowOpens, 0, 'status/refresh logic never opens a window');
   assert.equal(subSplit.windowOpens, 0, 'nor does anything else in this pane during the probe');
+});
+
+// ── D-074: the cloud model list is the PROVIDER'S ANSWER, never a roster ────────────────────
+// The defect: AISettings.svelte carried a four-entry `CLAUDE_SUB_MODELS` array and merely
+// APPENDED the server's answer to it. A model released after that array was typed either never
+// appeared (the OAuth token often lacks models:list scope, and the pull failed SILENTLY) or
+// appeared last, under four ids that looked like the real menu. Meta-defect M-002.
+rec('F25a. the subscription probes mount', aiSub.ok === true && aiSubStale.ok === true,
+  [aiSub, aiSubStale].map((x) => x.error || '').filter(Boolean).join(' | ').slice(0, 300));
+
+t('F25. ⭐ D-074 — the model options ARE the provider\'s answer; no literal roster survives', () => {
+  const pick = aiSub.subPicker;
+  assert.ok(pick?.present, `a connected subscription must render the model picker — got ${JSON.stringify(pick)}`);
+  // The served fixture is ['claude-opus-5', 'claude-sonnet-4-6'] — 'claude-opus-5' has never
+  // existed in any list in this repo, so it can ONLY be here by coming from the response.
+  assert.ok(pick.optionValues.includes('claude-opus-5'),
+    `a model the provider returned must be offered — this is the operator's report verbatim ("Opus 5 is available, the picker shows our pre-made selection"). Got: ${JSON.stringify(pick.optionValues)}`);
+  // …and NOTHING the provider did not return. The four ids below are precisely the deleted
+  // roster: if any reappears while the provider returned two models, a literal list is back.
+  const model = pick.optionValues.filter((v) => v !== '');
+  assert.deepEqual(model, ['claude-opus-5', 'claude-sonnet-4-6'],
+    `the options must be EXACTLY the served list — a merged roster shows up here as extra ids (claude-opus-4-8 / claude-sonnet-5 / claude-fable-5 / claude-haiku-4-5). Got: ${JSON.stringify(model)}`);
+  // A live answer carries NO qualifier — the honest-state line is for stale lists only, or it
+  // becomes noise the user learns to ignore (and then misses when it matters).
+  assert.equal(pick.note, null, `a LIVE list must render unqualified — got ${JSON.stringify(pick.note)}`);
+});
+
+t('F25b. ⭐ …and a list that is NOT current SAYS SO — never a stale list dressed as live', () => {
+  const pick = aiSubStale.subPicker;
+  assert.ok(pick?.present, 'the picker must still render when the provider cannot be listed — never a dead end');
+  assert.ok(pick.optionValues.length > 1,
+    `and must still offer something selectable (the dated MODEL_REGISTRY floor). Got: ${JSON.stringify(pick.optionValues)}`);
+  assert.ok(pick.note && pick.note.length > 0,
+    'a fallback list MUST carry an honest state — rendering it silently is the same lie as the roster, with fewer entries');
+  assert.match(String(pick.note), /list models|reach|unavailable/i,
+    `and the line must say WHY, so the user can act on it. Got: ${JSON.stringify(pick.note)}`);
+  // The reason is a CATEGORY. Nothing about the credential may reach the UI (CLAUDE.md §1/§4).
+  assert.ok(!/sk-ant|Bearer|x-api-key/i.test(String(pick.note)),
+    `the honest state must never carry credential material. Got: ${JSON.stringify(pick.note)}`);
+});
+
+t('F25d. ⭐ …and the FALLBACK floor is not smaller than the roster it replaced (review MED)', () => {
+  // The deleted CLAUDE_SUB_MODELS carried claude-sonnet-5 and claude-fable-5, and neither was in
+  // MODEL_REGISTRY — so the first version of this fix made the offline picker offer a STRICTLY
+  // SMALLER, OLDER set than before, on the very path the operator's symptom lives (an OAuth token
+  // without models:list scope). A user running Sonnet 5 could not re-select it. The rows were
+  // consolidated into the one dated table; this asserts the floor covers the retired roster.
+  //
+  // Asserted against the REAL fallbackModelsFor, not the fixture — the sub-stale probe serves a
+  // deliberately short list, so a fixture check would prove nothing about the product.
+  const floor = fallbackModelsFor('anthropic');
+  for (const id of ['claude-opus-4-8', 'claude-sonnet-5', 'claude-fable-5', 'claude-haiku-4-5']) {
+    assert.ok(floor.includes(id),
+      `the offline floor must still offer ${id} — it was selectable before D-074 deleted the roster. Floor: ${JSON.stringify(floor)}`);
+  }
+  // …and it is DERIVED (family-filtered), not a copy of the roster: a local model must not leak in.
+  assert.ok(!floor.some((m) => /qwen|llama|gemma|mistral|phi/.test(m)),
+    `the Claude floor must be family-filtered from MODEL_REGISTRY, not the whole table. Floor: ${JSON.stringify(floor)}`);
+});
+
+t('F25e. ⭐ …and the "default" option NAMES the model, never asserts a plan-derived one (review MED)', () => {
+  // An earlier draft labelled the empty option "Default for your plan" — plan-derivation the app
+  // does not have, and it HID which model runs. That is the same dishonesty as the stale roster:
+  // the user reads a reassuring label and gets whatever `DEFAULT_ANTHROPIC_CHAT_MODEL` happens to
+  // be. The label now renders the id the SERVER sent (route → src/agent/harness.js).
+  const pick = aiSub.subPicker;
+  const label = (pick.optionLabels || [])[(pick.optionValues || []).indexOf('')];
+  assert.ok(label, `the empty-value option must exist — got ${JSON.stringify(pick.optionLabels)}`);
+  assert.ok(!/for your plan/i.test(String(label)),
+    `the option must not claim a plan-derived default — got "${label}"`);
+  assert.match(String(label), /Opus 4\.8|claude-opus-4-8/,
+    `it must NAME the served default (claude-opus-4-8 in this fixture) so the user can see what runs — got "${label}"`);
+  // …and it must SCOPE the claim. The served default is DEFAULT_ANTHROPIC_CHAT_MODEL, but the
+  // same empty model_preference runs cloud.js's DEFAULT_ANTHROPIC_MODEL on narrate/enrich — a
+  // DIFFERENT model. Naming one unqualified promises it for every job and delivers another on
+  // half of them, which is the stale-roster dishonesty in miniature (independent review ×2, MED).
+  assert.match(String(label), /for chat/i,
+    `naming the chat default without scoping it to chat promises one model and runs another on narrate/enrich — got "${label}"`);
+});
+
+t('F25c. ⭐ …and Refresh BYPASSES the cache — otherwise a newly-released model still cannot appear', () => {
+  // The server caches the discovered list (5-min TTL) so the picker does not hit the provider on
+  // every render. That cache is only safe because the explicit Refresh can jump it: without
+  // ?refresh=1 the button re-reads the same cached answer and the user is told nothing changed.
+  const pick = aiSub.subPicker;
+  assert.ok(pick.refreshPaths.some((p) => /\/models\?refresh=(1|true)/.test(p)),
+    `the Refresh click must request a forced re-discovery. Got: ${JSON.stringify(pick.refreshPaths)}`);
+  // …and the list is discovered on LOAD too, not only behind a click nobody presses.
+  assert.ok(pick.modelPaths.some((p) => !/refresh=/.test(p)),
+    `the picker must discover the list at mount as well. Got: ${JSON.stringify(pick.modelPaths)}`);
 });
 
 const allPass = ledger.every(Boolean);

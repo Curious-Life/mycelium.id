@@ -113,8 +113,8 @@ Symbol: deliverNaturalReplyFallback (Phase 3 of egress-provenance)
 | 1 | packages/server/routes/chat.js:184-284       | (N)    | The function itself; deletion target |
 | 2 | packages/server/routes/chat.js:1098          | (N)    | Invocation site; delete with #1 |
 | 3 | packages/server/test/routes/chat.test.js:312 | (N)    | 5 fallback tests; delete    |
-| 4 | docs/architecture/MESSAGE-PERSISTENCE.md §10 | (M)    | Updated for explicit-send architecture in commit X |
-| 5 | docs/EGRESS-PROVENANCE-PLAN-2026-05-06.md    | (O)    | Plan doc references the old path intentionally — keep as historical record |
+| 4 | the message-persistence design §10 | (M)    | Updated for explicit-send architecture in commit X |
+| 5 | the egress-provenance plan    | (O)    | Plan doc references the old path intentionally — keep as historical record |
 ```
 
 If any row is `(N)`, you cannot proceed to Step 5 yet — that caller's migration is part of the deletion PR's scope.
@@ -201,7 +201,7 @@ If post-deploy a regression surfaces (a `(D)` row turned out to be live, a cross
 ## Mycelium-specific reminders
 
 - **The `agent-egress.send` / `recovery.notifyContinuation` / `recovery.notifyRecovery` lesson** (Phase 1 of egress-provenance): the design doc identified two callers; sweep #3 surfaced a hidden third. **Always grep one more time before declaring "all callers migrated."** The third caller will have a slightly different signature or be in a sibling file you didn't expect.
-- **Phase 3 of egress-provenance** is the canonical upcoming use of this skill. Pre-flight criteria live in docs/EGRESS-PROVENANCE-PLAN-2026-05-06.md §Phase 3: "Phase 0 audit data must show the `agent-explicit` event count growing to roughly cover the historical fallback fire count, OR investigation explaining the gap."
+- **Phase 3 of egress-provenance** is the canonical upcoming use of this skill. Pre-flight criteria live in the egress-provenance plan: "Phase 0 audit data must show the `agent-explicit` event count growing to roughly cover the historical fallback fire count, OR investigation explaining the gap."
 - **BGE-M3 / Vectorize amputation (Wave 4b, May 2026)** is the canonical past example. Worker bindings, generateEmbedding routes, /api/embed/* + /api/enrich/* + /api/vectors/*  + /api/search/hybrid all required caller migration before deletion.
 - **Worker rename pending** (mya → mycelium): see `project_mycelium_worker_rename` memory entry. Side-by-side migration; pre-deletion criteria not yet defined. Future work for this skill.
 - **Two legacy personal agent IDs** (`personal-agent` vs `mya-personal`) — kept side by side because deletion criteria are NOT met. Documented as a permanent historical case in MEMORY.md.
@@ -225,6 +225,6 @@ If the criteria fail at Step 5, surface the failure with the exact query output 
 ## Reference: prior verified deletions
 
 - **BGE-M3 / Vectorize amputation (Wave 4b)** — multi-PR migration; Worker bindings deleted last after `WorkersAIService.generateEmbedding` callers all moved to local Nomic ONNX.
-- **A2 worker amputation** — `f74f351`, `e7d17166` — Telegram + import + scanner zombie surface deleted from packages/worker. 23 files, ~940 lines from index.ts. Bundle 322 KiB. Documented in `docs/CLEANUP-PLAN-2026-05-05.md`.
+- **A2 worker amputation** — `f74f351`, `e7d17166` — Telegram + import + scanner zombie surface deleted from packages/worker. 23 files, ~940 lines from index.ts. Bundle 322 KiB. Documented in the cleanup plan.
 
 When the user is preparing a "delete the old X" change, this skill is the first action — not the last.

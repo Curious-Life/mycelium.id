@@ -1,5 +1,5 @@
 // Claude subscription — browser PKCE connect (the WEB half of the connect ladder).
-// Design: docs/CLAUDE-SUBSCRIPTION-DESIGN-2026-07-15.md §3.1.
+// Design: the Claude-subscription design §3.1.
 //
 // WHY: before this, the ONLY way to connect was importing credentials an already
 // installed + signed-in `claude` CLI had stored. A fresh machine could not connect
@@ -41,7 +41,7 @@ import crypto from 'node:crypto';
  *  `redirectUri` moved with the token host to `platform.claude.com/oauth/code/callback`
  *  (mirrors the migration; the OLD callback still 301-redirects). The refresh grant sends NO
  *  `redirect_uri`, so this line only affects the web code-exchange path — smoke-test a fresh
- *  web connect after landing. Evidence: docs/CLAUDE-SUBSCRIPTION-OAUTH-ENDPOINT-2026-07-18.md.
+ *  web connect after landing. Evidence: the Claude-subscription OAuth-endpoint notes.
  */
 export const CLAUDE_OAUTH = Object.freeze({
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',

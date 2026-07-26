@@ -16,7 +16,7 @@
 //   N10 Streams merge + People sub-nav   registry has `streams` (not import/timeline);
 //                                         StreamsView + PeopleNav exist
 //
-// PASS/FAIL ledger + VERDICT + EXIT=<code>. See docs/NAV-IA-LOCK-2026-06-08.md.
+// PASS/FAIL ledger + VERDICT + EXIT=<code>. See the nav-IA lock.
 
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";

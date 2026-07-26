@@ -1,6 +1,6 @@
 /**
  * Space oplog namespace — the append-only, owner-signed CIPHERTEXT log + sealed CEKs
- * that back E2E shared spaces (docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md, BU-OPLOG-E2E).
+ * that back E2E shared spaces (the shared-spaces E2E design, BU-OPLOG-E2E).
  *
  * The owner box is the single home-of-record: it assigns the total order (`seq`) and
  * Ed25519-signs each entry header over the ciphertext payload. A grantee pulls the log

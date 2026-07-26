@@ -43,8 +43,8 @@ There is no remote target to deploy to. Shipping a change = **all four, in order
 > **Distribution and remote access are NOT shipped yet.** `package.json` is
 > `"private": true` (no npm publish); `src-tauri/` is a scaffold (macOS dmg
 > target, points at the legacy portal, bundles no Node, unsigned); Cloudflare
-> Tunnel / Tailscale are **doc-only** (`docs/SETUP.md`, `docs/CONNECTORS.md`) —
-> there is zero remote-deploy infra code (`docs/PRE-LAUNCH-READINESS-*.md`).
+> Tunnel / Tailscale are **doc-only** (`docs/SETUP.md`, the connectors doc) —
+> there is zero remote-deploy infra code (see the pre-launch readiness notes).
 > Don't write a deploy step for a target that doesn't exist. See the last
 > section for what to verify *when* these land.
 
@@ -113,7 +113,7 @@ is inferred (`GET /api/v1/tools` → 200 = vault open; `GET /api/v1/account/stat
 
 ### Step 3 — Update living docs (same commit)
 
-Per `living-docs`: flip the spec/verification-table status, update `docs/ARCHITECTURE.md`
+Per `living-docs`: flip the spec/verification-table status, update the architecture doc
 for any component/flow/port/count the change touched, add a build-log line with the
 commit hash + new verify check. Docs land **in the same commit** as the code.
 
@@ -211,7 +211,7 @@ Before shipping a migration:
    before serving"*. Never ship a query that silently assumes the column.
 4. **Add/extend a `verify:<surface>` gate** that writes **and** reads the new
    column/table, so the schema↔code contract lives in the ledger.
-5. **Update the migration count + schema notes** in `docs/ARCHITECTURE.md` (`living-docs`).
+5. **Update the migration count + schema notes** in the architecture doc (`living-docs`).
 
 ### Publish / public surface (`src/publish`)
 ```bash
@@ -234,7 +234,7 @@ npx -y @modelcontextprotocol/inspector --cli https://<host>/mcp \
 #      drive3.mjs = full UI OAuth, Connection Type = Direct (avoids the Inspector's proxy)
 #      drive4.mjs = log every request to the server (status, origin, cookie, ACAO/ACAC)
 ```
-Gotchas: for the credentialed `/token` (and the preflight) **reflect the Origin + set `Access-Control-Allow-Credentials: true`** — browsers reject `*` for credentialed requests; do NOT widen `/authorize` (top-level navigation, never a CORS fetch — widening leaks an auth code via the operator session). `curl` ≠ browser. Cross-account record: `docs/REMOTE-CONNECT-HANDOFF-2026-06-03.md` (2026-06-04 section) + auto-memory `verify-remote-mcp-against-inspector.md`.
+Gotchas: for the credentialed `/token` (and the preflight) **reflect the Origin + set `Access-Control-Allow-Credentials: true`** — browsers reject `*` for credentialed requests; do NOT widen `/authorize` (top-level navigation, never a CORS fetch — widening leaks an auth code via the operator session). `curl` ≠ browser. Cross-account record: the remote-connect handoff (2026-06-04 section) + auto-memory `verify-remote-mcp-against-inspector.md`.
 
 ## When distribution / remote DO land (verify-then, not now)
 

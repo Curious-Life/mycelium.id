@@ -4,7 +4,7 @@
 // spawned into its app-private <dataDir>/ollama are removed by the recursive dir
 // wipe; only the shared-daemon case needs a tracked tag list (we must never
 // blanket-`rm ~/.ollama` — it holds the user's own models). Locked decision #2,
-// docs/DATA-DESTROY-VAULT-DESIGN-2026-07-03.md.
+// the destroy-vault design.
 //
 // Persisted OUTSIDE the vault DB (a small <dataDir>/ollama-pulled.json) so it
 // survives to destroy time even with the DB unavailable. Best-effort: a failure

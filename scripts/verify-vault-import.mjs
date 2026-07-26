@@ -14,7 +14,7 @@
 //   C5b agent doc created_at = zip entry date, NOT import now() (timestamp regression)
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>. Design:
-// docs/VAULT-IMPORT-FROM-CANONICAL-DESIGN-2026-06-10.md
+// the vault-import design
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';

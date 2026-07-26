@@ -11,7 +11,7 @@
 // RATE λ is type-specific: a safety boundary never fades, a passing mood fades
 // fast. Reuses the exp(−Δt/τ) shape from src/search/fusion/temporal.js (τ = 1/λ).
 //
-// See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.3.
+// See the persona-claims design §3.3.
 
 const DAY = 86400; // seconds
 

@@ -2,7 +2,7 @@
 	Connect Your AI — the one-stop "how do I plug a client into Mycelium" panel.
 	Shows the local MCP + model-gateway endpoints (copy-paste), the static-bearer
 	how-to, and (when a remote handle is claimed) the public URLs. Links to the
-	full per-client guide in docs/CONNECT-YOUR-AI.md. Read-only: it reuses the
+	full per-client guide in the connect-your-AI guide. Read-only: it reuses the
 	existing /api/v1/remote/status for the public base URL — no new backend.
 -->
 <script lang="ts">
@@ -53,7 +53,7 @@
 <section class="card p-5">
 	<h2 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-4">Connect your AI</h2>
 	<p class="text-xs text-[var(--color-text-tertiary)] mb-4">
-		Point any AI client at Mycelium — <span class="text-[var(--color-text-secondary)]">memory</span> over MCP and <span class="text-[var(--color-text-secondary)]">model</span> over the OpenAI-compatible gateway. Full per-client setup lives in <span class="font-mono">docs/CONNECT-YOUR-AI.md</span>.
+		Point any AI client at Mycelium — <span class="text-[var(--color-text-secondary)]">memory</span> over MCP and <span class="text-[var(--color-text-secondary)]">model</span> over the OpenAI-compatible gateway. Full per-client setup lives in <span class="font-mono">the connect-your-AI guide</span>.
 	</p>
 
 	<div class="mb-4 space-y-2">

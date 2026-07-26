@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// verify-device-tokens.mjs — Unit A gate (docs/PHONE-QR-PAIRING-DESIGN-2026-07-19.md §6).
+// verify-device-tokens.mjs — Unit A gate (the phone QR-pairing design §6).
 //
 // Exercises the REAL migration SQL + the REAL device-tokens namespace + the REAL
 // auth gate functions (resolveRequester / makePortalOwnerGate). Mutation-proof:

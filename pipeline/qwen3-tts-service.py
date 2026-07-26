@@ -25,6 +25,8 @@ import os
 import json
 import base64
 import struct
+import threading
+import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -43,25 +45,94 @@ MODEL_DIR = os.environ.get("QWEN_TTS_MODEL_DIR") or ""
 
 _model = None
 _load_error = None
+# WHICH KIND of load failure — the difference between "retry can help" and "retrying
+# is a lie" (D-003 ↻2). 'runtime-missing' = `import mlx_audio` itself failed (Intel
+# box / package never landed): no number of retries fixes that inside this process,
+# so it is TERMINAL and the owner needs a named remedy. Anything else (a half-written
+# snapshot, a transient OOM, a weights/runtime version mismatch) is RETRYABLE.
+_load_error_kind = None
+_load_attempts = 0
+_load_next_at = 0.0
+_load_lock = threading.Lock()
+# Overridable so verify:voice-readiness can drive the REAL retry path in seconds
+# instead of minutes (it spawns this service against a stub loader that fails once,
+# then succeeds — the only way to prove the un-latch without Apple Silicon).
+LOAD_RETRY_BASE_S = float(os.environ.get("QWEN_TTS_LOAD_RETRY_BASE_S") or 15)
+LOAD_RETRY_MAX_S = float(os.environ.get("QWEN_TTS_LOAD_RETRY_MAX_S") or 120)
+
+# The status vocabulary src/system/service-state.js already speaks, so the vault can
+# map this onto the ONE four-state taxonomy without inventing a second mapping:
+#   'ok'            → ready
+#   'checking'      → loading  (no load attempted yet)
+#   'needs-runtime' → degraded, retryable-by-install  (MLX not importable here)
+#   'error'         → failed   (it tried to load and could not)
+def _service_status():
+    if _model is not None:
+        return "ok", None
+    if _load_error_kind == "runtime-missing":
+        return "needs-runtime", "runtime-missing"
+    if _load_error is not None:
+        return "error", "load-failed"
+    return "checking", None
 
 
 def _load():
-    """Lazy single load — first request pays the model-load cost, then it's warm.
+    """Lazy load — first request pays the model-load cost, then it's warm.
+
     Fail-soft: on any failure /tts returns 503, this never crashes (Kokoro
-    precedent). MLX import fails on Intel — that surfaces as _load_error, honestly."""
-    global _model, _load_error
-    if _model is not None or _load_error is not None:
+    precedent). MLX import fails on Intel — that surfaces as 'runtime-missing',
+    honestly and TERMINALLY.
+
+    ⚠️ D-003 ↻2 — this used to LATCH: `if _model is not None or _load_error is not
+    None: return _model` meant ONE failed load pinned every later /tts at 503 for
+    the whole process lifetime, while /health still answered ok:true so the
+    supervisor never restarted it. The operator saw "voice engine is starting…
+    try again shortly" forever. A retryable failure now retries on a bounded
+    backoff; only a genuinely terminal one stops trying (and says so)."""
+    global _model, _load_error, _load_error_kind, _load_attempts, _load_next_at
+    if _model is not None:
         return _model
-    try:
-        # SEAM: the exact mlx-audio loader is confirmed only on an Apple-Silicon
-        # box with the model present (design §2.1 rendered via mlx-audio). Kept
-        # behind the lazy load so /health still answers before a model exists.
-        from mlx_audio.tts.utils import load_model  # type: ignore
-        _model = load_model(MODEL_DIR)
-        print(f"[qwen3-tts] model loaded ({MODEL_DIR})", flush=True)
-    except Exception as e:  # noqa: BLE001 — fail-soft
-        _load_error = str(e)
-        print(f"[qwen3-tts] load failed: {_load_error}", flush=True)
+    if _load_error_kind == "runtime-missing":
+        return None                      # terminal — retrying cannot help
+    if _load_error is not None and time.monotonic() < _load_next_at:
+        return None                      # inside the backoff window
+    # Serialize: a retryable load is now re-entered, and two concurrent /tts
+    # requests must never both pull a multi-GB model into memory.
+    with _load_lock:
+        if _model is not None:
+            return _model
+        if _load_error_kind == "runtime-missing" or (_load_error is not None and time.monotonic() < _load_next_at):
+            return None
+        try:
+            # SEAM: the exact mlx-audio loader is confirmed only on an Apple-Silicon
+            # box with the model present (design §2.1 rendered via mlx-audio). Kept
+            # behind the lazy load so /health still answers before a model exists.
+            from mlx_audio.tts.utils import load_model  # type: ignore
+            _model = load_model(MODEL_DIR)
+            _load_error = None
+            _load_error_kind = None
+            _load_attempts = 0
+            print(f"[qwen3-tts] model loaded ({MODEL_DIR})", flush=True)
+        except Exception as e:  # noqa: BLE001 — fail-soft
+            # TERMINAL only when MLX ITSELF is absent. `except ImportError` was too
+            # wide: mlx-audio lazily imports sub-dependencies (soundfile, per-model
+            # backends), so a missing sub-dep would have been reported as "this Mac
+            # cannot run the voice engine" on a machine one pip install away from
+            # working — a WRONG terminal verdict, which is the same dishonest-state
+            # family as the bug being fixed.
+            missing = getattr(e, "name", None) or ""
+            if isinstance(e, ImportError) and (missing.split(".")[0] == "mlx_audio" or "mlx_audio" in str(e)):
+                _load_error = str(e)
+                _load_error_kind = "runtime-missing"
+                print(f"[qwen3-tts] load failed (runtime-missing, terminal): {_load_error}", flush=True)
+            else:
+                _load_attempts += 1
+                _load_error = str(e)
+                _load_error_kind = "load-failed"
+                _load_next_at = time.monotonic() + min(
+                    LOAD_RETRY_MAX_S, LOAD_RETRY_BASE_S * (2 ** min(_load_attempts - 1, 3))
+                )
+                print(f"[qwen3-tts] load failed (attempt {_load_attempts}, will retry): {_load_error}", flush=True)
     return _model
 
 
@@ -97,8 +168,20 @@ class Handler(BaseHTTPRequestHandler):
             # render:'ready' would require a ref sample per call; the service can
             # only promise the model is LOADABLE — never that a stable render is
             # possible without a frozen sample. Report the seam honestly.
+            #
+            # `ok` stays True — the HTTP service IS answering, and the supervisor's
+            # bind/adopt probe is allowed to read that. `status` is the MODEL's own
+            # state, and it is what tells the supervisor apart "listening" from
+            # "actually able to render" (D-003 ↻2: a latched load error kept
+            # answering ok:true, so the supervisor reported "Local voice ready"
+            # while every /tts 503'd).
+            status, reason = _service_status()
             return self._json(200, {
-                "ok": True, "loaded": _model is not None, "error": _load_error,
+                "ok": True, "loaded": _model is not None,
+                "status": status, "reason": reason,
+                # The raw exception stays on loopback for the operator's own log; the
+                # vault NEVER echoes it to a UI unsanitized (src/tts/voice-render.js).
+                "error": _load_error,
                 "runtime": "mlx", "model": "qwen3-tts", "render": "pending-sample",
             })
         return self._json(404, {"ok": False, "error": "not-found"})
@@ -147,7 +230,13 @@ class Handler(BaseHTTPRequestHandler):
 
         k = _load()
         if k is None:
-            return self._json(503, {"ok": False, "error": f"model-unavailable: {_load_error}"})
+            # The TOKEN comes first so the vault can allowlist it and map it to a
+            # remedy; the detail follows the colon and is SANITIZED vault-side before
+            # any UI sees it. 'runtime-missing' is terminal (needs Apple Silicon /
+            # an mlx-audio install); 'load-failed' will be retried.
+            _status, reason = _service_status()
+            token = "voice-runtime-missing" if reason == "runtime-missing" else "model-unavailable"
+            return self._json(503, {"ok": False, "error": f"{token}: {_load_error}", "reason": reason})
         try:
             # SEAM: real render path — clone from the frozen sample (+ optional
             # `instruct` modulation, design §2.4). Confirmed runnable only on an
@@ -170,12 +259,38 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(wav)
 
 
+def _loader_loop():
+    """Background eager load + BOUNDED RETRY.
+
+    Two reasons this is a thread and not a call before bind():
+      1. Loading before bind() means a doomed bind (:8094 already held) pays a full
+         multi-GB model load before EADDRINUSE is discovered — up to once per
+         supervisor restart attempt.
+      2. Without it, the ONLY thing that ever re-attempts a failed load is an
+         inbound /tts. So a retryable failure at boot pinned /health at
+         status:'error' forever even though the load itself was retryable — the
+         D-003 ↻2 dishonest state moved one layer up. Health must converge on its
+         own, not on the owner poking it.
+    Exits on success or on a TERMINAL failure; never raises into the server."""
+    while True:
+        if _model is not None:
+            return
+        if _load_error_kind == "runtime-missing":
+            return                      # terminal — no amount of retrying helps
+        try:
+            _load()
+        except Exception:               # noqa: BLE001 — _load is already fail-soft
+            pass
+        time.sleep(1)
+
+
 def main():
     port = DEFAULT_PORT
-    if os.environ.get("QWEN_TTS_PRELOAD", "0") == "1":
-        _load()
+    # BIND FIRST: a port conflict must surface immediately, not after a cold load.
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"[qwen3-tts] listening on http://127.0.0.1:{port}", flush=True)
+    if os.environ.get("QWEN_TTS_PRELOAD", "0") == "1":
+        threading.Thread(target=_loader_loop, name="qwen-tts-loader", daemon=True).start()
     srv.serve_forever()
 
 

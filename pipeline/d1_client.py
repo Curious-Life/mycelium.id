@@ -7,7 +7,7 @@ query runs against the local vault — by one of two transports:
     the vault is whole-file SQLCipher and only Node may open the cipher, so we
     POST each query to the long-running loopback ``vault-bridge.js`` over
     127.0.0.1 (it opens the keyed vault and runs the SQL on the raw handle).
-    See docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md.
+    See the at-rest blindness design.
   * LEGACY MODE: when the bridge URL is unset, open the plaintext vault directly
     via stock ``sqlite3`` (the pre-A′ behavior — used for plaintext vaults / dev).
 

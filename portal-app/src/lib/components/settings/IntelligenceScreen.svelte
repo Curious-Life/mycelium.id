@@ -80,6 +80,31 @@
 
 	let functions = $state<Fn[]>([]);
 	let taskModels = $state<Record<string, { model?: string; providerId?: number }>>({});
+	// ── D-075: what will ACTUALLY run, served by the RESOLVER ────────────────────────────────
+	// `taskModels` is only the user's EXPLICIT assignments. This screen used to highlight from
+	// it alone, so when the system auto-selected a provider (a connected subscription becoming
+	// the active provider — D-029/#360 deliberately does NOT write taskModels) chat and
+	// narration were already running on it while this screen showed nothing selected.
+	//
+	// The fix is NOT "also check the active provider here" — that is a second copy of the
+	// selection rule, and a second copy is what diverged. GET /portal/providers/effective-models
+	// runs `resolveEffectiveAssignment` (src/inference/resolve.js) — the SAME function
+	// `resolveInferenceConfigForTask` runs at inference time — and this screen renders its
+	// answer. Display only: the endpoint is read-only, and WRITES below still key on
+	// `taskModels`, so rendering an auto-selection can never turn it into a stored explicit one.
+	type Effective = { source: 'explicit' | 'active' | 'none'; providerId: number | null; model: string | null };
+	// ⚠️ `null` means WE HAVE NO ANSWER — it is NOT the same as "the resolver says nothing runs",
+	// and collapsing the two is a defect this screen has now had twice. The first version stored
+	// `{}` on a failed read, so `effectiveOf()` returned null either way: on any failure of the
+	// (soft) effective-models read, every button lost `isRunning` while `isPinned` stayed true, so
+	// a provider that was pinned AND running fine rendered amber, tagged "chosen · not running",
+	// claiming a fault that did not exist — in the one screen whose whole purpose is not lying
+	// about what runs. Worse, the obvious response (click the amber button) sends providerId:null
+	// and DELETES the pin. A network blip must not manufacture a fault, and must never turn into a
+	// click-to-delete affordance (independent review ×2, HIGH).
+	let effective = $state<Record<string, Effective> | null>(null);
+	// Have we ever successfully learned what runs? Drives the honest third state below.
+	const effectiveKnown = $derived(effective !== null);
 	let providers = $state<Provider[]>([]);
 	let models = $state<Record<string, Health>>({});
 	// The full local catalog (GET /portal/hardware/recommend → recommendations). One read feeds
@@ -146,6 +171,10 @@
 	// F6/F6b pin that a function's tasks are kind-homogeneous and Understanding is exactly
 	// ONBOX_TASKS — so its two tasks always carry the same model (the route writes them together).
 	const approvedOf = (f: Fn) => (f.tasks.length ? (taskModels[f.tasks[0]]?.model || '') : '');
+	// The EFFECTIVE selection for a function = its first task's, from the resolver (D-075).
+	// Same first-task rule as approvedOf, for the same F6/F6b reason (a function's tasks are
+	// kind-homogeneous and the route writes them together).
+	const effectiveOf = (f: Fn): Effective | null => (f.tasks.length ? (effective?.[f.tasks[0]] ?? null) : null);
 
 	// ── LIVE HEALTH after a write (the stale-badge fix, 2026-07-18) ──────────────────────────
 	// THE BUG: this screen read `/portal/readiness?slices=models` ONCE in onMount, and
@@ -184,6 +213,21 @@
 			const r = await api('/portal/readiness?slices=models');
 			if (r.ok) models = (await r.json())?.models || {};
 		} catch { /* hold the last snapshot; the poll (if running) retries */ }
+	}
+
+	// D-075: after ANY write that can change what runs, re-ask the RESOLVER. Deriving the new
+	// highlight from the write's own response would be the second copy of the rule again — and it
+	// would be wrong for the case that matters most: CLEARING an assignment hands the task back to
+	// the active provider, and only the resolver knows which row that is.
+	async function refetchEffective() {
+		try {
+			const r = await api('/portal/providers/effective-models');
+			if (r.ok) {
+				const j = await r.json();
+				// Same rule as load(): a malformed body is UNKNOWN, never "nothing runs".
+				if (j && typeof j.effective === 'object' && j.effective) effective = j.effective;
+			}
+		} catch { /* hold the last answer — never recompute it locally, never downgrade to {} */ }
 	}
 
 	function pollVerdict(): 'busy' | 'lag' | 'settled' {
@@ -296,8 +340,13 @@
 			loaded = true;
 			return;
 		}
-		const [tm, pv, rd, ex, hw] = await Promise.all([
+		const [tm, ef, pv, rd, ex, hw] = await Promise.all([
 			api('/portal/providers/task-models').then((r) => r.json()).catch(() => ({})),
+			// D-075: the resolver's answer. Soft like the other secondary reads — a failure must not
+			// blank the screen. But it must resolve to UNKNOWN, never to "nothing runs": see the
+			// `effective` declaration. A failed read leaves `effective` null and the row says so.
+			// It must NEVER be reconstructed from taskModels here.
+			api('/portal/providers/effective-models').then((r) => (r.ok ? r.json() : null)).catch(() => null),
 			api('/portal/providers').then((r) => r.json()).catch(() => ({})),
 			api('/portal/readiness?slices=models').then((r) => r.json()).catch(() => ({})),
 			api('/portal/providers/sensitive-subscription').then((r) => r.json()).catch(() => ({})),
@@ -306,6 +355,8 @@
 			api('/portal/hardware/recommend').then((r) => r.json()).catch(() => ({})),
 		]);
 		taskModels = tm.taskModels || {};
+		// Only a well-formed answer counts as knowing. Anything else stays UNKNOWN.
+		effective = (ef && typeof ef.effective === 'object' && ef.effective) ? ef.effective : null;
 		providers = pv.providers || [];
 		models = rd.models || {};
 		// R4-6: populate installedLocal from the recommender's `.installed` flag (the existing
@@ -337,6 +388,7 @@
 				// LIVE HEALTH: the badge must reflect this approval, not the mount snapshot
 				// (see the poll block above). Refetch now, then poll while unsettled.
 				await refetchModels();
+				await refetchEffective();
 				maybePollModels();
 			} else err = 'That model could not be saved.';
 		} catch { err = 'That model could not be saved.'; }
@@ -363,6 +415,8 @@
 				// between setting and report), but refetching keeps one code path and the poll's
 				// verdict decides for itself — settled ⇒ it never starts.
 				await refetchModels();
+				// …and the highlight: assigning OR clearing changes the effective selection.
+				await refetchEffective();
 				maybePollModels();
 			} else err = 'That model could not be saved.';
 		} catch { err = 'That model could not be saved.'; }
@@ -461,13 +515,55 @@
 							{:else}Connect one in the Providers tab.{/if}
 						</p>
 					{:else}
+						{@const eff = effectiveOf(f)}
+						{@const explicitId = taskModels[f.tasks[0]]?.providerId}
 						{#each offerable(f) as p (p.id)}
+							<!-- ⚠️ D-075 — TWO DIFFERENT QUESTIONS, deliberately answered by two different
+							     sources, and collapsing them is the bug this fixes:
+							       DISPLAY (`class:on`) — what will ACTUALLY run: the RESOLVER's answer
+							         (`effective`), which includes the provider the system auto-selected.
+							         This used to read `taskModels[…]?.providerId`, so an auto-selected
+							         subscription ran chat + narration while this row showed nothing chosen.
+							       WRITE (`onclick`) — still keyed on the EXPLICIT assignment. A click on an
+							         AUTO-selected provider must PIN it (an explicit choice the user is now
+							         making), not clear a setting that was never written. Keying the toggle on
+							         the effective value would send providerId:null → delete → a no-op that
+							         leaves the button lit, which reads as a dead control.
+							     Displaying the effective selection NEVER writes it: nothing here mutates.
+							     ⚠️ AND THEY CAN DISAGREE IN BOTH DIRECTIONS. `resolveEffectiveAssignment` falls
+							     through to the active provider when the PINNED row is unresolvable (deleted, or
+							     status='pending' — which a vault import plants and `applyTaskModelWrite` does not
+							     refuse). Keying the highlight on `eff` alone therefore rendered the user's own pin
+							     UNLIT, and since the toggle keys on the pin, clicking it CLEARED the setting
+							     silently — the pre-fix bug in mirror image (independent review, MED). So a pin that
+							     is not running gets its own visible state ("chosen · not running"): the user can see
+							     what they chose, see that it isn't what runs, and un-pin deliberately. -->
+							{@const isRunning = effectiveKnown && eff?.providerId === p.id}
+							{@const isPinned = explicitId === p.id}
+							<!-- FOUR states, because "what did you choose", "what runs", and "do we know what
+							     runs" are three different questions:
+							       pinned + running        → solid "in use"
+							       running, not pinned     → dashed "in use · auto" (the system chose it)
+							       pinned, NOT running     → amber "chosen · not running" (a real mismatch)
+							       pinned, run UNKNOWN     → solid "chosen" — the choice is a FACT we hold
+							                                  locally; only the run-state is unknown, so we
+							                                  show the choice and claim nothing about running.
+							     The amber fault state is gated on `effectiveKnown` for exactly that reason. -->
 							<button
-								class="pick" class:on={taskModels[f.tasks[0]]?.providerId === p.id}
+								class="pick" class:on={isRunning || (!effectiveKnown && isPinned)}
+								class:auto={isRunning && eff?.source === 'active'} class:pinned={isPinned}
 								disabled={busy === f.key}
-								onclick={() => assign(f, taskModels[f.tasks[0]]?.providerId === p.id ? null : p.id)}
-							>{p.label}</button>
+								title={!effectiveKnown ? (isPinned ? 'Chosen for this job — we could not check what is running right now' : '')
+									: isPinned && !isRunning ? 'Chosen for this job, but it cannot run — this job falls back to your active provider'
+										: isRunning ? (eff?.source === 'active' ? 'In use — your active provider (nothing pinned for this job)' : 'Chosen for this job')
+											: ''}
+								onclick={() => assign(f, isPinned ? null : p.id)}
+							>{p.label}{#if !effectiveKnown}{#if isPinned}<span class="pick-tag">chosen</span>{/if}{:else if isPinned && !isRunning}<span class="pick-tag">chosen · not running</span>{:else if isRunning}<span class="pick-tag">{eff?.source === 'active' ? 'in use · auto' : 'in use'}</span>{/if}</button>
 						{/each}
+					{/if}
+					<!-- H1: an unknown run-state is STATED, never implied by an absent highlight. -->
+					{#if !effectiveKnown && offerable(f).length}
+						<p class="note unknown-run">Couldn’t check which model is running right now.</p>
 					{/if}
 					{#if f.jurisdiction === 'eu-or-local' && exemptKnown}
 						<!-- ⚠️ THE COPY MUST MATCH THE CONFIGURATION (dormant now, but kept in step with
@@ -574,6 +670,17 @@
 		color: var(--color-text-secondary); cursor: pointer; }
 	.pick:hover { border-color: var(--color-text-tertiary); color: var(--color-text-primary); }
 	.pick.on { background: var(--color-accent-teal, #14b8a6); border-color: var(--color-accent-teal, #14b8a6); color: #000; }
+	/* D-075: AUTO (the active provider, nothing pinned) reads as selected — because it IS what
+	   runs — but visibly weaker than a deliberate pick, so "the system chose this" and "I chose
+	   this" are not the same picture. Outlined rather than filled; the tag carries the word. */
+	.pick.on.auto { background: transparent; color: var(--color-accent-teal, #14b8a6); border-style: dashed; }
+	/* PINNED but NOT running — the user's choice cannot serve this job. Amber: it is an
+	   actionable mismatch (the pinned provider needs activating, or the pin needs clearing),
+	   not a fault and not a working selection. */
+	.pick.pinned:not(.on) { border-color: var(--color-accent-amber, #f59e0b); color: var(--color-accent-amber, #f59e0b); border-style: dashed; }
+	.pick-tag { margin-left: 0.4rem; font-size: 0.66rem; opacity: 0.85; }
+	/* Unknown ≠ broken: muted, like every other honest not-yet-known state on this screen. */
+	.unknown-run { opacity: 0.75; }
 
 	/* The optional "search all models" advanced disclosure (R4-5) — a quiet, opt-in door. */
 	.advanced { display: flex; flex-direction: column; gap: 0.4rem; }

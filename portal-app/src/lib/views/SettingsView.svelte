@@ -504,9 +504,12 @@
 	let rkLoading = $state(false);
 	let rkError = $state<string | null>(null);
 	let rkCopied = $state(false);
-	let rkSaving = $state<'keychain' | '1password' | null>(null);
-	let rkSavedTo = $state<'keychain' | '1password' | null>(null);
+	let rkSaving = $state<'keychain' | null>(null);
+	let rkSavedTo = $state<'keychain' | null>(null);
 	let rkSaveError = $state<string | null>(null);
+	let rkShowQr = $state(false);
+	let rkQrDataUrl = $state('');
+	let rkQrError = $state<string | null>(null);
 	const rkGrouped = $derived(rkValue ? rkValue.replace(/(.{4})/g, '$1 ').trim() : '');
 
 	async function revealRecoveryKey() {
@@ -539,10 +542,12 @@
 		setTimeout(() => URL.revokeObjectURL(url), 1000);
 	}
 
-	// One-click save to Keychain / 1Password — the key is read + handed to the store
-	// SERVER-SIDE (it never leaves the box via the browser). "Keychain" = Keychain
-	// Access (not the Apple Passwords app); 1Password needs the `op` CLI signed in.
-	async function saveRecoveryKey(target: 'keychain' | '1password') {
+	// Save a COPY to this Mac's Keychain — the key is read + handed to Keychain
+	// Access SERVER-SIDE (it never leaves the box via the browser). This is an
+	// ON-DEVICE CONVENIENCE, NOT a backup: it lives on this machine only. (D-027:
+	// the former "Save to 1Password" op-CLI button was removed — it blamed the
+	// user for a per-process authorization limit a GUI app cannot satisfy.)
+	async function saveRecoveryKey(target: 'keychain') {
 		rkSaving = target; rkSaveError = null;
 		try {
 			const res = await fetch('/api/v1/account/recovery-key/save', {
@@ -556,6 +561,36 @@
 		} catch (e) {
 			rkSaveError = e instanceof Error ? e.message : 'Could not save';
 		} finally { rkSaving = null; }
+	}
+
+	// Print / QR — a scannable QR of the key + a print-friendly sheet, all
+	// client-side (no network, no remote asset; CSP `img-src 'self' data:`). The
+	// key stays in memory; the data URL is never logged or persisted.
+	async function toggleRecoveryQr() {
+		if (rkShowQr) { rkShowQr = false; return; }
+		rkQrError = null;
+		try {
+			if (!rkQrDataUrl) {
+				const QRCode = (await import('qrcode')).default;
+				rkQrDataUrl = await QRCode.toDataURL(rkValue, { errorCorrectionLevel: 'M', margin: 2, width: 240 });
+			}
+			rkShowQr = true;
+		} catch {
+			rkQrError = 'Could not render a QR code — use Copy or Download instead.';
+		}
+	}
+
+	// Settings is a LONG-LIVED view, so the print sheet's rule must NOT be globally
+	// armed (an unrelated Cmd-P would blank the page). It is gated on a body class
+	// set only for this deliberate Print click and removed immediately after, so
+	// normal printing elsewhere in Settings is untouched. (Review note.)
+	function printRecoveryKey() {
+		try {
+			document.body.classList.add('rk-printing');
+			window.print();
+		} catch { /* the print panel is the browser's */ } finally {
+			document.body.classList.remove('rk-printing');
+		}
 	}
 
 	// ── Vault backup (V1): download an encrypted .myvault snapshot to the user's
@@ -739,7 +774,7 @@
 				<div class="space-y-6">
 
 			{#if activePane === 'connections'}
-			<!-- Redesign 2026-07-19 (docs/CONNECTIONS-REDESIGN-2026-07-19.md): lead with the
+			<!-- Redesign 2026-07-19 (the connections redesign): lead with the
 			     PHONE — scan a QR, no typing. Everything technical (MCP/gateway endpoints, bearer
 			     tokens, remote access) collapses behind "for developers" / "over the internet"
 			     disclosures, closed by default. The old abstract "two doors (MCP/gateway)" intro
@@ -811,8 +846,8 @@
 			{/if}
 
 			{#if activePane === 'intelligence'}
-			<!-- THE FLOW (Intelligence redesign Part I, docs/INTELLIGENCE-SCREEN-REDESIGN-
-			     2026-07-17.md): the pane renders STATE A (first-run bundle + one confirm) or
+			<!-- THE FLOW (Intelligence redesign Part I, the Intelligence-screen redesign):
+			     the pane renders STATE A (first-run bundle + one confirm) or
 			     STATE B (returning summary + the On-device models panel), with the components
 			     behind ONE Customize disclosure — assignment (IntelligenceScreen, which now also
 			     hosts the Voice rail under its Voice row), connect & manage (AISettings, demoted),
@@ -1206,14 +1241,39 @@
 					</div>
 					<div class="flex flex-wrap gap-2 mt-3">
 						<button onclick={copyRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">{rkCopied ? 'Copied ✓' : 'Copy'}</button>
-						<button onclick={downloadRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">Download</button>
-						<button onclick={() => saveRecoveryKey('keychain')} disabled={rkSaving !== null} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] disabled:opacity-50">{rkSaving === 'keychain' ? 'Saving…' : rkSavedTo === 'keychain' ? 'Saved to Keychain ✓' : 'Save to Keychain'}</button>
-						<button onclick={() => saveRecoveryKey('1password')} disabled={rkSaving !== null} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] disabled:opacity-50">{rkSaving === '1password' ? 'Saving…' : rkSavedTo === '1password' ? 'Saved to 1Password ✓' : 'Save to 1Password'}</button>
-						<button onclick={() => { rkRevealed = false; rkValue = ''; rkSavedTo = null; rkSaveError = null; }} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Hide</button>
+						<button onclick={downloadRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">Download .txt</button>
+						<button onclick={toggleRecoveryQr} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)]">{rkShowQr ? 'Hide QR' : 'Print / QR'}</button>
+						<button onclick={() => saveRecoveryKey('keychain')} disabled={rkSaving !== null} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] disabled:opacity-50">{rkSaving === 'keychain' ? 'Saving…' : rkSavedTo === 'keychain' ? 'Copied to this Mac ✓' : 'Copy to this Mac’s Keychain'}</button>
+						<button onclick={() => { rkRevealed = false; rkValue = ''; rkSavedTo = null; rkSaveError = null; rkShowQr = false; rkQrDataUrl = ''; }} class="px-3 py-2 rounded-lg text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Hide</button>
 					</div>
+					<p class="mt-2 text-xs text-[var(--color-text-tertiary)]">
+						Copying to this Mac’s Keychain is a convenience — <strong>not a backup</strong>. It lives on
+						this computer, so it’s gone if the Mac is lost. Keep a copy <strong>off this machine</strong>:
+						download the file, print it, or copy it into a password manager that syncs. There is no reset.
+					</p>
+					{#if rkShowQr}
+						<div class="mt-3 flex flex-col items-center gap-2 p-3 rounded-lg border border-[var(--color-border)]">
+							{#if rkQrDataUrl}
+								<img src={rkQrDataUrl} alt="QR code of your recovery key — scan it into your password manager" class="rounded" style="width:200px;height:200px;background:#fff;padding:8px;" />
+							{/if}
+							<p class="text-xs text-[var(--color-text-tertiary)] text-center">Scan into your phone's password manager, or print a paper copy and store it off this Mac.</p>
+							<button onclick={printRecoveryKey} class="px-3 py-2 rounded-lg bg-[var(--color-elevated)] border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors text-sm text-[var(--color-text-primary)] w-full">Print</button>
+						</div>
+					{/if}
+					{#if rkQrError}
+						<p class="mt-2 text-xs text-coral">{rkQrError}</p>
+					{/if}
 					{#if rkSaveError}
 						<p class="mt-2 text-xs text-coral">{rkSaveError}</p>
 					{/if}
+					<!-- Print-only sheet: window.print() shows just this (@media print isolates it). -->
+					<div class="rk-print-sheet" aria-hidden="true">
+						<h2>Mycelium recovery key</h2>
+						<p>Keep this secret and offline. It is the only way to recover your vault on a new
+							computer. Anyone with it can read your vault. It cannot be reset.</p>
+						{#if rkQrDataUrl}<img class="rk-print-qr" src={rkQrDataUrl} alt="" />{/if}
+						<pre class="rk-print-key">{rkGrouped}</pre>
+					</div>
 				{/if}
 			</section>
 
@@ -1358,6 +1418,27 @@
 	}
 	.animate-fade-in {
 		animation: fade-in 0.2s ease-out;
+	}
+
+	/* Recovery-key print sheet — invisible on screen; the deliberate Print click
+	   shows just this. ARMED ONLY by the `rk-printing` body class (Settings is
+	   long-lived — a globally-armed rule would blank an unrelated Cmd-P). */
+	.rk-print-sheet { display: none; }
+	@media print {
+		:global(body.rk-printing *) { visibility: hidden !important; }
+		:global(body.rk-printing) .rk-print-sheet,
+		:global(body.rk-printing) .rk-print-sheet * { visibility: visible !important; }
+		:global(body.rk-printing) .rk-print-sheet {
+			display: block !important; position: fixed; inset: 0; margin: 0; padding: 2.5rem;
+			background: #fff !important; color: #000 !important; text-align: center;
+		}
+		.rk-print-sheet h2 { font-size: 1.4rem; margin: 0 0 0.8rem; }
+		.rk-print-sheet p { font-size: 0.95rem; line-height: 1.5; max-width: 30rem; margin: 0 auto 1.2rem; }
+		.rk-print-qr { width: 260px; height: 260px; margin: 0 auto 1.2rem; display: block; }
+		.rk-print-key {
+			font-family: monospace; font-size: 1.15rem; letter-spacing: 0.06em;
+			word-break: break-all; white-space: pre-wrap; margin: 0 auto; max-width: 30rem;
+		}
 	}
 
 	/* Connections pane — phone-first redesign (2026-07-19): an accented QR hero, then two

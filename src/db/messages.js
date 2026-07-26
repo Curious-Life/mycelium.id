@@ -94,7 +94,7 @@ export function createMessagesNamespace(deps) {
   // trims it and marks nlp_processed = 1) and a row embedded-but-awaiting-L2
   // (nlp_processed = 2) are never re-selected, so the projection pinned
   // "Embedding N of M" forever — indistinguishable from a healthy vault still
-  // working. @see docs/DATA-READINESS-DESIGN-2026-07-15.md §3.3.
+  // working. @see the data-readiness design §3.3.
   //
   // (An earlier draft of this comment also listed "a genuine poison row (nlp_processed
   // = -1 kept by the self-heal's 'expected 768' exclusion)". That exclusion is GONE —
@@ -163,7 +163,45 @@ export function createMessagesNamespace(deps) {
   // -1 — so this switched to the counted predicate the warning demanded, in the same change.
   // A -1 row is neither tagged nor pending; it is surfaced as `gaveUp` (a count only) so the
   // categorize status route can offer the retry surface instead of silently omitting it.
-  let _catBacklog = null;          // { userId, value:{tagged,total,pending,gaveUp}, at:ms }
+  //
+  // ⚠️ AND `pending` NOW CARRIES THE STAGE-ORDERING CLAUSE TOO (D-047 ↻1). selectPendingCategories
+  // gained `AND embedding_768 IS NOT NULL` — the structural "embed before categorize" invariant
+  // (read its header for why). This count MUST carry the same clause or it re-creates the exact
+  // stuck-forever bug the paragraph above warns about, in the same file, one release later: a
+  // `pending` that counts rows the drain will never select can never reach 0.
+  //
+  // The rows that clause holds back are NOT silently dropped — they split into two honest,
+  // separately-reported buckets, because they mean different things and only one of them clears
+  // on its own:
+  //   • blockedOnEmbed — untagged, no vector, and STILL IN THE EMBED QUEUE (nlp_processed 0/NULL).
+  //     Transient. It is what makes the categorize stage render "waiting for embedding" instead of
+  //     a silent `done` while thousands of rows wait — the dormancy class this file exists to
+  //     prevent. Without it, `pending: 0` during a large import would read as "caught up".
+  //   • unembeddable — untagged, no vector, and the embed stage ATTEMPT-CAPPED them (-1). They will
+  //     never become categorizable on their own, so counting them in blockedOnEmbed would peg
+  //     "waiting for embedding" above zero forever. Recoverable exactly like their embed-side
+  //     selves, and ONLY because they are the -1 class: reclaimGaveUpRows once per boot, and
+  //     POST /portal/enrichment/retry-failed — both of which key on -1.
+  // tagged + pending + blockedOnEmbed + unembeddable + gaveUp = total, by construction.
+  //
+  // ⚠️ THE BLANK-SKIP POPULATION IS EXCLUDED FROM `total` BY THE EMBED STAGE'S OWN VERDICT
+  // (`nlp_processed = 1 AND embedding_768 IS NULL`), NOT BY RE-TESTING THE TEXT. A whitespace-only
+  // row passes `content != ''` and the embed stage terminally skips it to 1 with no vector, so
+  // under the new drain predicate it can never be selected again — and it used to be counted as
+  // `tagged`, so leaving it in `total` gives a progress bar that can never reach its own total.
+  //   An earlier draft excluded it with `TRIM(content, ' \t\n\r') != ''`, copying
+  //   _computeNlpBacklog. A review proved that mismatched: SQL TRIM's charset is FOUR characters
+  //   while the blank test upstream is JS `.trim()` (enrich/service.js), which also strips \v \f
+  //   NBSP BOM and every Unicode space. A single-NBSP body — routine in scraped/exported corpora —
+  //   is JS-blank (skipped to 1, no vector) but SQL-TRIM-NONEMPTY, so it stayed in `total` forever:
+  //   the exact never-filling bar the clause was added to prevent, for a class of whitespace nobody
+  //   would think to test.
+  // Keying on the STATE instead of re-deriving blankness is both correct for every charset AND
+  // keeps this counter's population identical to _computeEmbedBacklog's (which has no TRIM), so the
+  // embed stage's `total` and the categorize stage's `total` still describe the same vault.
+  // (_computeNlpBacklog's TRIM has the same latent mismatch — pre-existing, recorded, not touched
+  // here: its `pending` keys on `nlp_processed = 2` so a blank can never distort it.)
+  let _catBacklog = null;          // { userId, value:{tagged,total,pending,gaveUp,blockedOnEmbed,unembeddable}, at:ms }
   let _catBacklogInFlight = null;  // Promise while a recompute runs (single-flight)
   async function _computeCategoriesBacklog(userId) {
     // `tagged` mirrors updateCategories' "attempted" value exactly (categories_processed = 1);
@@ -173,12 +211,20 @@ export function createMessagesNamespace(deps) {
       `SELECT
          COUNT(*) AS total,
          COALESCE(SUM(CASE WHEN categories_processed = 1 THEN 1 ELSE 0 END), 0) AS tagged,
-         COALESCE(SUM(CASE WHEN (categories_processed = 0 OR categories_processed IS NULL) THEN 1 ELSE 0 END), 0) AS pending,
+         COALESCE(SUM(CASE WHEN (categories_processed = 0 OR categories_processed IS NULL)
+                               AND embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS pending,
+         COALESCE(SUM(CASE WHEN (categories_processed = 0 OR categories_processed IS NULL)
+                               AND embedding_768 IS NULL
+                               AND (nlp_processed = 0 OR nlp_processed IS NULL) THEN 1 ELSE 0 END), 0) AS blocked_on_embed,
+         COALESCE(SUM(CASE WHEN (categories_processed = 0 OR categories_processed IS NULL)
+                               AND embedding_768 IS NULL
+                               AND nlp_processed = -1 THEN 1 ELSE 0 END), 0) AS unembeddable,
          COALESCE(SUM(CASE WHEN categories_processed = -1 THEN 1 ELSE 0 END), 0) AS gave_up
        FROM messages
        WHERE user_id = ?
          AND forgotten_at IS NULL
-         AND content IS NOT NULL AND content != ''`,
+         AND content IS NOT NULL AND content != ''
+         AND NOT (nlp_processed = 1 AND embedding_768 IS NULL)`,
       [userId],
     );
     const row = (r.results || [])[0] || {};
@@ -186,7 +232,9 @@ export function createMessagesNamespace(deps) {
     const tagged = Number(row.tagged || 0);
     const pending = Number(row.pending || 0);
     const gaveUp = Number(row.gave_up || 0);
-    return { tagged, total, pending, gaveUp };
+    const blockedOnEmbed = Number(row.blocked_on_embed || 0);
+    const unembeddable = Number(row.unembeddable || 0);
+    return { tagged, total, pending, gaveUp, blockedOnEmbed, unembeddable };
   }
 
   // SWR cache for the Context Engine L2 (semantic NLP enrichment) backlog — the THIRD polled
@@ -408,7 +456,7 @@ export function createMessagesNamespace(deps) {
      * "19 remaining" fix it cites only excluded content-NULL rows from `total`, and
      * three other classes (nlp_processed = -1 / 1 / 2) stayed in the projection
      * forever. Corrected 2026-07-15 with the counted predicate above.
-     * PIPELINE-INTEGRITY design §P1.2; docs/DATA-READINESS-DESIGN-2026-07-15.md §3.3.
+     * PIPELINE-INTEGRITY design §P1.2; the data-readiness design §3.3.
      * @returns {Promise<{ embedded:number, total:number, pending:number, unprocessable:number }>}
      */
     async embedBacklog(userId) {
@@ -464,7 +512,11 @@ export function createMessagesNamespace(deps) {
      * with an independent latch). Surfaces the "Sorting your messages · N of M" indicator
      * so the continuous on-box categorization is never invisible churn (the live-vault
      * dormancy bug: 69k messages tagged by an out-of-app script with no UI signal).
-     * @returns {Promise<{ tagged:number, total:number, pending:number }>}
+     * `pending` is the DRAIN predicate (untagged AND embedded); `blockedOnEmbed` / `unembeddable`
+     * carry the untagged rows selectPendingCategories holds back (D-047 ↻1 — see
+     * _computeCategoriesBacklog). A consumer asking "how much labeling is LEFT" must add
+     * `pending + blockedOnEmbed`; one asking "how much can run right now" must not.
+     * @returns {Promise<{ tagged:number, total:number, pending:number, gaveUp:number, blockedOnEmbed:number, unembeddable:number }>}
      */
     async categoriesBacklogCached(userId) {
       const cached = _catBacklog && _catBacklog.userId === userId ? _catBacklog : null;
@@ -558,9 +610,74 @@ export function createMessagesNamespace(deps) {
 
     /**
      * Drain query for the category-tagging pass (Context Engine L1, Phase 1b). Selects rows
-     * not yet attempted (categories_processed 0/NULL) with non-empty content. INDEPENDENT of
-     * the nlp_processed state machine. content auto-decrypts on read so the classifier sees
-     * plaintext. Newest-first so fresh messages get labelled before the historical backfill.
+     * not yet attempted (categories_processed 0/NULL) with non-empty content THAT ARE ALREADY
+     * EMBEDDED. content auto-decrypts on read so the classifier sees plaintext.
+     *
+     * ⚠️ `ORDER BY created_at DESC` USED TO MEAN "fresh messages get labelled before the historical
+     * backfill". THAT CLAIM IS NO LONGER TRUE DURING AN IMPORT, and it is recorded rather than
+     * quietly retained: this drain now sees only EMBEDDED rows, and `selectPendingEnrichment`
+     * embeds `created_at ASC` — oldest first. So while a large backfill is embedding, the newest
+     * messages are the LAST to become labelable, whatever this ORDER BY says. It still holds on a
+     * caught-up vault (a new message embeds within a cycle, then sorts first). The ordering is not
+     * changed here: flipping either stage's traversal is a throughput/UX decision of its own, and
+     * neither ordering affects the invariant below. Stated so the next reader does not trust a
+     * property the predicate above took away.
+     *
+     * ════════════════════════════════════════════════════════════════════════════════════════
+     *  ⛔ `embedding_768 IS NOT NULL` IS THE STAGE-ORDERING INVARIANT (D-047 ↻1, D-001 family)
+     * ════════════════════════════════════════════════════════════════════════════════════════
+     * This clause is the ONLY structural thing that makes "embed before categorize" true. Do not
+     * remove it to "unblock labeling" — read this first.
+     *
+     * The doc comment here used to say the drain was "INDEPENDENT of the nlp_processed state
+     * machine", and it was: any row could be labeled at any time, in any order, by any caller.
+     * Ordering was enforced ONE layer up, by a per-CYCLE scheduling heuristic in the drainer
+     * (`deferCategorizeForEmbed`, shipped as #329 for D-047). That heuristic has THREE deliberate
+     * release valves — the embed service is unhealthy, the drain THREW, or the drain broke on
+     * no-progress (`embedStalledOut`) — because a categorize stage deadlocked behind an embed
+     * stage that can never finish is worse than the disorder. Every one of those valves releases
+     * categorize for the WHOLE CORPUS.
+     *
+     * On the operator's shipped-v0.1.13 5.5K import that is exactly what fired. `drainOnce`
+     * returns `{scanned:50, embedded:0, failed:0, skipped:0}` on its OUTAGE SIGNATURE (enrich/
+     * service.js: a pass with other candidates and zero embeds must not advance any attempt
+     * counter — it writes nothing at all). The drainer reads `moved === 0`, sets
+     * `embedStalledOut`, and the heuristic hands the box to categorize. Qwen then labeled 772
+     * rows past a stalled embed count of 445 — `tagged > embedded`, the reported symptom.
+     *
+     * The compute governor could never have caught it: the embed drain takes a BULK ticket and
+     * categorize takes a RESIDENT ticket, which are ORTHOGONAL gates. The governor prevents the
+     * two stages using memory simultaneously; it says nothing about their ORDER.
+     *
+     * So the ordering moves here, where it is a SET-INCLUSION FACT rather than a schedule: the
+     * tagged set (categories_processed = 1) can only ever be a subset of the embedded set
+     * (embedding_768 IS NOT NULL), because a row must pass through this predicate to be tagged.
+     * `tagged > embedded` is therefore UNREACHABLE — by every entry point, retry, resume, second
+     * import, QUEUE-lane interleave and ticket-timing accident, not just by the one the drainer
+     * happens to schedule. (Gate: verify:compute-lanes C16/C17, mutation-proved — removing this
+     * one clause reproduces the operator's report as `embedded=10 tagged=40`.)
+     *
+     * ⚠️ AND IT IS NOT A DEADLOCK — that is why it can be structural where the schedule could not.
+     * The heuristic had to release the WHOLE STAGE because it only knew about stages. This knows
+     * about ROWS: when embed stalls on an un-embeddable head of queue, categorize still drains
+     * every row that DID embed, and simply finds nothing after that. Un-embeddable rows are not
+     * labeled — deliberately, and recoverably: they are reclaimed once per boot
+     * (reclaimGaveUpRows) and by POST /portal/enrichment/retry-failed, the same recovery contract
+     * the embed stage already has. It is also FASTER than the old rule in the common case, which
+     * deferred all labeling while embed merely progressed.
+     *
+     * ⚠️ THE COUNT MUST MIRROR THIS PREDICATE. `_computeCategoriesBacklog` counts `pending` with
+     * this exact clause (that file's own warning: a drain predicate and a pending count that
+     * disagree is the stuck-forever bug), and counts the rows this clause holds back separately
+     * as `blockedOnEmbed`, so a vault waiting on embedding renders "waiting for embedding" and
+     * never a silent `done`.
+     *
+     * ⚠️ BLANK ROWS NEED NO CLAUSE HERE — `embedding_768 IS NOT NULL` already excludes them, because
+     * the EMBED stage blank-skips a whitespace-only body to `nlp_processed = 1` with NO vector. The
+     * matching exclusion on the COUNT side keys on that same STATE rather than re-testing the text
+     * (see _computeCategoriesBacklog: SQL `TRIM`'s 4-char charset is not JS `.trim()`, and an
+     * NBSP-only body would slip through a text test forever). Sending whitespace to the on-box model
+     * was never useful work anyway.
      */
     async selectPendingCategories(userId, { limit = 25 } = {}) {
       const result = await d1Query(
@@ -569,6 +686,7 @@ export function createMessagesNamespace(deps) {
              AND forgotten_at IS NULL
              AND (categories_processed = 0 OR categories_processed IS NULL)
              AND content IS NOT NULL AND content != ''
+             AND embedding_768 IS NOT NULL
            ORDER BY created_at DESC
            LIMIT ?`,
         [userId, limit],
@@ -918,10 +1036,22 @@ export function createMessagesNamespace(deps) {
       const params = [content, contentHash];
       if (metadata !== undefined) { sets.push('metadata = ?'); params.push(metadata); }
       // Re-enrich: clear AI-derived columns so the drainer re-embeds + re-clusters.
+      // ⛔ THE CATEGORIZE STAGE IS RESET HERE TOO, AND IT IS NOT COSMETIC (D-047 ↻1). This reset
+      // listed itself as clearing "every AI-derived column" and then left the L1 label stage
+      // alone: it nulled `embedding_768` and reset `nlp_processed` to 0 while `categories_processed`
+      // stayed at 1. Every content re-sync therefore MANUFACTURED a row that is counted as tagged
+      // and NOT counted as embedded — `tagged > embedded` produced directly by the DAL, with no
+      // scheduler involved. That is a second, independent source of the reported skew, and the
+      // drain-query ordering invariant (selectPendingCategories) cannot see it: the row is already
+      // tagged, so it is never re-selected. Gate: verify:compute-lanes C17b.
+      // The labels are AI output derived from content that just CHANGED, so they are stale by
+      // definition — nulling them is completing this reset's own stated intent, not widening it.
       sets.push(
         'nlp_processed = 0', 'nlp_processed_at = NULL', 'nlp_error = NULL',
         'thinking = NULL', 'tags = NULL', 'entities = NULL', 'entity_summary = NULL',
         'relations = NULL', 'suggested_new_tag = NULL', 'embedding_768 = NULL',
+        'categories_processed = 0', 'categorized_at = NULL', 'categories_model = NULL',
+        'domain = NULL', 'register = NULL', 'subregister = NULL',
       );
       params.push(id, userId);
       const res = await d1Query(
@@ -1016,13 +1146,27 @@ export function createMessagesNamespace(deps) {
       return result.results || [];
     },
 
-    async selectRecent(userId, { limit = 10, agentId, since, scope, includeEmbedding768 = false } = {}) {
+    /**
+     * @param {object} [o]
+     * @param {string[]} [o.sources] restrict to these `source` tags IN SQL.
+     *   Without it, "the newest N rows" means the newest N rows of EVERYTHING — so a caller
+     *   that only cares about one surface silently gets an empty answer on a busy vault once
+     *   N unrelated rows (a channel burst, an import) land on top. That fail-OPEN is a real
+     *   defect for any caller whose decision depends on completeness (agent/turn-taking.js's
+     *   floor read — independent review, 2026-07-26). Filtering in SQL makes the window exact
+     *   and stays on the (user_id, created_at) index (migrations/0026).
+     */
+    async selectRecent(userId, { limit = 10, agentId, since, scope, sources, includeEmbedding768 = false } = {}) {
       limit = clampLimit(limit, 10);
       const cols = `id, content, role, source, agent_id, attachment_id, tags, entities, scope, created_at, pinned${
         includeEmbedding768 ? ', embedding_768' : ''
       }`;
       let sql = `SELECT ${cols} FROM messages WHERE user_id = ? AND forgotten_at IS NULL`;
       const params = [userId];
+      if (Array.isArray(sources) && sources.length) {
+        sql += ` AND source IN (${sources.map(() => '?').join(', ')})`;
+        params.push(...sources.map((s) => String(s)));
+      }
       // Alias-aware filter: personal-agent expands to (personal-agent, mya-personal).
       // Single source of truth in @mycelium/core/agent-id-aliases.js.
       const agentFilter = buildAgentIdFilter(agentId);

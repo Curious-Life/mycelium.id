@@ -1,5 +1,5 @@
 // verify:blob-namespace — the multi-tenant floor for attachment blob paths
-// (docs/BLOB-NAMESPACE-HARDENING-DESIGN-2026-07-03.md). The reference-counted
+// (the blob-namespace hardening design). The reference-counted
 // blob GC keys on local_path ALONE, unscoped by user_id — safe ONLY while every
 // stored path is provably namespaced under its owner (`<userId>/<uuid>.enc`).
 // These checks prove no import/restore path can persist a foreign-prefixed key.

@@ -4,7 +4,7 @@
 	enrichment), provider, and model. Reads GET /portal/usage (src/portal-usage.js →
 	db.usage.summary over the llm_usage table). Counts only — no prompt/response text
 	is ever stored or shown. CSS bars (the portal has no chart lib, matching the
-	activity chip). @see docs/TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md §12.
+	activity chip). @see the text-generation abstraction design §12.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';

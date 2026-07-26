@@ -1,5 +1,5 @@
 // Verify the DURABLE mind-root relocation migration
-// (docs/MIND-ROOT-DURABILITY-MIGRATION-DESIGN-2026-07-20.md).
+// (the mind-root durability-migration design).
 //
 // The agent's on-disk mind tree used to default to <cwd>/data/mind/mind — in the
 // packaged app that is INSIDE the update-replaceable app bundle, so an update

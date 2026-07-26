@@ -1,6 +1,6 @@
 // src/http/require-vault-auth.js — the fail-closed per-request gate for the
 // portal/REST vault-data surface (Phase 1, step 1.2 of the mobile plan; design:
-// docs/DESIGN-portal-auth-relay-2026-06-05.md).
+// the portal-auth relay design).
 //
 // V1 history: the portal+REST server (:8787) had NO per-request auth — it was
 // "always signed in" and bound to localhost. To reach it from a phone over the

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// verify-e2e-transport.mjs — Phase 2b gate (docs/E2E-REACHABILITY-DESIGN-2026-07-19.md §2.2).
+// verify-e2e-transport.mjs — Phase 2b gate (the E2E-reachability design §2.2).
 //
 // Drives the box E2E transport over a real HTTP server with the Node E2E-session as
 // the phone. The loopback dispatch is a stub that EMULATES the box's own gate

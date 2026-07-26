@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * Pulses lens — chip in the mindscape lens-bar + expanded control
-	 * panel (Wave M4 of docs/MINDSCAPE-PULSES-PLAN.md).
+	 * panel (Wave M4 of the mindscape pulses plan).
 	 *
 	 * Surfaces:
 	 *   - Play / pause + discrete speed slider (0.25× / 0.5× / 1× / 2× / 4×)

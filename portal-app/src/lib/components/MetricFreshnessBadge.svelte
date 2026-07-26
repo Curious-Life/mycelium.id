@@ -13,7 +13,7 @@
 	 * Failure-quiet: if the endpoint errors or auth is missing, the
 	 * component renders nothing — better than falsely claiming "fresh."
 	 *
-	 * Spec: docs/architecture/MEASUREMENT-PLANE-PLAN.md (PR 0.3).
+	 * Spec: the measurement-plane plan (PR 0.3).
 	 */
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';

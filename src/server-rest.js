@@ -151,7 +151,7 @@ function resolvePortal(mode = process.env.MYCELIUM_PORTAL || 'auto') {
  *
  * Fail closed: if the shell can't be read, we emit `script-src 'self'` only
  * (stricter, not laxer). DOMPurify on rendered markdown remains the first layer;
- * this is defense-in-depth. See docs/APP-SANDBOX-HARDENING-DESIGN-2026-06-16.md.
+ * this is defense-in-depth. See the app-sandbox hardening design.
  */
 function buildPortalCsp(shellPath) {
   const hashes = [];
@@ -239,7 +239,7 @@ export function ensureDataDir({ env = process.env } = {}) {
 // is now done by the E2E shared-spaces system (space-content-mirror.js +
 // space-membership.js, over the ciphertext oplog). did:web #matrix advertising
 // (getMatrixId / resolveMatrixService / matrixConfig) is left intact as separate,
-// dormant identity infrastructure. See docs/SHARED-SPACES-E2E-HANDOFF-2026-06-30.md.
+// dormant identity infrastructure. See the shared-spaces E2E handoff.
 
 /** Build the express sub-app that serves every VAULT-DEPENDENT route. Mounted
  *  behind a guard so it only handles traffic once the vault is open; until then
@@ -410,7 +410,7 @@ function buildVaultSubApp({ db, tools, handlers, userId, effectiveDbPath, enqueu
     // ephemeral bind) this is 0, not the bound port — but the cli engine is never
     // invoked there, and the resolver fails safe to native on a falsy restPort anyway.
     // C2 TODO: if we ever run the cli engine on an ephemeral port, thread boundPort
-    // (computed post-listen) via a ref instead. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+    // (computed post-listen) via a ref instead. See the harness-CLI design.
     restPort,
   }));
   // Owner push-ingestion for the native app (Apple data → the stream via the one
@@ -740,7 +740,7 @@ export async function startRestServer({
         // from a psychological profiler on raw messages. The legacy discovery heartbeat (a zero-LLM
         // hourly timer that spawned pipeline/discover-claims.mjs on each window roll-over) is
         // therefore OFF by default; it stays intact + reversible behind
-        // MYCELIUM_LEGACY_CLAIM_DISCOVERY=1. See docs/AGENT-REFLECTION-SYSTEM-SPEC-2026-06-19.md
+        // MYCELIUM_LEGACY_CLAIM_DISCOVERY=1. See the agent reflection-system spec
         // (the profiler is "Replaced by distillation from consolidated model.md").
         let claimsHeartbeat = null;
         if (process.env.MYCELIUM_LEGACY_CLAIM_DISCOVERY === '1') {

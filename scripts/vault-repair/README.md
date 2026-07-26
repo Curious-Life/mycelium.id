@@ -18,7 +18,7 @@ the app **quit** (a concurrent writer is what causes this class of corruption) a
 | `loss-guard.probe.mjs` | Fast in-memory (no keychain/vault) probe for `loss-guard.mjs` — drives real forward+reverse scans to prove the guard fires when both stop on damage, stays silent on a clean read, and that a `'ERR'` src count no longer silently passes. Run after touching the guard. |
 
 **Full procedure + the live-vault pickup protocol:**
-`docs/VAULT-MALFORMED-VACUUM-REPAIR-HANDOFF-2026-06-25.md`.
+the vault-repair handoff.
 
 ## Why a fresh-file rebuild (not in-place)
 

@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { diffTools, toolDiffDetail, EXPECTED_TOOL_COUNT } from './lib/expected-tools.mjs';
+import { renderRef } from '../src/core/item-ref.js';
 
 const DB = 'data/verify-entities.db', KCV = 'data/verify-entities-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -64,7 +65,9 @@ rec('EN9. link find-or-creates entity + links the item', /Linked project "Myceli
 const lk2 = await handlers.link({ entity: 'Mycelium', entityType: 'project', type: 'message', id: 'm-123' });
 rec('EN10. link is idempotent (already linked)', /already linked/.test(lk2), lk2);
 const dossier = await handlers.searchMindscape({ scope: 'entities', query: 'Mycelium' });
-rec('EN11. scope:entities dossier shows the linked item', dossier.includes('project: Mycelium') && dossier.includes('message:m-123'), dossier.split('\n').slice(0, 2).join(' / '));
+// D-040 ↻1: the dossier's linked items now render the SAME curate ref shape as every other
+// read surface (`[msg:…]`), so what the agent reads here is directly passable to forget/mark.
+rec('EN11. scope:entities dossier shows the linked item as a curate ref', dossier.includes('project: Mycelium') && dossier.includes(renderRef('message', 'm-123')), dossier.split('\n').slice(0, 2).join(' / '));
 
 // ── forget an entity (soft-redact + links dropped) ──
 const fOut = await handlers.forget({ type: 'entity', id: alice.id });

@@ -5,8 +5,8 @@ Android builds from the same project. The phone does **not** run a server — it
 connects to the user's own box at `https://<handle>.mycelium.id` over the relay,
 where the (authenticated) portal is served. Design + plan:
 
-- `../docs/DESIGN-mobile-app-2026-06-05.md`
-- `../docs/MOBILE-DEVELOPMENT-PLAN-2026-06-05.md`
+- the mobile-app design
+- the mobile development plan
 
 ## What's here (scaffold — Phase 4.1)
 

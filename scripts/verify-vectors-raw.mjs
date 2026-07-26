@@ -9,7 +9,7 @@
 //   - decodeStoredVector DUAL-READS: Buffer→raw, legacy string→wrapped-DEK envelope
 //     (so a half-migrated column reads correctly during backfill)
 //   - bad lengths fail closed
-// @see docs/DESIGN-sqlcipher-stageA-vectors-2026-06-19.md
+// @see the SQLCipher stage-A vectors design
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

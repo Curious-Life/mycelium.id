@@ -18,11 +18,21 @@
 	type VoiceCatalog = { id: string; label: string; description: string };
 	type ModelCatalog = { id: string; label: string; description: string };
 	type QwenVariant = { id: string; label: string; description: string; sizeMB: number; recommended: boolean };
+	// The RUNNING voice engine's own state, mapped through the one service-state
+	// taxonomy. Distinct from `QwenModel` (which describes what is on DISK): a model
+	// can be fully downloaded while the engine that loads it is dead. Conflating the
+	// two is why a terminally-broken engine still read as "Model ready ✓" (D-003 ↻2).
+	type VoiceService = {
+		state: 'checking' | 'loading' | 'ready' | 'degraded' | 'failed';
+		status: string;
+		remedy?: string | null;
+		message?: string | null;
+	};
 	type QwenModel = { phase: 'absent' | 'installing' | 'downloading' | 'checking' | 'needs-runtime' | 'ready' | 'error'; progress: number; error: string | null; variant: string; sizeMB: number };
 	type TtsState = {
 		enabled: boolean;
 		provider: string | null;
-		qwen: { enabled: boolean; samplePending: boolean; variant: string; variants: QwenVariant[]; model: QwenModel };
+		qwen: { enabled: boolean; samplePending: boolean; variant: string; variants: QwenVariant[]; model: QwenModel; service?: VoiceService | null };
 		openai: { hasKey: boolean; voice: string; model: string; voices: VoiceCatalog[]; models: ModelCatalog[] };
 		elevenlabs: { hasKey: boolean; voiceId: string | null; model: string; models: ModelCatalog[] };
 	};
@@ -258,6 +268,30 @@
 						{/each}
 					</div>
 				</div>
+
+				<!-- ENGINE state (D-003 ↻2). The model-on-disk block below says what is
+				     INSTALLED; this says whether the thing that loads it is alive. Every
+				     remedy string in the supervisor points the owner at this screen, so
+				     the state has to actually be visible here — before this, the only way
+				     to discover a dead engine was to attempt an audition on the agent
+				     page and read a sentence that said "try again shortly" forever. -->
+				{#if tts.qwen.enabled && tts.qwen.service && tts.qwen.service.state !== 'ready' && tts.qwen.service.status !== 'idle'}
+					<div class="p-3 rounded-lg border border-[var(--color-border)]"
+						style:border-color={tts.qwen.service.state === 'failed' ? 'var(--color-error, #b45)' : ''}>
+						<div class="text-sm text-[var(--color-text-primary)]">
+							{#if tts.qwen.service.state === 'failed'}Voice engine stopped
+							{:else if tts.qwen.service.state === 'degraded'}Voice engine unavailable
+							{:else if tts.qwen.service.state === 'loading'}Voice engine starting…
+							{:else}Checking the voice engine…{/if}
+						</div>
+						{#if tts.qwen.service.message}
+							<div class="text-[0.62rem] text-[var(--color-text-tertiary)] mt-0.5">{tts.qwen.service.message}</div>
+						{/if}
+						{#if tts.qwen.service.remedy}
+							<div class="text-[0.66rem] text-[var(--color-text-secondary)] mt-1.5">{tts.qwen.service.remedy}</div>
+						{/if}
+					</div>
+				{/if}
 
 				<!-- Model status / download -->
 				<div class="p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]">

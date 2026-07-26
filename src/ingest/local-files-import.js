@@ -11,8 +11,14 @@
 //     transcribe audio later. Nothing is silently dropped.
 //
 // source 'import-local-files' (the `import-` prefix bypasses the agent-capture
-// consent gate, like every other explicit importer). Caller picks which
-// categories to bring; an unselected category is skipped (counted as such).
+// consent gate, like every other explicit importer).
+//
+// ⚠️ CONSENT IS EXPLICIT AND FAIL-CLOSED (D-070). The caller MUST pass the
+// categories the user selected. There is no "default all": an omitted selection
+// throws, and an empty or unrecognised selection imports NOTHING. The pre-fix
+// code widened both of those to all four categories, so a user who deselected
+// Photos/Videos/Audio could still have every photo, video and voice memo on
+// their machine ingested. Never reintroduce a widening branch here.
 //
 // Caps are generous but real (a sweep can touch tens of thousands of files):
 // per-file size, total file budget, recursion depth. Truncation is REPORTED,
@@ -25,17 +31,17 @@ import { captureMessage } from './capture.js';
 import { saveDocument } from '../core/document-store.js';
 import { putBlob, isUserNamespacedBlobPath } from './blob-store.js';
 import { recordContentFlow } from '../inference/usage.js';
-import { categoryOf, extOf, isManagedPackageDir, TEXT_DOC_EXTS, EXT_MIME } from './file-categories.js';
+import { categoryOf, extOf, TEXT_DOC_EXTS, EXT_MIME, normalizeCategorySelection, SWEEP_MAX_DEPTH, isSkippedSweepDir } from './file-categories.js';
 import { deriveCreatedAt, TS_PROVENANCE } from './timestamp.js';
 import { extractExifDate } from './exif.js';
 
 const MAX_FILES = Number(process.env.MYCELIUM_SWEEP_MAX_FILES) || 50000;
-const MAX_DEPTH = Number(process.env.MYCELIUM_SWEEP_MAX_DEPTH) || 8;
+const MAX_DEPTH = Number(process.env.MYCELIUM_SWEEP_MAX_DEPTH) || SWEEP_MAX_DEPTH;
 const MAX_TEXT_BYTES = Number(process.env.MYCELIUM_IMPORT_TEXT_LIMIT_BYTES) || 25 * 1024 * 1024;
 const MAX_MEDIA_BYTES = Number(process.env.MYCELIUM_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
-// System/cache dirs that are never "useful context" — pruned so a sweep of
-// ~/Documents or ~/Library never walks app caches, VCS internals, node_modules.
-const SKIP_DIRS = new Set(['.git', '.svn', '.hg', 'node_modules', '.Trash', '.trash', '.cache', 'Caches', '.npm', '.obsidian', '.smart-env', 'Library']);
+// The system/cache dirs neither walk descends now live in file-categories.js
+// (SWEEP_SKIP_DIRS / isSkippedSweepDir), shared with the DETECTOR so the count a
+// user consents to and the set that gets imported can never diverge again (D-070).
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
@@ -54,7 +60,7 @@ async function walkFiles(root, wanted, { maxFiles = MAX_FILES, maxDepth = MAX_DE
       if (out.length >= maxFiles) { truncated = true; return; }
       if (e.isSymbolicLink()) continue; // never follow symlinks out of the chosen root
       if (e.isDirectory()) {
-        if (e.name.startsWith('.') || SKIP_DIRS.has(e.name) || isManagedPackageDir(e.name)) continue;
+        if (isSkippedSweepDir(e.name)) continue;
         await walk(path.join(dir, e.name), depth + 1);
       } else if (e.isFile()) {
         const cat = categoryOf(e.name);
@@ -72,7 +78,9 @@ async function walkFiles(root, wanted, { maxFiles = MAX_FILES, maxDepth = MAX_DE
  * @param {object} opts
  * @param {string} opts.userId
  * @param {string} opts.folderPath            already realpath-confined by the route
- * @param {string[]} [opts.categories]        which to import (default all four)
+ * @param {string[]} opts.categories          REQUIRED explicit selection. There is no
+ *   "default all" — an omitted selection throws (`bad_request`) and an empty/unknown
+ *   selection imports NOTHING. See the fail-closed note at the top of this file.
  * @param {(id:string)=>void} [opts.enqueueEnrichment]
  * @param {(p:object)=>void} [opts.onProgress]  called periodically with running counts
  * @param {() => boolean} [opts.shouldCancel]   polled per file; true → stop early (cooperative)
@@ -84,8 +92,21 @@ export async function importLocalFiles(db, { userId, folderPath, categories, enq
   const st = await fs.stat(folderPath).catch(() => null);
   if (!st?.isDirectory()) throw new Error('importLocalFiles: folderPath is not a directory');
 
-  const allCats = ['document', 'image', 'audio', 'video'];
-  const wanted = new Set(Array.isArray(categories) && categories.length ? categories.filter((c) => allCats.includes(c)) : allCats);
+  // ── CONSENT GATE (D-070) — fail-closed, no widening branch ──────────────────
+  // The selection is REQUIRED and is never inferred. The pre-fix line read
+  //   categories?.length ? categories.filter(known) : ALL
+  // i.e. a missing OR empty selection imported every photo, video and audio file
+  // on the machine — the user's deselection reaching the importer as "no opinion"
+  // and being answered with "then take everything". For a cognitive vault that is
+  // a consent violation, so the ambiguous cases now resolve to *nothing*:
+  //   • omitted / not an array → throw (a caller that forgot to ask is a bug, not a yes)
+  //   • [] or only-unknown keys → import nothing (the user withheld consent)
+  if (!Array.isArray(categories)) {
+    const e = new Error('importLocalFiles: categories required — an explicit selection, never an implied "all"');
+    e.code = 'bad_request';
+    throw e;
+  }
+  const wanted = new Set(normalizeCategorySelection(categories));
   // strip trailing path separators without a regex (avoid polynomial backtracking
   // on a pathological all-separator string)
   let trimmedPath = folderPath;
@@ -100,6 +121,15 @@ export async function importLocalFiles(db, { userId, folderPath, categories, enq
     skipped: { oversize: 0, unreadable: 0, unsafe: 0 }, failed: 0,
     categories: [...wanted],
   };
+
+  // Nothing consented to → do not even walk the disk. `walkFiles` would already
+  // return an empty set (every category fails `wanted.has`), but not reading the
+  // user's folders at all is the honest answer to "import none of this", and it
+  // makes the fail-closed branch impossible to erode by editing the walk.
+  if (wanted.size === 0) {
+    onProgress?.({ total: 0, processed: 0, imported: 0, deduped: 0, skipped: 0, failed: 0 });
+    return summary;
+  }
 
   const { files, truncated } = await walkFiles(folderPath, wanted);
   summary.truncated = truncated;

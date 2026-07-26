@@ -10,7 +10,7 @@
 //   isJobRunning() — true if a clustering/discovery child is already alive
 //   now() — current ms (default Date.now)
 //
-// See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.5.
+// See the persona-claims design §3.5.
 import { CADENCES, previousCompleteWindow } from './windows.js';
 
 export function startClaimHeartbeat({

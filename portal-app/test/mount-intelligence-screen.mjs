@@ -70,11 +70,72 @@ const POLL = process.env.PROBE === 'poll';
 let pollPhase = 'initial';
 const readinessUrls = [];
 
+// ── D-075 fixture: the two selections the screen must tell apart ─────────────────────────────
+// taskModels carries ONE explicit assignment (chat → OpenAI, id 2). narrate has NONE — the
+// resolver falls back to the vault's ACTIVE provider, the Claude subscription (id 5). That is
+// the exact shape #360 (D-029) produces: connect a subscription and it serves chat + narration
+// WITHOUT writing taskModels. The pre-fix screen highlighted from taskModels alone, so the
+// Narration row showed nothing selected while narrate was already running on Claude.
+// PROBE=divergent — the pin that CANNOT run. narrate is explicitly pinned to provider 1 while
+// the resolver still reports provider 5 as effective, which is exactly what happens when the
+// pinned row is unresolvable (deleted, or status='pending' from a vault import — resolve.js
+// falls through to the active provider). The screen must show BOTH facts: the pin, and that it
+// isn't what runs. Keying the highlight on the resolver alone rendered the pin unlit and turned
+// its click into a silent clear (independent review, MED).
+const DIVERGENT = process.env.PROBE === 'divergent';
+// PROBE=noeff — the effective-models read FAILS (500 / an older backend with no such route / a
+// transient blip). The screen must render UNKNOWN, not "nothing runs": with a pin present, the
+// collapsed version painted the pinned provider amber and tagged it "chosen · not running",
+// fabricating a fault, and the obvious click then DELETED the pin (independent review ×2, HIGH).
+const NO_EFFECTIVE = process.env.PROBE === 'noeff';
+const TASK_MODELS = DIVERGENT
+  ? { chat: { providerId: 2 }, narrate: { providerId: 1 } }
+  : { chat: { providerId: 2 } };
+// Mutable server-side copy, so the PUT stub can merge into it the way the real route does.
+let liveTaskModels = { ...TASK_MODELS };
+// What the RESOLVER says (GET /portal/providers/effective-models → resolveEffectiveAssignment).
+// Deliberately NOT derivable from TASK_MODELS: narrate names a provider that appears nowhere in
+// it, so a screen that recomputed the selection locally cannot produce this answer.
+const EFFECTIVE = {
+  chat:       { source: 'explicit', providerId: 2, model: 'gpt-4o' },
+  narrate:    { source: 'active',   providerId: 5, model: null },
+  harness:    { source: 'active',   providerId: 5, model: null },
+  reflection: { source: 'active',   providerId: 5, model: null },
+};
+
 const sent = [];   // every write the screen makes — the behavioural evidence
 globalThis.__apiStub = async (path, options = {}) => {
   if (options.method === 'PUT') {
-    sent.push({ path, body: JSON.parse(options.body) });
-    return { ok: true, json: async () => ({ taskModels: { categorize: { model: 'qwen3.5:4b' }, enrich: { model: 'qwen3.5:4b' } } }) };
+    const body = JSON.parse(options.body);
+    sent.push({ path, body });
+    // ⚠️ MERGE, don't replace — this mirrors applyTaskModelWrite (src/portal-providers.js), which
+    // copies existing settings.taskModels and edits only the written function's tasks.
+    //
+    // The first version of this stub returned a FIXED {categorize, enrich} object. Because the
+    // driver approves Understanding first, every later provider click saw taskModels wiped, so
+    // `explicitId` was always undefined and the write path's actual key was NEVER exercised: a
+    // mutation removing the un-pin branch entirely (`assign(f, p.id)`) left both gates GREEN
+    // (independent review, MED). A fixture that is more forgiving than the product is a gate
+    // with no teeth on the difference.
+    //
+    // ⚠️ KNOWN LIMITATIONS — this imitates applyTaskModelWrite's MERGE semantics, which is what
+    // the write-path checks need, but it is still MORE PERMISSIVE than the real route in ways a
+    // broken write path could hide behind (independent review ×2, LOW). It does not: reject a
+    // body carrying BOTH `task` and `function`; validate the function key against the served
+    // spine; refuse an unknown/absent providerId row; distinguish ONBOX tasks (which store a
+    // model NAME, not a providerId); or fail the request atomically. Those are gated
+    // server-side by verify:task-models and verify:intelligence-bundle — this harness proves the
+    // CLIENT sends the right shape, not that the server validates it. Do not add a client check
+    // that depends on validation this stub does not perform.
+    const tm = { ...liveTaskModels };
+    const fnTasks = { understanding: ['categorize', 'enrich'], conversation: ['chat', 'harness', 'reflection'], descriptions: ['narrate'], transcription: ['transcribe'], voice: ['speak'] };
+    for (const t of (fnTasks[body.function] || [])) {
+      if (body.providerId != null) tm[t] = { providerId: body.providerId };
+      else if (body.model) tm[t] = { model: body.model };
+      else delete tm[t];                                  // clear ⇒ NOT approved / falls back
+    }
+    liveTaskModels = tm;
+    return { ok: true, json: async () => ({ taskModels: tm }) };
   }
   // ⚠️ SPECIFIC PATHS BEFORE THE GENERAL PREFIX: '/portal/providers' startsWith-matches
   // '/portal/providers/sensitive-subscription' too, and would swallow it.
@@ -90,7 +151,13 @@ globalThis.__apiStub = async (path, options = {}) => {
     ] }) };
   }
   if (path.startsWith('/portal/providers/presets')) return { ok: true, json: async () => ({ functions: FUNCTIONS }) };
-  if (path.startsWith('/portal/providers/task-models')) return { ok: true, json: async () => ({ taskModels: {} }) };
+  // ⚠️ BEFORE the generic '/portal/providers' prefix, which would otherwise swallow it.
+  if (path.startsWith('/portal/providers/effective-models')) {
+    // A real failure shape: r.ok false, and a body the screen must not mine for an answer.
+    if (NO_EFFECTIVE) return { ok: false, status: 500, json: async () => ({ ok: false, error: 'failed to resolve the effective model selection' }) };
+    return { ok: true, json: async () => ({ ok: true, effective: EFFECTIVE }) };
+  }
+  if (path.startsWith('/portal/providers/task-models')) return { ok: true, json: async () => ({ taskModels: TASK_MODELS }) };
   if (path.startsWith('/portal/providers')) return { ok: true, json: async () => ({ providers: PROVIDERS }) };
   // ⚠️ DISCRIMINATING ON PURPOSE: labeler ok / enricher no_model. Understanding owns BOTH tasks,
   // so it must show the WORSE of them — if it showed only the labeler it would report "Labeling
@@ -187,6 +254,20 @@ try {
   const text = D.body.textContent.replace(/\s+/g, ' ');
   const sections = [...D.querySelectorAll('section.fn')];
 
+  // ── D-075: what the screen SAYS is selected, captured before any control is driven ───────
+  // Reported per function row as {label, on:[…], auto:[…]} so the gate can compare it against
+  // the resolver's answer instead of against a string.
+  const pickState = sections.map((sec) => ({
+    label: sec.querySelector('strong')?.textContent?.trim(),
+    on: [...sec.querySelectorAll('button.pick.on')].map((b) => b.textContent.trim()),
+    auto: [...sec.querySelectorAll('button.pick.auto')].map((b) => b.textContent.trim()),
+    pinned: [...sec.querySelectorAll('button.pick.pinned')].map((b) => b.textContent.trim()),
+    all: [...sec.querySelectorAll('button.pick')].map((b) => b.textContent.trim()),
+  })).filter((r) => r.all.length);
+  // How many writes had happened by the time the screen finished rendering — i.e. writes caused
+  // by RENDERING, before the driver touches anything. Must be 0 in every probe.
+  const sentAtSnapshot = sent.length;
+
   // Drive the REAL control: approve Understanding's recommendation.
   const sel = D.querySelector('select');
   if (sel) {
@@ -216,8 +297,51 @@ try {
   }
   const providerSent = sent.slice(beforeProviderClicks).map((s) => s.body);
 
+  // ── D-075: click the AUTO-SELECTED button itself ──────────────────────────────────────────
+  // The one click that separates "display the effective selection" from "toggle it". The
+  // Narration row's Claude button is lit because the RESOLVER says Claude serves narrate, not
+  // because anything is stored — so this click must PIN it (providerId 5). A screen that keyed
+  // its toggle on the effective value would send providerId:null ("clear"), i.e. a lit button
+  // whose click does nothing observable. Without this drive the mutation passes: the earlier
+  // click lands on Regolo, which is NOT the effective provider, so both rules agree there.
+  const autoBtn = descSection?.querySelector('button.pick.on');
+  const beforeAutoClick = sent.length;
+  if (autoBtn) {
+    autoBtn.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+    flushSync();
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  const autoPinSent = sent.slice(beforeAutoClick).map((s) => s.body);
+
+  // ── The UN-PIN path: click the SAME button again ──────────────────────────────────────────
+  // After the click above, narrate is explicitly pinned to provider 5 (the stub merged it, as
+  // the real route does). Clicking it once more must CLEAR the pin — providerId:null — which is
+  // the only way a user un-does a choice. Nothing covered this before: with the old
+  // replace-everything stub the component never held a non-empty explicit id at click time, so a
+  // mutation deleting the un-pin branch passed (see the stub note above).
+  const rePin = descSection?.querySelector('button.pick.pinned') || descSection?.querySelector('button.pick.on');
+  const beforeUnpin = sent.length;
+  if (rePin) {
+    rePin.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+    flushSync();
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  const unpinSent = sent.slice(beforeUnpin).map((s) => s.body);
+
   emit({
     ok: true,
+    // D-075 — the rendered selection per row, and the fixture it must agree with.
+    pickState,
+    // Writes caused by RENDERING alone (pre-drive). Always 0 — display is never a write.
+    sentAtSnapshot,
+    // H1 — the honest "we could not check" line (absent when the run-state IS known).
+    unknownRunNotes: [...D.querySelectorAll('.unknown-run')].map((n) => n.textContent.trim()),
+    // …and what clicking the AUTO-selected provider sends (pin, never clear).
+    autoPinSent,
+    // …and what clicking the now-PINNED provider sends (clear — the un-pin path).
+    unpinSent,
+    effectiveFixture: EFFECTIVE,
+    taskModelsFixture: TASK_MODELS,
     // What the PROVIDER button actually sends — it must identify its provider.
     providerSent,
     // ── Descriptions is now jurisdiction 'any' (§4g limit lifted) ──────────────────────────

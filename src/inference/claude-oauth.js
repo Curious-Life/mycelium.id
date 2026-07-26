@@ -11,7 +11,7 @@
 // SECURITY: the user:inference scope-guard rejects a `claude setup-token` ADMIN
 // credential (which can mint API keys) — we only accept a real subscription login.
 // Mirrors the canonical guard at packages/server/routes/portal-auth-claude.js:242.
-// @see docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md (Phase S).
+// @see the Claude-subscription driver design (Phase S).
 
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';

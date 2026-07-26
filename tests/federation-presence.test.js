@@ -2,7 +2,7 @@
 // dot), Tier-0 federation. Verifies the fail-closed verify gate is reused, the
 // share/consent + activity logic, the no-oracle `hidden`, the SIGNED + nonce-echoed
 // reply, and that the audit leaks nothing beyond host+state.
-// Design: docs/DESIGN-connection-presence-indicator-2026-06-18.md  (gate verify:presence)
+// Design: the connection-presence design  (gate verify:presence)
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 

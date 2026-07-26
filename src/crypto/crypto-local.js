@@ -216,7 +216,7 @@ const ENCRYPTED_FIELDS = {
   // break verify:providers-leak PV2 (which asserts the key is plaintext-in-cipher).
   // providers.list() never selects `credentials` (metadata-only); only
   // providers.get() returns it. DO NOT add 'credentials' here — see the stale-
-  // comment correction in docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md.
+  // comment correction in the Claude-subscription driver design.
   ai_providers: [],
 
   // Channel access policy — the per-channel allowlist of platform sender ids is a
@@ -356,7 +356,7 @@ const ENCRYPTED_FIELDS = {
   // Internal model — user's private reasoning. (Was ['content','evidence',
   // 'source_context'] — but evidence/source_context are PHANTOM: no such columns
   // exist in the table, only content + metadata. Corrected to the real sensitive
-  // columns. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §1 v2.)
+  // columns. See the persona-claims design §1 v2.)
   internal_model_items: [],
 
   // Persona-Claims — the most sensitive abstractions in the vault (values,
@@ -365,7 +365,7 @@ const ENCRYPTED_FIELDS = {
   // (precedent: topology_audit_snapshots encrypts categorical m2_trend). support
   // is a JSON id-set. content_hash/status/scope stay plaintext for SQL filtering;
   // embedding_768 is in NEVER_AUTO_DECRYPT (vector envelope). Both tables are
-  // SCOPE_AWARE. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+  // SCOPE_AWARE. See the persona-claims design.
   // Stage B/C cut 3: the claim content columns are now plaintext-inside-cipher
   // (claims.js is JS-adapter-written → the map shrink stops every write). content_hash
   // /status/scope stay PLAINTEXT (SQL filter keys); embedding_768 stays in
@@ -1052,7 +1052,7 @@ async function deriveSystemScopeKey(systemKey, scope, usage = ['wrapKey', 'unwra
 // not message source) can resolve scope correctly.
 //
 // This is a BRIDGE until bot-as-pure-transport refactor lands
-// (docs/PURE-TRANSPORT-BOT-VISION-2026-05-20.md). When that ships,
+// (the pure-transport bot vision). When that ships,
 // bots will forward all data writes to agent-server which has the
 // correct scope context natively, and this map can be deleted.
 const PROCESS_SCOPE_MAP = {

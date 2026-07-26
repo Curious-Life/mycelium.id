@@ -1,5 +1,5 @@
 // Destroy-the-entire-vault (factory reset) — the NODE-side wipe engine.
-// Design + locked decisions: docs/DATA-DESTROY-VAULT-DESIGN-2026-07-03.md.
+// Design + locked decisions: the destroy-vault design.
 //
 // This is the single most destructive operation in the product. Two invariants
 // make it safe:

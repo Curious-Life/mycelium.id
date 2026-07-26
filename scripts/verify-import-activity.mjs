@@ -303,7 +303,9 @@ try {
     // runner, so it published NOTHING — while /import/run's comment already claimed the
     // envelope was "now shared" (independent review, 2026-07-16).
     writeFileSync(path.join(HOME, 'Documents', 'note.md'), '# a note\nsome text\n');
-    const r = await post('/api/v1/portal/import/local-files', { folderPath: path.join(HOME, 'Documents') });
+    // `categories` is now REQUIRED (D-070 consent gate — a missing selection is a 400, never
+    // an implied "import everything"), so this feed check states the selection explicitly.
+    const r = await post('/api/v1/portal/import/local-files', { folderPath: path.join(HOME, 'Documents'), categories: ['document', 'image', 'audio', 'video'] });
     assert.equal(r.status, 200, `sweep must start — got ${r.status} ${JSON.stringify(r.body)}`);
     const got = await waitFor(async () => (await feedRows()).some((x) => x.stage === 'Importing files from this Mac'));
     assert.ok(got, 'the local-files sweep MUST appear in the feed — this is the QA item 3 import');

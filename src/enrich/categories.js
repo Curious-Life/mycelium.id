@@ -11,7 +11,7 @@ import { labelingRecommendedModel } from '../inference/role-models.js';
 // 4-model eval (2026-06-21): balanced domain spread + clean register parsing (~2-5/50
 // nulls vs llama3.1's ~27/50, which invents words like "Emotion" outside the 12-name
 // list). Small + fast — fits "smaller compute" boxes. Overridable via
-// settings.taskModels.categorize.model. See docs/MODEL-CURATION-* + the eval handoff.
+// settings.taskModels.categorize.model. See the model-curation notes + the eval handoff.
 //
 // Single-sourced from role-models.js ROLE_RECOMMENDATIONS.labeling so the "Recommended
 // for labeling" badge and this default can never drift (verify-enrich-categories pins them equal).

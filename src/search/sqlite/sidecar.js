@@ -2,7 +2,7 @@
 // lives in a SEPARATE, SQLCipher-encrypted database file next to the vault, NOT
 // inside the vault DB.
 //
-// WHY (docs/SEARCH-SIDECAR-DESIGN-2026-07-02.md + VAULT-DURABILITY-AUDIT-FINDINGS):
+// WHY (the search-sidecar design + VAULT-DURABILITY-AUDIT-FINDINGS):
 // the index is 100% regenerable from content, but a corrupt FTS5/vec0 table
 // CANNOT be DROPped or DELETEd (the drop itself throws `database disk image is
 // malformed` — proven). Inside the vault that made a regenerable index a FATAL,

@@ -16,7 +16,7 @@
 	 * three cards (Step 3). Parent → cards is one-way: pass
 	 * `granularity`; each card refetches its own slice.
 	 *
-	 * @see docs/WORKSTREAM-C-PORTAL-DESIGN-2026-05-08.md (Step 4)
+	 * @see the portal workstream design (Step 4)
 	 */
 
 	import { onMount } from 'svelte';

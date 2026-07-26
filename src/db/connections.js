@@ -214,7 +214,7 @@ export function createConnectionsNamespace(deps) {
     return result.results?.[0]?.c || 0;
   }
 
-  // Federation transport seam (P1 — docs/FEDERATION-TRANSPORT-REDESIGN-DESIGN-2026-07-18.md):
+  // Federation transport seam (P1 — the federation-transport redesign):
   // the ONE place that resolves a peer endpoint and frames/signs/POSTs an envelope. Direct
   // HTTP today; the relay store-and-forward transport (P3) slots in behind this interface.
   //   transport.resolveEndpoint(domain, handle) → federation endpoint href (WebFinger, SSRF-bound)

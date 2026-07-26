@@ -9,7 +9,7 @@
 -- holds the cheap read-only diagnostics computed at the end of each clustering
 -- run (pipeline/cluster_diagnostics.py). They are STORED, never used to select k
 -- (re-introducing index-driven k-selection would re-introduce the original bug —
--- see docs/CLUSTERING-ALGORITHM-DECISION-LOG-2026-06-19.md).
+-- see the clustering-algorithm decision log).
 --
 -- PLAINTEXT BY DESIGN. These are GLOBAL partition-GEOMETRY quality scalars (how
 -- balanced / reproducible the math is), not per-entity cognitive signal. They sit

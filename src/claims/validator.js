@@ -12,7 +12,7 @@
 // on-box local (verified src/inference/router.js:151-154). The router is
 // INJECTED so this module is unit-testable without a live model.
 //
-// See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.4.
+// See the persona-claims design §3.4.
 
 // Ordered evidence categories → ω (log-odds evidence weight). Symmetric around 0.
 export const RELATION_OMEGA = Object.freeze({

@@ -12,9 +12,11 @@
 	//    password-manager save reads the key SERVER-SIDE (POST /recovery-key/save
 	//    only carries {target}); the client never transmits the key back. The verify
 	//    compare is purely client-side. The flag write carries NO key.
-	//  • Pass is DELIBERATELY STRICT (do NOT soften): a real store-save (savedTo) OR
-	//    the re-entry challenge (retype the 64-char key while it is off screen). A
-	//    ticked box or a Download ALONE does not pass — that is how vaults get lost.
+	//  • Pass is DELIBERATELY STRICT (do NOT soften): the ONLY pass path is the
+	//    re-entry challenge (retype the 64-char key while it is off screen). Copy /
+	//    Download / Print-QR / a same-machine Keychain copy do NOT pass on their
+	//    own — a Keychain copy is not an off-machine backup, and a bare download is
+	//    unproven; that is how vaults get lost (D-027).
 	//  • On pass we set the DURABLE `recovery_key_backed_up` flag and only THEN
 	//    advance. A failed flag write does NOT advance (fail-closed) — the gate
 	//    re-shows on relaunch until the flag lands.
@@ -32,12 +34,31 @@
 	let recoveryKey = $state('');
 	let keychainAvailable = $state(true);
 
+	// Reveal is HIDDEN BY DEFAULT (shoulder-surf protection). Copy / Download /
+	// Print-QR operate on the in-memory key regardless — they are deliberate user
+	// actions — but the key is only PRINTED ON SCREEN once the user asks.
+	let revealed = $state(false);
+
 	let copied = $state(false);
 	let downloaded = $state(false);
-	// One-click save into the OS store (server-side hand-off; key never returns to
-	// the browser). A success counts as a real save (the savedTo pass path).
-	let saving = $state<'keychain' | '1password' | null>(null);
-	let savedTo = $state<'keychain' | '1password' | null>(null);
+
+	// Print / QR — a scannable QR of the 64-hex (into a phone manager) + a
+	// print-friendly sheet. The QR is generated ENTIRELY CLIENT-SIDE (the `qrcode`
+	// package, already bundled) — the key never leaves the box, no remote asset,
+	// no network (CSP `img-src 'self' data:`; CLAUDE.md §1). Data URL stays in
+	// memory only; never logged, never persisted.
+	let showQr = $state(false);
+	let qrDataUrl = $state('');
+	let qrError = $state<string | null>(null);
+
+	// One-click save a COPY to this Mac's Keychain (server-side hand-off; the key
+	// never returns to the browser). This is an ON-DEVICE CONVENIENCE, NOT a
+	// backup — it lives on this machine only. It therefore does NOT satisfy the
+	// backup gate: the re-entry challenge below is the only pass path. (D-027:
+	// the former "Save to 1Password" op-CLI button was removed — it blamed the
+	// user for a per-process authorization limit a GUI app cannot satisfy.)
+	let saving = $state<'keychain' | null>(null);
+	let savedTo = $state<'keychain' | null>(null);
 	let saveError = $state<string | null>(null);
 
 	// Re-entry challenge: key HIDDEN, retype it to prove it is really saved.
@@ -46,6 +67,8 @@
 	const verifyMatches = $derived(normalizedVerify.length === 64 && normalizedVerify === recoveryKey.toLowerCase());
 
 	const grouped = $derived(recoveryKey ? recoveryKey.replace(/(.{4})/g, '$1 ').trim() : '');
+	// A fixed-width mask so the box doesn't jump when revealed.
+	const masked = $derived('•••• •••• •••• •••• •••• •••• •••• ••••');
 
 	// The final commit: set the durable flag, then advance. Shown while the write is
 	// in flight; a failure holds the gate (never advances) and surfaces the reason.
@@ -102,11 +125,43 @@
 		setTimeout(() => (downloaded = false), 2500);
 	}
 
-	// One-click save to the OS store. The key is read SERVER-SIDE and handed to the
-	// store — it never leaves the box via the browser. A success makes the key
-	// retrievable, so it satisfies the pass gate (savedTo lets Continue skip the
-	// re-entry challenge). "Keychain" = Keychain Access; 1Password needs the `op` CLI.
-	async function saveKey(target: 'keychain' | '1password') {
+	// Render a scannable QR of the recovery key + reveal the print/QR panel. The
+	// QR is generated client-side (no network, no remote asset). The key stays in
+	// memory only — the data URL is never logged or persisted.
+	async function toggleQr() {
+		if (showQr) { showQr = false; return; }
+		qrError = null;
+		try {
+			if (!qrDataUrl) {
+				const QRCode = (await import('qrcode')).default;
+				qrDataUrl = await QRCode.toDataURL(recoveryKey, { errorCorrectionLevel: 'M', margin: 2, width: 240 });
+			}
+			showQr = true;
+		} catch {
+			qrError = 'Could not render a QR code — use Copy or Download instead.';
+		}
+	}
+
+	// Print a paper copy. Uses the in-page @media print sheet + the browser's own
+	// print dialog (no window.open, which a WKWebView swallows — D-010; no iframe,
+	// which the CSP frame-src blocks). Printing sends the key ONLY to the user's
+	// printer — the point of an offline backup.
+	//
+	// BY DESIGN: the @media print rule below is GLOBAL — it hides every other node
+	// (`body *`) so ANY print issued while this step is mounted renders the key
+	// sheet, not the app. That is deliberate (a Cmd-P here should produce the
+	// backup sheet, never a screenshot of the wizard), and the step is short-lived
+	// and modal. If this component is ever made non-modal or long-lived, scope the
+	// rule instead — otherwise it would hijack an unrelated print. (Review note.)
+	function printKey() {
+		try { window.print(); } catch { /* the print panel is the browser's; nothing to surface */ }
+	}
+
+	// One-click save a COPY to this Mac's Keychain. The key is read SERVER-SIDE and
+	// handed to Keychain Access — it never leaves the box via the browser. This is
+	// an ON-DEVICE CONVENIENCE, NOT a backup (it is gone if the Mac is lost), so it
+	// does NOT satisfy the backup gate: the re-entry challenge is the only pass path.
+	async function saveKey(target: 'keychain') {
 		saving = target; saveError = null;
 		try {
 			const res = await fetch('/api/v1/account/recovery-key/save', {
@@ -177,48 +232,63 @@
 			Save it now — it can't be reset.
 		</p>
 
-		<div class="keybox">{grouped}</div>
+		<!-- Hidden by default; the user reveals it to read/transcribe. -->
+		<div class="keybox" class:masked={!revealed}>{revealed ? grouped : masked}</div>
 
 		<div class="btn-row">
+			<button class="ghost" onclick={() => (revealed = !revealed)}>{revealed ? 'Hide' : 'Reveal'}</button>
 			<button class="ghost" onclick={copyKey}>{copied ? 'Copied ✓' : 'Copy'}</button>
-			<button class="ghost" onclick={downloadKey}>{downloaded ? 'Downloaded ✓' : 'Download'}</button>
 		</div>
+		<div class="btn-row">
+			<button class="ghost" onclick={downloadKey}>{downloaded ? 'Downloaded ✓' : 'Download .txt'}</button>
+			<button class="ghost" onclick={toggleQr}>{showQr ? 'Hide QR' : 'Print / QR'}</button>
+		</div>
+
+		{#if showQr}
+			<div class="qr-panel">
+				{#if qrDataUrl}
+					<img class="qr-img" src={qrDataUrl} alt="QR code of your recovery key — scan it into your password manager" />
+				{/if}
+				<p class="hint">Scan this into your phone's password manager, or print a paper copy and store it off this Mac.</p>
+				<button class="ghost qr-print" onclick={printKey}>Print</button>
+			</div>
+		{/if}
+		{#if qrError}<p class="hint bad">{qrError}</p>{/if}
+
 		<div class="btn-row">
 			<button class="ghost" onclick={() => saveKey('keychain')} disabled={saving !== null || !keychainAvailable}>
-				{saving === 'keychain' ? 'Saving…' : savedTo === 'keychain' ? 'Saved to Keychain ✓' : 'Save to Keychain'}
-			</button>
-			<button class="ghost" onclick={() => saveKey('1password')} disabled={saving !== null}>
-				{saving === '1password' ? 'Saving…' : savedTo === '1password' ? 'Saved to 1Password ✓' : 'Save to 1Password'}
+				{saving === 'keychain' ? 'Saving…' : savedTo === 'keychain' ? 'Copied to this Mac ✓' : 'Copy to this Mac’s Keychain'}
 			</button>
 		</div>
-
+		<p class="hint">
+			Copying to this Mac’s Keychain is a convenience — <strong>not a backup</strong>. It lives on
+			this computer, so it’s gone if the Mac is lost. Keep a copy <strong>off this machine</strong>
+			(download the file, print it, or copy it into a password manager that syncs). There is no reset.
+		</p>
 		{#if !keychainAvailable}
 			<p class="hint">The Keychain isn't available here — re-enter your key below to confirm you've saved it.</p>
-		{/if}
-		{#if savedTo !== '1password'}
-			<!-- Saving to 1Password needs the `op` CLI installed + signed in (Finder-
-			     launched apps don't inherit the shell PATH). A real install link (ON-2). -->
-			<p class="hint">
-				Saving to 1Password needs the
-				<a href="https://developer.1password.com/docs/cli/get-started/" target="_blank" rel="noopener noreferrer">1Password CLI</a>
-				installed &amp; signed in.
-			</p>
 		{/if}
 		{#if saveError}<p class="hint bad">{saveError}</p>{/if}
 		{#if commitError}<p class="hint bad">{commitError}</p>{/if}
 
 		<div class="actions">
-			{#if savedTo}
-				<!-- A real save proves the key is retrievable → skip the re-entry challenge. -->
-				<button class="primary" disabled={committing} onclick={commitAndAdvance}>
-					{committing ? 'Saving…' : 'Saved — continue'}
-				</button>
-			{:else}
-				<button class="primary" onclick={() => { verifyInput = ''; commitError = null; phase = 'verify'; }}>
-					I've saved it — continue
-				</button>
-				<p class="sub-hint">Next: re-enter the key to confirm you can get back in.</p>
-			{/if}
+			<!-- The ONLY pass path: an explicit "I've saved it" → re-enter the key
+			     (proves it is really saved off-screen). No store-save auto-advances;
+			     a same-machine Keychain copy is not an off-machine backup. -->
+			<button class="primary" onclick={() => { verifyInput = ''; commitError = null; phase = 'verify'; }}>
+				I've saved it — continue
+			</button>
+			<p class="sub-hint">Next: re-enter the key to confirm you can get back in.</p>
+		</div>
+
+		<!-- Print-only sheet: window.print() shows just this (the @media print rule
+		     below hides the app chrome). The key + QR go only to the user's printer. -->
+		<div class="rk-print-sheet" aria-hidden="true">
+			<h2>Mycelium recovery key</h2>
+			<p>Keep this secret and offline. It is the only way to recover your vault on a new
+				computer. Anyone with it can read your vault. It cannot be reset.</p>
+			{#if qrDataUrl}<img class="rk-print-qr" src={qrDataUrl} alt="" />{/if}
+			<pre class="rk-print-key">{grouped}</pre>
 		</div>
 
 	{:else if phase === 'verify'}
@@ -275,7 +345,32 @@
 		text-align: center; word-break: break-all;
 		color: var(--color-text-primary); user-select: all; -webkit-user-select: all;
 	}
+	.keybox.masked { color: var(--color-text-tertiary); letter-spacing: 0.08em; user-select: none; -webkit-user-select: none; }
 	.btn-row { display: flex; gap: 0.5rem; margin-top: 0.7rem; }
+	.qr-panel {
+		margin-top: 0.8rem; padding: 0.9rem; border-radius: 11px;
+		border: 1px solid var(--glass-input-border, rgba(255, 255, 255, 0.14));
+		display: flex; flex-direction: column; align-items: center; gap: 0.5rem;
+	}
+	.qr-img { width: 200px; height: 200px; border-radius: 8px; background: #fff; padding: 8px; }
+	.qr-print { align-self: stretch; }
+	/* The print sheet is invisible on screen; @media print isolates it. */
+	.rk-print-sheet { display: none; }
+	@media print {
+		:global(body *) { visibility: hidden !important; }
+		.rk-print-sheet, .rk-print-sheet * { visibility: visible !important; }
+		.rk-print-sheet {
+			display: block !important; position: fixed; inset: 0; margin: 0; padding: 2.5rem;
+			background: #fff !important; color: #000 !important; text-align: center;
+		}
+		.rk-print-sheet h2 { font-size: 1.4rem; margin: 0 0 0.8rem; }
+		.rk-print-sheet p { font-size: 0.95rem; line-height: 1.5; max-width: 30rem; margin: 0 auto 1.2rem; }
+		.rk-print-qr { width: 260px; height: 260px; margin: 0 auto 1.2rem; display: block; }
+		.rk-print-key {
+			font-family: monospace; font-size: 1.15rem; letter-spacing: 0.06em;
+			word-break: break-all; white-space: pre-wrap; margin: 0 auto; max-width: 30rem;
+		}
+	}
 	.ghost {
 		flex: 1; padding: 0.55rem 0.6rem; border-radius: 9px;
 		border: 1px solid var(--glass-input-border, rgba(255, 255, 255, 0.14));
@@ -287,8 +382,7 @@
 	.ghost:disabled { opacity: 0.5; cursor: default; }
 	.hint { font-size: 0.75rem; line-height: 1.45; color: var(--color-text-tertiary); margin: 0.7rem 0 0; }
 	.hint.bad { color: var(--color-coral, #e5736b); }
-	.hint a { color: var(--color-text-secondary); text-decoration: underline; }
-	.hint a:hover { color: var(--color-text-primary); }
+	.hint strong { color: var(--color-text-primary); font-weight: 600; }
 	.sub-hint { font-size: 0.75rem; color: var(--color-text-tertiary); margin: 0.6rem 0 0; text-align: center; }
 	.key-input {
 		width: 100%; padding: 0.6rem 0.8rem; border-radius: 11px;

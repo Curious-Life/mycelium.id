@@ -254,7 +254,7 @@
 	// cited the error as the safety mechanism. Now that `skipped` maps to 'up-to-date', the
 	// phase is non-idle either way — but the latch is what actually holds, and it holds for
 	// both. Documented rather than assumed: X1 drives this effect twice and asserts ONE POST.
-	// @see docs/DISTILLATION-SURFACE-DESIGN-2026-07-16.md §2b.
+	// @see the distillation-surface design §2b.
 	let autoGenTried = $state(false);
 	$effect(() => {
 		if (hasImportedData && $generate.phase === 'idle' && !autoGenTried) {
@@ -692,20 +692,37 @@
 	     On an empty vault it would be a blank rail, so we hide it entirely. -->
 	{#if msState.points && msState.points.length > 0}
 	<aside class="nav-panel" style="width: {panelWidth}px;">
-		<!-- The canonical pipeline overview on the BUILT map — the same `pipeline` store the fresh-vault
-		     invite reads, so the two surfaces are one voice. ⚠️ NOW LIVE (Unit 5): the genPollTimer
-		     OUTLIVES mindGenerated===true and refreshes the cheap pipeline slice each tick (pollAction →
-		     'pipeline'; see the $effect at ~:110), so a re-import or a model-approval that re-opens
-		     embed/categorize updates this panel WITHOUT a second poll or a new interval — one timer, one
-		     voice. A failed refresh holds the last good stages (§3.2a). The detailed
-		     MeasureControl/NarrateControl views below stay; this is the at-a-glance overview
-		     (PIPELINE-TRANSPARENCY-DESIGN §"Risks": overview, not a replacement of detail). -->
-		<PipelineStatus />
-		<MindscapeDetail />
-		<MeasureControl />
-		<MeasurementHealthSection />
-		<NarrateControl />
-		<!-- Resize handle -->
+		<!-- ⚠️ D-034 ↻1 — THE ONE SCROLL PORT FOR THE WHOLE RAIL.
+		     The rail is FIVE stacked sections, and until now `.nav-panel` was a plain block with
+		     `overflow: hidden`: the sections simply ran off the bottom and were clipped. #350 fixed
+		     the trap one level too deep (`.nav-content` INSIDE MindscapeDetail), which is why the
+		     operator still saw "only partially scrollable" — the inner box scrolled, but the inner
+		     box's own bottom edge was already below the clip line, and the three sections BELOW
+		     MindscapeDetail were unreachable at any scroll position.
+		     Measured in a real browser before the fix (portal-app/test/browser-mindscape-rail.mjs):
+		     `.nav-panel` clientHeight 860 / scrollHeight 1830 with `overflow-y: hidden` ⇒ 970px
+		     permanently unreachable.
+		     Now there is exactly ONE scroller for the rail, at the level that governs every
+		     section and every drill level, and it carries the bottom padding so the last line of
+		     the last section can be scrolled clear of the edge. Do NOT re-introduce a nested
+		     `overflow-y: auto` on a section root — verify:mindscape-rail S4 fails the build if you do. -->
+		<div class="nav-rail" data-testid="nav-rail">
+			<!-- The canonical pipeline overview on the BUILT map — the same `pipeline` store the fresh-vault
+			     invite reads, so the two surfaces are one voice. ⚠️ NOW LIVE (Unit 5): the genPollTimer
+			     OUTLIVES mindGenerated===true and refreshes the cheap pipeline slice each tick (pollAction →
+			     'pipeline'; see the $effect at ~:110), so a re-import or a model-approval that re-opens
+			     embed/categorize updates this panel WITHOUT a second poll or a new interval — one timer, one
+			     voice. A failed refresh holds the last good stages (§3.2a). The detailed
+			     MeasureControl/NarrateControl views below stay; this is the at-a-glance overview
+			     (PIPELINE-TRANSPARENCY-DESIGN §"Risks": overview, not a replacement of detail). -->
+			<PipelineStatus />
+			<MindscapeDetail />
+			<MeasureControl />
+			<MeasurementHealthSection />
+			<NarrateControl />
+		</div>
+		<!-- Resize handle — a direct child of the panel, NOT of the scroller: it is the panel's
+		     full-height edge affordance and must not scroll away with the content. -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
 			class="resize-handle"
@@ -818,11 +835,44 @@
 	.nav-panel {
 		flex-shrink: 0;
 		height: 100%;
+		/* D-034 ↻1. The OUTER half of the same flex trap #350 fixed one level deeper. As a flex
+		   item of `.mindscape-layout`, `.nav-panel` defaults to `min-height: auto`, so it grows to
+		   its content instead of shrinking to the layout's height — measured `min-height: auto`
+		   with clientHeight 860 vs scrollHeight 1830. `min-height: 0` + a flex column is what
+		   gives `.nav-rail` below a DEFINITE height to be `flex: 1` of. Without it, `.nav-rail`
+		   would grow with its content too and `overflow-y: auto` would again have nothing to do. */
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		/* Stays `hidden`: the panel is the CLIP, `.nav-rail` is the SCROLL PORT. Two boxes, two
+		   jobs — the panel must never scroll, or the resize handle would scroll with it. */
 		overflow: hidden;
 		border-right: 1px solid var(--color-border);
 		background: var(--color-surface);
 		z-index: 10;
 		position: relative;
+	}
+
+	/* The rail's ONE scroll port — every section, at every drill level, scrolls here. */
+	.nav-rail {
+		flex: 1;
+		/* Same rule, third time, and it is load-bearing at every level: a `flex: 1` child with
+		   the default `min-height: auto` cannot shrink below its content, so it never overflows
+		   and `overflow-y: auto` is inert. This is the exact shape of D-034 and of its ↻1. */
+		min-height: 0;
+		overflow-y: auto;
+		/* A rail that has run out of scroll must not start scrolling the page/canvas behind it. */
+		overscroll-behavior: contain;
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		padding: 0.6rem 0.6rem 4rem;
+		/* THE OPERATOR'S OTHER HALF: "must scroll all the way to the bottom of that padding".
+		   Bottom padding on a scroll container IS included in scrollHeight, so the 4rem above is
+		   genuinely reachable — but only if nothing clips it. `box-sizing` is global here; stated
+		   so a later edit does not "tidy" the padding into a margin, which collapses out of
+		   scrollHeight and would silently restore the cut-off. */
+		box-sizing: border-box;
 	}/* Hide nav-panel in territories view (full-width territory cards) *//* Mobile: hide the left detail panel, show content full-width */
 	@media (max-width: 767px) {
 		.nav-panel {

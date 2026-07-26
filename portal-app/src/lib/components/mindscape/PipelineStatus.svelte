@@ -18,6 +18,10 @@
 	import { fmtSeconds, start } from '$lib/generate';
 	import { apiPost } from '$lib/api';
 	import { goto } from '$app/navigation';
+	// D-067: the shared whole-header disclosure, extracted from the live process indicator
+	// (StatusPopover's vault-pill). See CollapsibleHeader.svelte for why it is a HEADER and not
+	// a wrapper around the whole card.
+	import CollapsibleHeader from './CollapsibleHeader.svelte';
 
 	// A human label per stage key — the ORDER comes from the server array, never re-sorted here.
 	const STAGE_LABEL: Record<string, string> = {
@@ -163,19 +167,19 @@
      DEFAULT arm catches any value a later unit folds in (up-to-date/error/skipped from the generate
      store) so it renders rather than falling through to nothing. -->
 <div class="pipe" role="status" aria-label="Pipeline status" data-settled={settled ? '1' : '0'} data-expanded={expanded ? '1' : '0'}>
-	<div class="pipe-overall" class:err={$pipeline.overall === 'error'} class:done={$pipeline.overall === 'done' || $pipeline.overall === 'up-to-date' || $pipeline.overall === 'skipped'} class:collapsible={settled}>
+	{#snippet overallLine()}
 		{#if $pipeline.unknown}
 			<span class="pipe-dot"></span>
 			<span class="pipe-overall-text">Checking your pipeline…</span>
 		{:else if $pipeline.overall === 'error'}
 			<span class="pipe-dot err"></span>
-			<span class="pipe-overall-text">Something went wrong in the pipeline.</span>
+			<span class="pipe-overall-text err">Something went wrong in the pipeline.</span>
 		{:else if $pipeline.overall === 'up-to-date' || $pipeline.overall === 'skipped'}
 			<span class="pipe-dot done"></span>
-			<span class="pipe-overall-text">Your map is already built.</span>
+			<span class="pipe-overall-text done">Your map is already built.</span>
 		{:else if $pipeline.overall === 'done'}
 			<span class="pipe-dot done"></span>
-			<span class="pipe-overall-text">Your pipeline is up to date.</span>
+			<span class="pipe-overall-text done">Your pipeline is up to date.</span>
 		{:else if $pipeline.overall === 'blocked'}
 			<span class="pipe-dot warn"></span>
 			<span class="pipe-overall-text">Waiting on you — {reasonText($pipeline.blockedOn ?? undefined) || 'action needed'}.</span>
@@ -190,21 +194,26 @@
 			<span class="pipe-dot"></span>
 			<span class="pipe-overall-text">Working…</span>
 		{/if}
+	{/snippet}
 
-		<!-- D-025: the disclosure. Rendered ONLY when settled — an unsettled pipeline has no
-		     toggle at all, so its stage list cannot be dismissed. Mirrors the vault-pill's
-		     caret (StatusPopover.svelte:332). -->
-		{#if settled}
-			<button
-				type="button"
-				class="pipe-toggle"
-				data-testid="pipe-toggle"
-				aria-expanded={userExpanded}
-				aria-label={userExpanded ? 'Hide pipeline stages' : 'Show pipeline stages'}
-				onclick={() => (userExpanded = !userExpanded)}
-			>{userExpanded ? '▴' : '▾'}</button>
-		{/if}
-	</div>
+	<!-- D-025: the disclosure exists ONLY when settled — an unsettled pipeline has no toggle at
+	     all, so its stage list cannot be dismissed (the fail-open-to-visible property, asserted
+	     by verify-pipeline-status-render C1-C4). D-067 changes only the HIT AREA: the disclosure
+	     used to be a lone ~10px caret glyph; it is now the whole header row, exactly as the live
+	     process indicator does it (StatusPopover's vault-pill). The `.pipe-overall`/`.pipe-toggle`
+	     classes ride along as the selector hooks the render gate + mount harness query. -->
+	{#if settled}
+		<CollapsibleHeader
+			bind:expanded={userExpanded}
+			label="pipeline stages"
+			testid="pipe-toggle"
+			extraClass="pipe-overall pipe-toggle"
+		>
+			{@render overallLine()}
+		</CollapsibleHeader>
+	{:else}
+		<div class="pipe-overall">{@render overallLine()}</div>
+	{/if}
 
 	<!-- The ordered stages, top-to-bottom, exactly as the server emits them.
 	     D-025: hidden while COLLAPSED (settled + not user-opened). Not rendered at all rather
@@ -287,19 +296,14 @@
 	.pipe[data-expanded='0'] { gap: 0; }
 
 	/* ── The overall summary line ─────────────────────────────────────────────── */
+	/* Only the UNSETTLED (non-interactive) header is styled here. The settled one is a
+	   <CollapsibleHeader>, which owns the row layout + the caret — D-067's "one implementation".
+	   The state colour moved from `.pipe-overall.err .pipe-overall-text` onto the text span
+	   itself, because a descendant selector cannot reach across a component boundary. */
 	.pipe-overall { display: flex; align-items: center; gap: 0.5rem; }
-	/* The settled card's disclosure caret — quiet, aligned right, matching the
-	   vault-pill's `.pill-caret`. Only rendered when settled (see the markup). */
-	.pipe-overall.collapsible { cursor: default; }
-	.pipe-toggle {
-		margin-left: auto; padding: 0 0.2rem;
-		border: 0; background: transparent; cursor: pointer;
-		font-size: 0.6rem; line-height: 1; color: var(--color-text-tertiary);
-	}
-	.pipe-toggle:hover { color: var(--color-text-secondary); }
 	.pipe-overall-text { font-size: 0.74rem; color: var(--color-text-secondary); line-height: 1.4; }
-	.pipe-overall.err .pipe-overall-text { color: var(--color-accent-coral, #f87171); }
-	.pipe-overall.done .pipe-overall-text { color: var(--color-text-secondary); }
+	.pipe-overall-text.err { color: var(--color-accent-coral, #f87171); }
+	.pipe-overall-text.done { color: var(--color-text-secondary); }
 	.pipe-dot {
 		width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
 		background: var(--color-accent-aurum, #e5b84c); animation: pipe-pulse 1.6s ease-in-out infinite;

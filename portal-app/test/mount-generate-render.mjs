@@ -232,9 +232,20 @@ const SOURCES = {
 const SRC = SOURCES[COMPONENT];
 if (!SRC) throw new Error(`unknown component ${COMPONENT}`);
 
+// QA9/D-067: MindscapeDetail's section disclosure is the shared <CollapsibleHeader>. Compiled for
+// REAL, not stubbed — the subject binds to it (`bind:expanded`), and Svelte 5 requires the child to
+// declare that prop `$bindable`, so an inert stub would throw at mount rather than degrade. It has
+// no dependencies beyond svelte, so there is nothing to gain by faking it.
+writeFileSync(
+  `${GEN}/CollapsibleHeader.svelte.js`,
+  compile(readFileSync(resolve('src/lib/components/mindscape/CollapsibleHeader.svelte'), 'utf8'),
+    { generate: 'client', name: 'CollapsibleHeader', css: 'injected' }).js.code,
+);
+
 const out = compile(readFileSync(SRC, 'utf8'), { generate: 'client', name: 'Subject', css: 'injected' });
 // Rewire specifiers in the GENERATED js — the bare compiler resolves none of $lib/$app.
 const rewired = out.js.code
+  .replace(/from\s+['"]\.\/CollapsibleHeader\.svelte['"]/g, `from './CollapsibleHeader.svelte.js'`)
   .replace(/from\s+['"]\$lib\/generate['"]/g, `from './generate.js'`)
   .replace(/from\s+['"]\$lib\/api['"]/g, `from './api-stub.js'`)
   .replace(/from\s+['"]\$app\/navigation['"]/g, `from './navigation-stub.js'`)

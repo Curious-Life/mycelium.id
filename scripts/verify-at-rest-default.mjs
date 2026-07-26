@@ -14,7 +14,7 @@
 //   T3. fail-closed predicate: at-rest on + unkeyed ⇒ index.js refuses.
 //   T4. THE REAL LAUNCH: `node src/index.js` on an existing PLAINTEXT vault with NO
 //       MYCELIUM_AT_REST migrates it to ciphertext (the entry-point default-on, e2e).
-// PASS/FAIL ledger. @see docs/PRE-FREEZE-SECURITY-DESIGN-2026-06-19.md, src/index.js.
+// PASS/FAIL ledger. @see the pre-freeze security design, src/index.js.
 import Database from 'better-sqlite3';
 import { rmSync, mkdtempSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';

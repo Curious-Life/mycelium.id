@@ -11,6 +11,36 @@
 //     unimported component is not in the build graph. "The build is green" proved NOTHING until
 //     SettingsView imported it.
 // So: drive the control, or you are not testing the screen.
+//
+// MUTATION-TESTED: reverting the pick button's DISPLAY to the explicit assignment
+//   (`{@const isRunning = explicitId === p.id}` — the pre-D-075 rule) in IntelligenceScreen.svelte
+//   → S12, S12c, S12d, S12e RED (the Narration row renders NO selected button while the resolver
+//   says Claude serves narrate).
+// MUTATION-TESTED: dropping `class:auto` (drawing an auto-selection identically to a deliberate
+//   one) → S12c RED, and only S12c.
+// MUTATION-TESTED: keying the pick button's ONCLICK on the effective selection instead of the
+//   explicit pin (`assign(f, isRunning ? null : p.id)`) → S12d RED (clicking the auto-selected
+//   provider sends providerId:null — "clear" — instead of pinning the choice just made).
+//   ⚠️ That mutation passed GREEN until the harness was taught to click the LIT button — see the
+//   note inside S12d. A gate that only clicks an unselected control cannot see it.
+// MUTATION-TESTED: dropping `class:pinned` (so an unresolvable pin renders identically to an
+//   unchosen provider) → S12e RED, and only S12e.
+// MUTATION-TESTED: removing the un-pin branch — `onclick={() => assign(f, p.id)}`, so a lit
+//   button can never be cleared → S12d RED on `unpinSent`.
+//   ⚠️ This one ALSO passed GREEN — demonstrated, not assumed — until the harness's PUT stub was
+//   made to MERGE taskModels the way applyTaskModelWrite does; the fixed-object stub wiped the
+//   very key the write path reads, so `explicitId` was never non-empty at click time. A fixture
+//   more forgiving than the product is a gate with no teeth on the difference.
+// MUTATION-TESTED: collapsing "no answer" back into "nothing runs" — `effective` initialised to
+//   `{}` AND the load storing `(ef && ef.effective) || {}` → S12f RED with the exact reported
+//   symptom: `Got: ["OpenAI (US)chosen · not running"]` on a provider that is pinned and running.
+//   ⚠️ BOTH edits are needed to reproduce it. Reverting only the fetch line
+//   (`.catch(() => ({}))`) leaves S12f GREEN, because the load's shape guard still normalises
+//   `{}` back to null. That is real defence in depth — and it is also why the honest mutation
+//   here is a two-line revert, not the one-liner it looks like.
+// MUTATION-TESTED: dropping the row-level "Couldn't check which model is running" line → S12f RED
+//   (the unknown becomes silence, which reads as "nothing is selected").
+// All seven restored; the suite returns GREEN on the restored tree.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -46,6 +76,29 @@ try {
   );
 } catch (e) { exempt = { error: String(e?.message || e) }; }
 rec('S0b. the screen also mounts with the subscription opt-in ON', exempt.ok === true, exempt.error ? String(exempt.error).slice(0, 160) : '');
+
+// PROBE=divergent (D-075, review MED) — the user's PIN cannot run: narrate is pinned to
+// provider 1 while the resolver still reports provider 5. Its own mount because the fixture
+// differs at load time.
+let divergent = {};
+try {
+  divergent = JSON.parse(
+    execFileSync('node', ['--conditions', 'browser', 'test/mount-intelligence-screen.mjs'],
+      { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, PROBE: 'divergent' } }).trim().split('\n').pop(),
+  );
+} catch (e) { divergent = { error: String(e?.message || e) }; }
+rec('S0c. the screen also mounts when the pin and the resolver DISAGREE', divergent.ok === true, divergent.error ? String(divergent.error).slice(0, 160) : '');
+
+// PROBE=noeff (H1) — the effective-models read FAILS. Its own mount: the failure has to happen
+// at load, which is where the screen decides what it knows.
+let noeff = {};
+try {
+  noeff = JSON.parse(
+    execFileSync('node', ['--conditions', 'browser', 'test/mount-intelligence-screen.mjs'],
+      { cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, PROBE: 'noeff' } }).trim().split('\n').pop(),
+  );
+} catch (e) { noeff = { error: String(e?.message || e) }; }
+rec('S0d. the screen also mounts when the effective-models read FAILS', noeff.ok === true, noeff.error ? String(noeff.error).slice(0, 160) : '');
 
 t('S1. every §3.11b function row renders — FROM THE SERVED SPINE, not a hardcoded list', () => {
   assert.equal(out.renderedKeys, 6,
@@ -116,6 +169,137 @@ t('S4. ⭐ Descriptions offers EVERY provider (limit lifted 2026-07-19) and prin
     'the "stay in the EU or on your device" limit copy must be GONE — the operator removed the limit, so printing it would be a false privacy statement');
   assert.equal(out.descriptionsPrintsDeadEnd, false,
     'and there is no "Connect an EU or on-device model" dead-end — every configured provider is offerable');
+});
+
+// ── D-075: the screen shows the EFFECTIVE selection, from the resolver ────────────────────
+// The defect: Settings → Intelligence highlighted from `taskModels` (the user's EXPLICIT
+// assignments) while the runtime resolved through `resolveEffectiveAssignment`, which falls
+// back to the vault's ACTIVE provider. After #360 a connected subscription auto-selects for
+// chat + narration WITHOUT writing taskModels — so the system had picked a model and this
+// screen showed nothing selected.
+//
+// The fixture is built so the two rules give DIFFERENT answers (mount-intelligence-screen.mjs):
+// taskModels has chat→OpenAI(2) and nothing for narrate; the served effective selection has
+// narrate→Claude(5), source 'active'. Provider 5 appears NOWHERE in taskModels, so a screen
+// that recomputed the selection locally cannot render it — this cannot pass by coincidence.
+t('S12. ⭐ D-075 — an AUTO-selected provider renders as selected (the resolver\'s answer, not taskModels)', () => {
+  const narration = (out.pickState || []).find((r) => r.label === 'Narration');
+  assert.ok(narration, `the Narration row must render provider buttons — got ${JSON.stringify(out.pickState)}`);
+  assert.equal(narration.on.length, 1,
+    `exactly one provider must read as in use for narrate. The resolver says provider 5 (Claude) serves it with NOTHING in taskModels — a screen highlighting from taskModels shows none. Got: ${JSON.stringify(narration.on)}`);
+  assert.match(String(narration.on[0]), /Claude \(subscription\)/,
+    `and it must be the provider the RESOLVER named (id 5), not a locally-guessed one. Got: ${JSON.stringify(narration.on)}`);
+});
+
+t('S12b. ⭐ …and an EXPLICIT assignment still renders as selected (the fix did not swap one rule for another)', () => {
+  const conv = (out.pickState || []).find((r) => r.label === 'Conversation');
+  assert.ok(conv, `the Conversation row must render provider buttons — got ${JSON.stringify(out.pickState)}`);
+  assert.equal(conv.on.length, 1, `exactly one provider in use for chat — got ${JSON.stringify(conv.on)}`);
+  assert.match(String(conv.on[0]), /OpenAI \(US\)/,
+    `chat is explicitly assigned to provider 2 — got ${JSON.stringify(conv.on)}`);
+});
+
+t('S12c. ⭐ …and the two are DISTINGUISHABLE — "the system chose this" is not drawn as "I chose this"', () => {
+  // Without the distinction the user cannot tell a pin from a default, so they cannot tell
+  // whether changing their active provider will move this job. Same picture, different meaning.
+  const conv = (out.pickState || []).find((r) => r.label === 'Conversation');
+  const narration = (out.pickState || []).find((r) => r.label === 'Narration');
+  assert.equal(narration.auto.length, 1,
+    `the auto-selected (source 'active') provider must be marked as auto — got ${JSON.stringify(narration)}`);
+  assert.deepEqual(conv.auto, [],
+    `an EXPLICIT choice must NOT be marked auto — got ${JSON.stringify(conv.auto)}`);
+  assert.match(String(narration.on[0]), /auto/i,
+    `and the row must SAY it in words, not colour alone — got ${JSON.stringify(narration.on)}`);
+});
+
+t('S12d. ⭐ …and DISPLAY never becomes a WRITE — clicking an auto-selected provider PINS it', () => {
+  // The whole point of the fix is that Settings DISPLAYS the effective selection; it must not
+  // mutate it. Two halves: (1) rendering it sends no write at all — the recorded bodies contain
+  // no chat/narrate assignment the user did not make; (2) clicking the row's provider still
+  // sends that provider's id (a pin), never providerId:null (a clear), which is what keying the
+  // toggle on the effective value would produce for an auto-selected button.
+  assert.deepEqual(out.providerSent, [{ function: 'descriptions', providerId: 1 }],
+    `the ONLY provider write is the one the driver clicked. Got: ${JSON.stringify(out.providerSent)}`);
+  assert.ok(!out.sentBodies.some((b) => b.function === 'conversation'),
+    `the auto/explicit rendering must write NOTHING for the rows it merely displayed. Got: ${JSON.stringify(out.sentBodies)}`);
+  // ⭐ THE CLICK THAT SEPARATES THE TWO RULES. The Narration row's Claude button is lit because
+  // the RESOLVER says Claude serves narrate — nothing is stored. Clicking it must PIN provider 5.
+  // Keying the toggle on the effective value instead sends providerId:null ("clear"), which for
+  // an auto-selection is a no-op: a lit button whose click changes nothing the user can see.
+  //
+  // ⚠️ This assert exists because the earlier one did NOT catch that mutation: the driver's first
+  // click lands on Regolo, which is not the effective provider, so both rules agree there and the
+  // gate went GREEN on the broken tree. Watched failing only after the harness was taught to
+  // click the lit button (mutation sweep — the M-001 pattern again).
+  assert.deepEqual(out.autoPinSent, [{ function: 'descriptions', providerId: 5 }],
+    `clicking the AUTO-selected provider must PIN it (providerId 5), never send null. Got: ${JSON.stringify(out.autoPinSent)}`);
+  // …and the pin is UNDOABLE: clicking the now-pinned button clears it. This is only reachable
+  // because the harness's PUT stub MERGES taskModels like the real route — with the old
+  // replace-everything stub `explicitId` was always undefined at click time, so a mutation that
+  // deleted the un-pin branch outright (`assign(f, p.id)`) left this gate GREEN.
+  assert.deepEqual(out.unpinSent, [{ function: 'descriptions', providerId: null }],
+    `clicking the PINNED provider again must CLEAR the pin (providerId null) — otherwise a choice cannot be undone. Got: ${JSON.stringify(out.unpinSent)}`);
+});
+
+t('S12e. ⭐ …and a pin that CANNOT run says so — it is never rendered as unchosen', () => {
+  // The mirror image of D-075, found by review: resolveEffectiveAssignment falls through to the
+  // active provider when the pinned row is unresolvable (deleted, or status='pending' — which a
+  // vault import plants and applyTaskModelWrite does not refuse). Highlighting from the resolver
+  // ALONE therefore rendered the user's own pin unlit, and because the toggle keys on the pin,
+  // the next click silently DELETED it. Three states, three renders.
+  const narration = (divergent.pickState || []).find((r) => r.label === 'Narration');
+  assert.ok(narration, `the Narration row must render — got ${JSON.stringify(divergent.pickState)}`);
+  assert.equal(narration.pinned.length, 1,
+    `the pinned provider (1) must be marked pinned even though the resolver runs provider 5 — got ${JSON.stringify(narration)}`);
+  assert.match(String(narration.pinned[0]), /Regolo \(EU\)/,
+    `and it must be the provider the USER pinned, not the one that runs — got ${JSON.stringify(narration.pinned)}`);
+  assert.ok(!narration.on.includes(narration.pinned[0]),
+    `an unresolvable pin must NOT read as in use — got on=${JSON.stringify(narration.on)}`);
+  assert.match(String(narration.pinned[0]), /not running/i,
+    `and it must SAY it in words, so the user can tell a pin from a working selection — got ${JSON.stringify(narration.pinned)}`);
+  // The resolver's answer still renders alongside it: the user sees BOTH what they chose and
+  // what actually runs. Showing only one of the two is what produced this defect either way.
+  assert.equal(narration.on.length, 1, `what actually runs must still be shown — got ${JSON.stringify(narration.on)}`);
+  assert.match(String(narration.on[0]), /Claude \(subscription\)/, `…and it is the resolver's provider 5 — got ${JSON.stringify(narration.on)}`);
+});
+
+t('S12f. ⭐ …and a FAILED read is UNKNOWN, never a fabricated fault (review ×2, HIGH)', () => {
+  // The defect this closes, driven end to end: `effective` used to collapse to `{}` on a failed
+  // read, so "we have no answer" and "the resolver says nothing runs" were the same value. On any
+  // failure of the (soft) effective-models read — a 500, a 404 from an older backend, a blip —
+  // every button lost `isRunning` while `isPinned` stayed true. A provider that was pinned AND
+  // running fine therefore rendered AMBER, tagged "chosen · not running", claiming a fault that
+  // did not exist, in the one screen whose entire purpose is not lying about what runs. And
+  // because the click keys on the pin, the obvious response DELETED the pin.
+  //
+  // The fixture pins chat→OpenAI(2) and fails the read. Three things must hold.
+  const conv = (noeff.pickState || []).find((r) => r.label === 'Conversation');
+  assert.ok(conv, `the Conversation row must render — got ${JSON.stringify(noeff.pickState)}`);
+  // 1. The user's CHOICE is still shown — it is a local fact, unaffected by the failed read.
+  assert.equal(conv.pinned.length, 1, `the pin must still render — got ${JSON.stringify(conv)}`);
+  assert.match(String(conv.pinned[0]), /OpenAI \(US\)/, `and it is the pinned provider — got ${JSON.stringify(conv.pinned)}`);
+  // 2. NO fault is claimed about it. "not running" is a statement about the resolver's answer,
+  //    and there is no answer — asserting it is fabrication.
+  assert.ok(!/not running/i.test(String(conv.pinned[0])),
+    `a pin must NOT be tagged "not running" when the run-state is unknown — that is a fabricated fault. Got: ${JSON.stringify(conv.pinned)}`);
+  // 3. …and it must not be left visually indistinguishable from an unchosen button either (which
+  //    is what makes the amber-fault version tempting): it renders as chosen.
+  assert.equal(conv.on.length, 1, `the pin must read as chosen, not as unselected — got ${JSON.stringify(conv)}`);
+  assert.deepEqual(conv.auto, [], `and nothing may claim to be auto-selected — got ${JSON.stringify(conv.auto)}`);
+  // 4. The unknown is STATED, not implied by an absent highlight (§3.5: honest states, not silence).
+  assert.ok((noeff.unknownRunNotes || []).length > 0,
+    'the row must SAY the run-state could not be checked — an absent highlight is not a statement');
+  assert.match(String((noeff.unknownRunNotes || [])[0]), /check which model is running/i,
+    `and it must say what it could not do — got ${JSON.stringify(noeff.unknownRunNotes)}`);
+  // 5. Nothing was written as a side effect of RENDERING the unknown. Measured pre-drive: the
+  //    driver's own clicks later in this probe legitimately send writes, so counting them here
+  //    would fail for a reason that has nothing to do with the claim (caught by this check
+  //    failing on its first draft).
+  assert.equal(noeff.sentAtSnapshot, 0,
+    `rendering an unknown run-state must write NOTHING — got ${noeff.sentAtSnapshot} write(s) before any click`);
+  // …and when the read SUCCEEDS the line is absent, so it cannot become permanent furniture.
+  assert.deepEqual(out.unknownRunNotes, [],
+    `a successful read must print NO unknown-run line — got ${JSON.stringify(out.unknownRunNotes)}`);
 });
 
 t('S5. ⭐ §3.10d-c — the BUNDLED embedder renders as "Included", never as a choice', () => {

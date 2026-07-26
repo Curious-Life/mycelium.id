@@ -2,7 +2,7 @@
  * On-disk search schema (Phase 1) — FTS5 + sqlite-vec virtual tables.
  *
  * These tables live INSIDE the vault DB (so at step 5 they inherit whole-file
- * encryption — see docs/SEARCH-INDEX-PHASE1-DESIGN). They replace the in-RAM
+ * encryption — see the search-index phase-1 design). They replace the in-RAM
  * inverted index + vector Map (src/search/index/, backend/local.js):
  *   - fts_docs       FTS5 over (id, content) → BM25 keyword ranking
  *   - vec_docs_768   vec0 768-d cosine → rescore source (D10 stage 2)

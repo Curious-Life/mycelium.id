@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// verify-pairing.mjs — Unit B gate (docs/PHONE-QR-PAIRING-DESIGN-2026-07-19.md §6).
+// verify-pairing.mjs — Unit B gate (the phone QR-pairing design §6).
 //
 // PART 1 — FROZEN INTEROP VECTOR. Fixed inputs → fixed ck/sas/AEAD outputs. If the
 //   KDF/AEAD algorithm drifts, these asserts fail. The iOS PairingCrypto unit test

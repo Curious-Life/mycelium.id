@@ -2,7 +2,7 @@
  * saveDocument — canonical write primitive for the documents table.
  *
  * Sub-primitive of publishArtifact (CLAUDE.md invariant #12; B5 in
- * docs/architecture/LIBRARY-CONSOLIDATION.md). publishArtifact still
+ * the library-consolidation design). publishArtifact still
  * owns R2 upload, attachments + linked-message inserts, and the
  * artifact-buffer for end-of-turn channel notification — saveDocument
  * owns the documents-table row only.

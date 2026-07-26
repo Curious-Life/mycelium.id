@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// verify:harness-hooks — the lifecycle hook bus (G1). Design: docs/HOOK-BUS-DESIGN-2026-06-18.md
+// verify:harness-hooks — the lifecycle hook bus (G1). Design: the hook-bus design
 //
 // Step 1 (this file, U-section): the fire-helper semantics in ISOLATION — fail-CLOSED
 // blocking, fail-OPEN observers, timeout, and the createAgentHooks tool-guard factory

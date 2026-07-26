@@ -4,7 +4,7 @@
  * text (LOCAL vision caption / transcription / file decode, vault-side), and
  * fold the result into the message content.
  *
- * Security invariants (docs/CHANNEL-INBOUND-MEDIA-DESIGN-2026-06-10.md):
+ * Security invariants (the channel inbound-media design):
  *   - runs ONLY after authorization (inbound.js) — unauthorized chats' media
  *     is never even downloaded;
  *   - bytes live in daemon MEMORY only, then cross loopback to the vault's

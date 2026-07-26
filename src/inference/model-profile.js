@@ -16,7 +16,7 @@
 //
 // Carries NO secrets — only model name, numeric limits, capability booleans,
 // provenance. Safe to log / surface in diagnostics. See
-// docs/TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md.
+// the text-generation abstraction design.
 
 import { isLoopbackUrl } from './presets.js';
 import { DEFAULT_OLLAMA_URL } from './local.js';

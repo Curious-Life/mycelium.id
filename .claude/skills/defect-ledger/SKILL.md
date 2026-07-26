@@ -4,7 +4,7 @@ description: >-
   Use whenever a QA defect changes state — a user reports a bug, a fix PR merges,
   the operator confirms (or fails to confirm) a symptom is gone, a sprint opens or
   closes, or someone asks "is this fixed?" / "have we seen this before?" / "what's
-  recurring?". Enforces the permanent defect record in docs/QA-DEFECT-LEDGER.md:
+  recurring?". Enforces the permanent defect record in the QA defect ledger:
   stable D-nnn ids that are never renumbered, a recurrence counter instead of a new
   id, RECURRING kept separate from CARRIED, and a CLOSED bar that requires a merged
   PR AND a gate that fails on the old behaviour AND operator confirmation on a build
@@ -15,8 +15,8 @@ description: >-
 
 # Defect ledger discipline
 
-`docs/QA-DEFECT-LEDGER.md` is the **permanent** status record. Sprint plans
-(`docs/QA<N>-SPRINT-PLAN-<date>.md`) own *this cycle's work* and reference `D-nnn` ids; they
+the QA defect ledger is the **permanent** status record. Sprint plans
+(the per-cycle QA sprint plans) own *this cycle's work* and reference `D-nnn` ids; they
 **never** own status. When the two disagree, the ledger wins.
 
 ## Why this exists

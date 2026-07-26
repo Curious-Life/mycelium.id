@@ -1,5 +1,5 @@
 -- 0011_persona_claims.sql — Persona-Claims subsystem (PersonaTree adoption +
--- temporal claim evolution). See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+-- temporal claim evolution). See the persona-claims design.
 --
 -- Two tables: person_claims (current root-level claims, PersonaTree "Root") and
 -- person_claim_snapshots (per-window state, cloned from frequency_snapshots so

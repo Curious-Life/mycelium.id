@@ -1,6 +1,6 @@
 [package]
 name = "mycelium"
-version = "0.1.13"
+version = "0.1.14"
 description = "Mycelium — your private cognitive vault"
 edition = "2021"
 rust-version = "1.77"
@@ -15,8 +15,11 @@ tauri = { version = "2", features = ["macos-private-api"] }
 serde_json = "1"
 # Auto-updater (production only, signature-verified, fail-open). Checks a signed
 # latest.json on the PUBLIC GitHub Release; the dialog + process plugins drive the
-# native "Update & Restart" prompt + relaunch. All Rust-side — no webview IPC
-# surface is added (the window loads a REMOTE http origin, deliberately kept narrow).
+# native "Update & Restart" prompt + relaunch. These three plugins are driven from
+# RUST ONLY and are deliberately given no webview permission in
+# capabilities/default.json — the webview reaches the updater exclusively through the
+# app's own check_for_update / install_update / get_available_update commands, which
+# are ACL-granted one by one (D-022; see build.rs).
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"

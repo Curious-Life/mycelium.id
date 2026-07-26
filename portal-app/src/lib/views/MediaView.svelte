@@ -206,11 +206,20 @@
 		}, 300);
 	}
 
+	// ⚠️ A PLAYER THAT STOPS EARLY MUST SAY SO. The serve route streams a WAV whose length is
+	// declared up front from the recording's real timeline, and it FAILS the transfer rather than
+	// completing a body it could not fill — so a decode that came up short reaches the browser as
+	// an `error` on the media element instead of audio that quietly ends. Before that, a recording
+	// over 15 minutes was simply cut and played to its false end with nothing to see. Rendering
+	// this is the visible half of the fix.
+	let playbackError = $state(false);
+
 	async function openDetail(item: MediaItem) {
 		selectedItem = item;
 		editingDescription = false;
 		showDeleteConfirm = false;
 		isFullscreen = false;
+		playbackError = false;
 		// Load Stream embed URL for videos
 		if (item.type === 'video' && item.streamUid && !item.embedUrl) {
 			try {
@@ -626,9 +635,22 @@
 							{/if}
 						{:else if selectedItem.type === 'voice'}
 							<div class="p-4 bg-[var(--color-elevated)] rounded-lg border border-[var(--color-border)]">
-								<audio controls preload="metadata" class="w-full block">
-									<source src={selectedItem.playbackUrl || selectedItem.url} />
-								</audio>
+								<!-- svelte-ignore a11y_media_has_caption -->
+								<audio
+									controls
+									preload="metadata"
+									class="w-full block"
+									src={selectedItem.playbackUrl || selectedItem.url}
+									onerror={() => { playbackError = true; }}
+									onplaying={() => { playbackError = false; }}
+								></audio>
+								{#if playbackError}
+									<p class="mt-2 text-xs text-[var(--color-warning,#c08a3e)]">
+										This recording couldn't be decoded for playback, so what you hear may be
+										incomplete. The original audio is unchanged in your vault — the transcript
+										below is built from the full recording.
+									</p>
+								{/if}
 								{#if selectedItem.transcript}
 									<div class="mt-3">
 										<div class="flex items-center justify-between mb-1">

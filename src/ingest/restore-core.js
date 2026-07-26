@@ -1,6 +1,6 @@
 // Shared "restore" landing core — the ONE place export-family importers
 // (full-export, vault-import, recent-export) land rows. Design:
-// docs/UNIFIED-IMPORT-ARCHITECTURE-2026-07-03.md.
+// the unified-import architecture.
 //
 // A restore is NOT a capture: it faithfully re-lands the owner's own exported
 // rows, so it preserves the original id + created_at + source verbatim, dedups

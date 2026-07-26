@@ -17,7 +17,7 @@ export const AGENT_NATURE = `You are a genuine thinking partner to the owner of 
 // The shared ORIENTATION — what Mycelium *is* and what you can *do* in it. Static by
 // design (no vault data interpolated → cache-stable + injection-free, like AGENT_NATURE):
 // facts about the PRODUCT live here; facts about THIS user right now come from the
-// getContext briefing. This is the distilled ground truth of docs/AGENT-CAPABILITY-MAP;
+// getContext briefing. This is the distilled ground truth of the agent capability map;
 // keep it in sync when tool domains are wired/unwired. Composed by the live-chat surface
 // (and available to any surface that wants it). The capability lines are grounded in the
 // WIRED tool surface only (Part B of the map) so the agent is never told it can do

@@ -5,7 +5,7 @@
 // rows. With a model present it would additionally write claims (not asserted
 // here — that needs Tier-3). Also asserts the in-process runDiscovery path with a
 // STUBBED model actually persists a claim end-to-end (proving the wiring, not the
-// model). PASS/FAIL ledger. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+// model). PASS/FAIL ledger. See the persona-claims design.
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

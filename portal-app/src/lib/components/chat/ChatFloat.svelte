@@ -23,6 +23,8 @@
 	import { isSecureChannelConfigured } from '$lib/vps-identity';
 	import { toasts } from '$lib/stores/toast';
 	import { browser } from '$app/environment';
+	import { onMount, untrack } from 'svelte';
+	import { clampChatGeometry, CHAT_INPUT_BAR, CHAT_GAP, CHAT_TOP_MARGIN } from '$lib/chat-geometry';
 
 	interface Props {
 		visible?: boolean;
@@ -213,7 +215,16 @@
 	// Track user scroll
 	let userHasScrolled = $state(false);
 
-	// Resizable chat dimensions
+	// Resizable chat dimensions.
+	//
+	// `chatWidth`/`chatHeight` are the size the USER chose. `clampToViewport` may render the chat
+	// smaller when the viewport can't hold it, but it must never OVERWRITE the user's choice with
+	// the smaller value — a phone visit, a rotation or one Ctrl+ zoom would otherwise permanently
+	// shrink the desktop chat (independent review found exactly that: 1280 → 390 → 1280 left the
+	// chat stuck at 358px wide, persisted). So the desired size is kept here, the clamp writes only
+	// the *rendered* pair, and the desired size is what gets persisted.
+	let desiredWidth = 720;
+	let desiredHeight = 550;
 	let chatWidth = $state(720);
 	let chatHeight = $state(550);
 	let isResizing = $state(false);
@@ -234,56 +245,106 @@
 	// Position state - null means centered (default)
 	let position = $state<{ x: number; y: number } | null>(null);
 
+	const viewport = () => ({ vw: window.innerWidth, vh: window.innerHeight });
+
+	// The chat's y anchor when it has never been moved (centered, `bottom: 24px`).
+	const defaultInputBarTop = () => window.innerHeight - 24 - CHAT_INPUT_BAR;
+
+	/**
+	 * D-065 — pull the whole geometry (SIZE as well as position) back inside the viewport.
+	 * The old version clamped position only, so a chat whose HEIGHT had grown past the space
+	 * above its input bar kept its top — and the `.resize-top` grip — off-screen, where the
+	 * user could no longer grab it to make it smaller. Runs on every window resize and after
+	 * the persisted values are restored.
+	 */
 	function clampToViewport() {
-		if (!position) return;
-		// Match onDrag: allow overhang on either side as long as a
-		// 60px strip stays visible. Re-clamps on window resize so the
-		// chat can't end up entirely off-screen after rotation/zoom.
-		const cw = Math.min(chatWidth, window.innerWidth - 32);
-		const minVisible = 60;
-		const minX = -(cw - minVisible);
-		const maxX = window.innerWidth - minVisible;
-		const minY = 16;
-		const maxY = window.innerHeight - 60 - 16;
+		// Mobile ignores the whole geometry (`inset: 0`, `width: 100% !important`), so clamping
+		// there can only destroy the desktop size the user chose — it cannot fix anything.
+		if (isMobile) return;
 
-		const clampedX = Math.max(minX, Math.min(maxX, position.x));
-		const clampedY = Math.max(minY, Math.min(maxY, position.y));
+		const g = clampChatGeometry(
+			{
+				width: desiredWidth,
+				height: desiredHeight,
+				x: position ? position.x : Number.NaN,
+				y: position ? position.y : defaultInputBarTop(),
+			},
+			viewport(),
+			{ expanded: isExpanded },
+		);
 
-		if (clampedX !== position.x || clampedY !== position.y) {
-			position = { x: clampedX, y: clampedY };
+		// Only the RENDERED size moves. `desiredWidth`/`desiredHeight` and localStorage keep the
+		// user's choice, so growing the window back restores it instead of leaving the chat stuck
+		// at whatever the narrowest viewport it ever saw allowed.
+		chatWidth = g.width;
+		chatHeight = g.height;
+		// A chat that has never been moved stays centered; clamping must not anchor it.
+		if (position && (g.x !== position.x || g.y !== position.y)) {
+			position = { x: g.x, y: g.y };
 			savePosition();
 		}
 	}
 
-	// Load position from localStorage
-	$effect(() => {
-		if (browser) {
-			const saved = localStorage.getItem('mycelium-chat-position');
-			if (saved) {
-				try {
-					const parsed = JSON.parse(saved);
-					// Same loosened bounds as onDrag/clampToViewport —
-					// otherwise a loosely-placed chat reverts to centered
-					// on the next reload. clampToViewport will tighten it
-					// up if a window resize made it unreachable.
-					const cw = Math.min(chatWidth, window.innerWidth - 32);
-					const minVisible = 60;
-					const minX = -(cw - minVisible);
-					const maxX = window.innerWidth - minVisible;
-					const maxY = window.innerHeight - 60 - 16;
-					if (
-						typeof parsed?.x === 'number' && typeof parsed?.y === 'number' &&
-						parsed.x >= minX && parsed.x <= maxX && parsed.y >= 16 && parsed.y <= maxY
-					) {
-						position = parsed;
-					}
-				} catch { /* ignore */ }
-			}
+	// Restore + SANITIZE the persisted geometry, then keep it reachable across window resizes.
+	// Size and position are read together and clamped as ONE geometry: validating them
+	// independently (as this did) let a legal height and a legal y combine into a chat whose top
+	// was off-screen, and that pair survived every reload.
+	//
+	// onMount, not $effect: this reads AND writes `position`/`chatWidth`/`chatHeight`, so as a
+	// tracked effect it would re-run on its own writes.
+	onMount(() => {
+		if (!browser) return;
 
-			const handleResize = () => clampToViewport();
-			window.addEventListener('resize', handleResize);
-			return () => window.removeEventListener('resize', handleResize);
-		}
+		let savedSize: unknown = null;
+		let savedPos: unknown = null;
+		try { savedSize = JSON.parse(localStorage.getItem('mycelium-chat-size') || 'null'); } catch { /* ignore */ }
+		try { savedPos = JSON.parse(localStorage.getItem('mycelium-chat-position') || 'null'); } catch { /* ignore */ }
+
+		const hadPos = !!savedPos && typeof savedPos === 'object';
+		const g = clampChatGeometry(
+			{
+				width: (savedSize as { width?: number } | null)?.width,
+				height: (savedSize as { height?: number } | null)?.height,
+				x: hadPos ? (savedPos as { x?: number }).x : Number.NaN,
+				y: hadPos ? (savedPos as { y?: number }).y : defaultInputBarTop(),
+			},
+			viewport(),
+			{ expanded: true },
+		);
+		desiredWidth = g.width;
+		desiredHeight = g.height;
+		chatWidth = g.width;
+		chatHeight = g.height;
+		if (hadPos) position = { x: g.x, y: g.y };
+		// Write the sanitized values back so a poisoned entry cannot outlive one load.
+		saveChatSize();
+		if (hadPos) savePosition();
+		// A narrow-at-load viewport must still render inside it, without overwriting the desired
+		// size above.
+		clampToViewport();
+
+		const handleResize = () => clampToViewport();
+		window.addEventListener('resize', handleResize);
+		return () => window.removeEventListener('resize', handleResize);
+	});
+
+	/**
+	 * D-065 — EXPANDING is a size change too, so it has to be clamped like one.
+	 *
+	 * Every other path went through `clampToViewport`, but expanding did not, and the clamp is
+	 * asked for `expanded: isExpanded`: while the chat is COLLAPSED there is no messages box to
+	 * leave room for, so its anchor is legally allowed to sit at the very top of the viewport.
+	 * Re-expanding then had to put a 550px box above an anchor with nothing above it. Measured on
+	 * the mounted component: collapse → drag to the top → re-expand put the chat's top at
+	 * **-546px**, with the header and the `.resize-top` grip off-screen — the same unrecoverable
+	 * state D-065 is about, reached without touching a resize grip.
+	 *
+	 * The effect reads ONLY `isExpanded`; the clamp itself runs untracked because it reads and
+	 * writes the geometry state and would otherwise re-trigger on its own writes.
+	 */
+	$effect(() => {
+		const expanded = isExpanded;
+		untrack(() => { if (expanded && browser) clampToViewport(); });
 	});
 
 	function savePosition() {
@@ -292,25 +353,12 @@
 		}
 	}
 
+	// Persists the size the USER chose, never the viewport-clamped render (see `desiredWidth`).
 	function saveChatSize() {
 		if (browser) {
-			localStorage.setItem('mycelium-chat-size', JSON.stringify({ width: chatWidth, height: chatHeight }));
+			localStorage.setItem('mycelium-chat-size', JSON.stringify({ width: desiredWidth, height: desiredHeight }));
 		}
 	}
-
-	// Load saved chat size
-	$effect(() => {
-		if (browser) {
-			const saved = localStorage.getItem('mycelium-chat-size');
-			if (saved) {
-				try {
-					const parsed = JSON.parse(saved);
-					if (parsed.width >= 320 && parsed.width <= 1200) chatWidth = parsed.width;
-					if (parsed.height >= 200 && parsed.height <= window.innerHeight - 100) chatHeight = parsed.height;
-				} catch { /* ignore */ }
-			}
-		}
-	});
 
 	// When docScope is set with an agentId hint (the doc was authored
 	// by a known agent), auto-switch the chat to that agent so the
@@ -350,11 +398,34 @@
 	// fine because `left` never changes there, only `width`.
 	//
 	// Fix: don't touch Svelte state during the drag. Instead, mutate
-	// the DOM directly (`el.style.width`, `.left`, `.bottom` and the
-	// messages-box height). Svelte never re-renders during the drag,
-	// so the `style="…"` attribute is never rewritten, and the inline
-	// properties we set survive frame-to-frame. We only commit the
-	// final values to state on mouseup.
+	// the DOM directly. We only commit the final values to state on mouseup.
+	//
+	// ⚠️ D-065 — WHAT THE IMPERATIVE PATH IS ALLOWED TO WRITE.
+	// The drag used to set `el.style.width/left/bottom/transform` and the messages-box
+	// `style.height` — DIFFERENT properties from the ones the reactive `style={…}` attribute
+	// owns — and then clear them on mouseup, trusting Svelte to re-apply the attribute. Svelte 5
+	// routes a `style` attribute through `set_style`
+	// (svelte/src/internal/client/dom/elements/style.js), NOT `set_attribute`: it caches the last
+	// value on `dom[STYLE_CACHE]` and returns without touching the DOM when the new string is
+	// identical, and clearing inline properties mutates the attribute behind that cache. A
+	// width-only drag leaves `chatHeight` untouched, so the messages-box string was unchanged,
+	// the write was skipped, and the element ended up with NO inline style at all — its 550px
+	// height collapsed to the 204px content height. Measured in a real browser: ONE right-edge
+	// drag took the chat from 720x624 to 402x278 with `style="z-index: 9999;"` on the container,
+	// i.e. width/left/bottom/transform gone and the chat flung to the viewport corner. That is
+	// all three reported symptoms — width changing height, the top going off-screen, and the
+	// chat "disappearing" — from one mechanism.
+	//
+	// So: the drag and the render now write the SAME FIVE CUSTOM PROPERTIES on the SAME element
+	// (`--chat-w`, `--chat-h`, `--chat-left`, `--chat-bottom`, `--chat-translate`; the stylesheet
+	// consumes them). Nothing is ever cleared, and both directions are now safe: a SKIPPED Svelte
+	// write leaves the imperative values, which already equal the committed state; and a Svelte
+	// write that DOES land assigns `style.cssText` wholesale, which is harmless precisely because
+	// the string it assigns carries the same five properties.
+	//
+	// The one exception is `transition`, which the reactive string does not own — it is cleared on
+	// mouseup, and only survives the drag because `.chat-container.resizing { transition: none }`
+	// covers it through the cascade.
 	function startResize(edge: ResizeEdge) {
 		return (e: MouseEvent) => {
 			e.preventDefault();
@@ -379,16 +450,15 @@
 			const startLeft   = rect.left;
 			const startRight  = rect.right;
 			const startBottom = rect.bottom;
-			const startInputBarTop = startBottom - 60;
+			const startInputBarTop = startBottom - CHAT_INPUT_BAR;
 			// Messages-area top — anchor for bottom-edge resize. The
 			// chat container has `gap-3` (12px) between messages-box
 			// and input-bar, so subtract that on top of the 60px bar.
-			const startMessagesTop = startBottom - 60 - 12 - startHeight;
-
-			// Find messages-box once for direct height updates.
-			const messagesBox = chatContainerRef.querySelector(
-				'.messages-box',
-			) as HTMLElement | null;
+			const startMessagesTop = startBottom - CHAT_INPUT_BAR - CHAT_GAP - startHeight;
+			// The bottom grip pins the messages top. Never pin it ABOVE the top margin: a chat
+			// that starts in an off-screen state (a legacy persisted geometry, a viewport that
+			// just shrank) must be recoverable by dragging, not re-anchored to its bad top.
+			const anchoredMessagesTop = Math.max(CHAT_TOP_MARGIN, startMessagesTop);
 
 			// Local accumulators — we drive the DOM from these and
 			// commit them to Svelte state on mouseup only.
@@ -409,58 +479,61 @@
 			}
 			isResizing = true;
 
-			// Defensive: kill the container's transition synchronously
-			// so the .resizing class application timing doesn't matter.
-			// (Class wins via cascade once it lands; this just bridges
-			// the gap before the next render.)
+			// The .resizing class kills the transition via the cascade; this bridges the gap
+			// before the next render. Unlike the geometry properties it IS cleared on mouseup —
+			// `transition` is not one of the values the reactive style attribute owns, so
+			// nothing can be lost by clearing it.
 			chatContainerRef.style.transition = 'none';
 
+			// Writes the SAME custom properties the reactive style attribute writes, so the two
+			// paths can never disagree and nothing has to be cleared afterwards.
 			function applyImperative() {
 				if (!chatContainerRef) return;
-				const cw = Math.min(curWidth, window.innerWidth - 32);
-				const bottomOffset = Math.max(
-					16,
-					window.innerHeight - curInputBarTop - 60,
-				);
-				chatContainerRef.style.width = cw + 'px';
-				chatContainerRef.style.left = curLeft + 'px';
-				chatContainerRef.style.bottom = bottomOffset + 'px';
-				chatContainerRef.style.transform = 'none';
-				if (messagesBox) {
-					const mh = Math.min(curHeight, window.innerHeight - 120);
-					messagesBox.style.height = mh + 'px';
-				}
+				const s = chatContainerRef.style;
+				s.setProperty('--chat-w', `${curWidth}px`);
+				s.setProperty('--chat-h', `${curHeight}px`);
+				s.setProperty('--chat-left', `${curLeft}px`);
+				s.setProperty('--chat-bottom', `${Math.max(16, window.innerHeight - curInputBarTop - CHAT_INPUT_BAR)}px`);
+				s.setProperty('--chat-translate', '0');
 			}
 
 			function onMouseMove(e: MouseEvent) {
 				if (isLeftEdge) {
-					curWidth = Math.max(
-						320,
-						Math.min(1200, startWidth + (startX - e.clientX)),
-					);
+					curWidth = startWidth + (startX - e.clientX);
 					curLeft = startRight - curWidth;
 				} else if (isRightEdge) {
-					curWidth = Math.max(
-						320,
-						Math.min(1200, startWidth + (e.clientX - startX)),
-					);
+					curWidth = startWidth + (e.clientX - startX);
 					curLeft = startLeft;
 				}
 
-				const maxHeight = window.innerHeight - 100;
 				if (isTopEdge) {
-					curHeight = Math.max(
-						200,
-						Math.min(maxHeight, startHeight + (startY - e.clientY)),
-					);
+					// Top grip: the input bar stays put and the box grows upward.
+					curHeight = startHeight + (startY - e.clientY);
 					curInputBarTop = startInputBarTop;
 				} else if (isBottomEdge) {
-					curHeight = Math.max(
-						200,
-						Math.min(maxHeight, startHeight + (e.clientY - startY)),
-					);
-					curInputBarTop = startMessagesTop + 12 + curHeight;
+					// Bottom grip: the messages TOP stays put and the bottom follows the cursor,
+					// so the height is DERIVED from the anchor rather than tracked alongside it.
+					// Expressing it this way is what lets one clamp bound both: y is bounded to
+					// the viewport, and a height read off a bounded y is bounded too. The old
+					// form (`curInputBarTop = startMessagesTop + 12 + curHeight`) had no bound on
+					// the anchor at all and could drive it negative — the chat off the top edge.
+					curInputBarTop = startInputBarTop + (e.clientY - startY);
+					curHeight = curInputBarTop - CHAT_GAP - anchoredMessagesTop;
 				}
+
+				// ONE clamp for every edge (D-065). The old per-branch bounds capped the height
+				// against `innerHeight - 100` — the bare viewport, not the room above the input
+				// bar — so a top-edge drag could push the top (with the `.resize-top` grip and
+				// the header) off-screen where it could no longer be grabbed and made smaller.
+				const g = clampChatGeometry(
+					{ width: curWidth, height: curHeight, x: curLeft, y: curInputBarTop },
+					{ vw: window.innerWidth, vh: window.innerHeight },
+					{ expanded: isExpanded },
+				);
+				curWidth = g.width;
+				curHeight = g.height;
+				curLeft = g.x;
+				curInputBarTop = g.y;
 
 				applyImperative();
 			}
@@ -469,27 +542,28 @@
 				window.removeEventListener('mousemove', onMouseMove);
 				window.removeEventListener('mouseup', onMouseUp);
 
-				// Commit the final values to Svelte state. The reactive
-				// `style={…}` expression will recompute and write the
-				// attribute — its values match what we just set
-				// imperatively, so there's no visible jump.
-				chatWidth = curWidth;
-				chatHeight = curHeight;
-				position = { x: curLeft, y: curInputBarTop };
+				// Commit the final values to Svelte state. The reactive style attribute writes
+				// the SAME custom properties `applyImperative` just wrote, so whether Svelte
+				// re-writes it or skips it (its value is unchanged) the geometry is identical.
+				// NOTHING is cleared here — clearing is what stripped the attribute and made the
+				// chat collapse and jump on a width-only drag.
+				const g = clampChatGeometry(
+					{ width: curWidth, height: curHeight, x: curLeft, y: curInputBarTop },
+					{ vw: window.innerWidth, vh: window.innerHeight },
+					{ expanded: isExpanded },
+				);
+				// A drag IS the user choosing a size, so it moves the desired pair too.
+				desiredWidth = g.width;
+				desiredHeight = g.height;
+				chatWidth = g.width;
+				chatHeight = g.height;
+				position = { x: g.x, y: g.y };
 				isResizing = false;
 				saveChatSize();
 				savePosition();
 
-				// Clear our imperative inline overrides so the reactive
-				// style attr is the single source of truth again.
-				if (chatContainerRef) {
-					chatContainerRef.style.width = '';
-					chatContainerRef.style.left = '';
-					chatContainerRef.style.bottom = '';
-					chatContainerRef.style.transform = '';
-					chatContainerRef.style.transition = '';
-				}
-				if (messagesBox) messagesBox.style.height = '';
+				// `transition` is ours alone (see above) — safe to hand back to the stylesheet.
+				if (chatContainerRef) chatContainerRef.style.transition = '';
 			}
 
 			window.addEventListener('mousemove', onMouseMove);
@@ -1186,26 +1260,22 @@
 
 	function onDrag(e: MouseEvent) {
 		if (!isDragging) return;
-		const newX = e.clientX - dragOffset.x;
-		const inputBarY = e.clientY - dragOffset.y;
-		// Use the actual chat width (clamped to viewport) — the
-		// previous hardcoded 720 was the invisible right-side wall:
-		// a chat resized smaller couldn't reach the right edge, and
-		// a chat resized wider got an off-by-X anchor.
-		const cw = Math.min(chatWidth, window.innerWidth - 32);
-		// Allow the chat to overhang either edge as long as a 60px
-		// strip stays visible (so it can always be grabbed back).
-		const minVisible = 60;
-		const minX = -(cw - minVisible);
-		const maxX = window.innerWidth - minVisible;
-		// Vertical: input bar must stay touchable. Top down to 16,
-		// bottom edge of the chat down to within 16 of viewport bottom.
-		const minY = 16;
-		const maxY = window.innerHeight - 60 - 16;
-		position = {
-			x: Math.max(minX, Math.min(maxX, newX)),
-			y: Math.max(minY, Math.min(maxY, inputBarY))
-		};
+		// Same single clamp as the resize path (D-065). Moving the chat can make its top go
+		// off-screen just as growing it can, so the move is bounded by the same rule: a 60px
+		// horizontal strip stays grabbable, the input bar stays touchable, and the height yields
+		// if the new anchor leaves no room above it.
+		const g = clampChatGeometry(
+			{
+				width: chatWidth,
+				height: chatHeight,
+				x: e.clientX - dragOffset.x,
+				y: e.clientY - dragOffset.y,
+			},
+			{ vw: window.innerWidth, vh: window.innerHeight },
+			{ expanded: isExpanded, prefer: 'size' },
+		);
+		if (g.height !== chatHeight) chatHeight = g.height;
+		position = { x: g.x, y: g.y };
 	}
 
 	function stopDrag() {
@@ -1233,16 +1303,18 @@
 		if (!isDragging || e.touches.length !== 1) return;
 		e.preventDefault();
 		const touch = e.touches[0];
-		const newX = touch.clientX - dragOffset.x;
-		const inputBarY = touch.clientY - dragOffset.y;
-		const cw = Math.min(chatWidth, window.innerWidth - 32);
-		const minVisible = 60;
-		const minX = -(cw - minVisible);
-		const maxX = window.innerWidth - minVisible;
-		position = {
-			x: Math.max(minX, Math.min(maxX, newX)),
-			y: Math.max(16, Math.min(window.innerHeight - 76, inputBarY))
-		};
+		const g = clampChatGeometry(
+			{
+				width: chatWidth,
+				height: chatHeight,
+				x: touch.clientX - dragOffset.x,
+				y: touch.clientY - dragOffset.y,
+			},
+			{ vw: window.innerWidth, vh: window.innerHeight },
+			{ expanded: isExpanded, prefer: 'size' },
+		);
+		if (g.height !== chatHeight) chatHeight = g.height;
+		position = { x: g.x, y: g.y };
 	}
 
 	function stopTouchDrag() {
@@ -1294,13 +1366,41 @@
 		}
 	});
 
+	// D-073 — the onboarding first message must arrive with the WHOLE chat open.
+	//
+	// The effect above expands only on an EMPTY thread, and the greeting path loads the
+	// just-persisted message into the store BEFORE it opens the chat — so the thread was already
+	// non-empty and the chat opened collapsed. The operator saw only the input field and had to
+	// click into it to discover the agent's introduction, which reads as a broken feature.
+	//
+	// `chatExpandTicket` is a one-shot counter, so this expands ONCE per explicit request and
+	// never on an ordinary incoming message. The baseline is captured at mount (the ticket is
+	// persisted with the rest of the nav state, so a reload must not look like a fresh request),
+	// which is also why a user who collapses the chat stays collapsed.
+	// Plain `let`, not `$state`: this effect reads AND writes it, and a tracked read would make
+	// the write re-trigger the effect.
+	let seenExpandTicket: number | null = null;
+	$effect(() => {
+		const ticket = $navigationState.chatExpandTicket ?? 0;
+		if (seenExpandTicket === null) { seenExpandTicket = ticket; return; }
+		if (ticket <= seenExpandTicket) return;
+		seenExpandTicket = ticket;
+		isExpanded = true;
+	});
+
+	// D-065: geometry travels as CUSTOM PROPERTIES on this one element, and the stylesheet
+	// consumes them (`.chat-container:not(.chat-mobile)` below). The resize drag writes the very
+	// same four properties, so the imperative and reactive paths can never disagree — and, unlike
+	// the old `style.width`/`style.left`/`style.bottom`/`style.height` writes, nothing has to be
+	// cleared on mouseup. Clearing them was what stripped the style attribute (Svelte 5 skips the
+	// re-write when its cached value is unchanged) and collapsed / flung the chat.
 	const containerStyle = $derived(() => {
 		if (isMobile) return '';
 		if (position) {
-			const bottomOffset = window.innerHeight - position.y - 60;
-			return `left: ${position.x}px; bottom: ${Math.max(16, bottomOffset)}px; transform: none;`;
+			const bottomOffset = window.innerHeight - position.y - CHAT_INPUT_BAR;
+			return `--chat-left: ${position.x}px; --chat-bottom: ${Math.max(16, bottomOffset)}px; --chat-translate: 0;`;
 		}
-		return `left: 50%; bottom: 24px; transform: translateX(-50%);`;
+		return `--chat-left: 50%; --chat-bottom: 24px; --chat-translate: -50%;`;
 	});
 
 	const statusColor = $derived(() => {
@@ -1390,18 +1490,20 @@
 		class:gap-3={!isMobile}
 		style={isMobile
 			? 'z-index: 9999; inset: 0;'
-			: `z-index: 9999; width: min(${chatWidth}px, calc(100vw - 32px)); ${containerStyle()}`}
+			: `z-index: 9999; --chat-w: ${chatWidth}px; --chat-h: ${chatHeight}px; ${containerStyle()}`}
 		onmouseenter={() => { if (!isResizing && !isDragging) isHovered = true; }}
 		onmouseleave={() => { if (!isResizing && !isDragging) isHovered = false; }}
 	>
-		<!-- Messages box -->
+		<!-- Messages box. Desktop height comes from the container's --chat-h (see the
+		     stylesheet): this element carries NO inline geometry, so there is nothing for the
+		     resize drag to clear and lose (D-065). -->
 		{#if isExpanded}
 			<div
 				class="messages-box w-full flex flex-col"
 				class:glass-box={!isMobile}
 				class:rounded-2xl={!isMobile}
 				class:shadow-2xl={!isMobile}
-				style={isMobile ? 'flex: 1; min-height: 0; background: var(--color-bg);' : `height: min(${chatHeight}px, calc(100vh - 120px));`}
+				style={isMobile ? 'flex: 1; min-height: 0; background: var(--color-bg);' : undefined}
 			>
 				<!-- Resize handles (desktop only) -->
 				{#if !isMobile}
@@ -2053,6 +2155,34 @@
 		background: #ffffff;
 		border-color: rgba(0, 0, 0, 0.08);
 		box-shadow: 0 16px 48px rgba(0, 0, 0, 0.16);
+	}
+
+	/*
+	 * D-065 — the SINGLE consumer of the chat's geometry.
+	 *
+	 * Both writers (the reactive `style={…}` attribute and the resize drag's
+	 * `style.setProperty`) set the same four custom properties on the container, and only these
+	 * rules turn them into layout. Before, the two writers set DIFFERENT properties on TWO
+	 * elements and the drag cleared its own on mouseup, expecting Svelte to re-apply the
+	 * attribute; Svelte 5 skips that write when its cached value is unchanged, so a width-only
+	 * drag left the messages box with no height (550px → its 204px content height) and the
+	 * container with no width/left/bottom/transform at all.
+	 */
+	.chat-container:not(.chat-mobile) {
+		width: min(var(--chat-w, 720px), calc(100vw - 32px));
+		left: var(--chat-left, 50%);
+		bottom: var(--chat-bottom, 24px);
+		transform: translateX(var(--chat-translate, -50%));
+	}
+
+	/*
+	 * `--chat-h` is authoritative — clampChatGeometry already bounds it against the room above
+	 * the input bar, which CSS cannot express (it depends on the chat's own y). The `min()` is a
+	 * pure backstop against a height that somehow bypassed the clamp; it is deliberately looser
+	 * than the clamp so the two can never disagree about a legitimate value.
+	 */
+	.chat-container:not(.chat-mobile) .messages-box {
+		height: min(var(--chat-h, 550px), calc(100vh - 32px));
 	}
 
 	/* Mobile full-screen mode */

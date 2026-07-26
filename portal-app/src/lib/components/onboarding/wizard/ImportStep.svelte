@@ -84,8 +84,14 @@
 		<ScanForData onImported={() => signalImportCompleted()} />
 	</div>
 
-	<!-- Consent line — scanning + import read files; state it plainly before it runs. -->
-	<p class="consent">Mycelium reads these files on your device to build your map — nothing leaves your machine.</p>
+	<!-- Consent line — scanning + import read files; state it plainly before it runs.
+	     ⚠️ The trailing "— nothing leaves your machine." was REMOVED (operator, QA9):
+	     it is false the moment a cloud model or BYOK provider is configured, and an
+	     absolute privacy claim that a supported configuration breaks is a liability
+	     for a sovereignty product. What is true unconditionally — that the files are
+	     read and STORED on the device — is what the line now says. Do not re-add an
+	     absolute "nothing leaves" claim to any surface; copy is the operator's. -->
+	<p class="consent">Mycelium reads these files and stores them on your device to build your map.</p>
 
 	<!-- Explicit sources + folder-aware drop — ALWAYS visible (never a dead-end). -->
 	<div class="sources">

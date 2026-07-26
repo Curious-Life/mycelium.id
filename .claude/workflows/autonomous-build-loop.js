@@ -1,7 +1,7 @@
 export const meta = {
   name: 'autonomous-build-loop',
   description:
-    'Concurrency-aware plan→build→gate→adversarial+security review→loop-till-green→land for Mycelium V1, per docs/AUTONOMOUS-ROUTINE.md. Surveys in-flight work, coexists with other sessions, runs in its own claude/auto-loop/* branch namespace, never touches the main checkout. Opt-in; returns recommendations, never merges directly.',
+    'Concurrency-aware plan→build→gate→adversarial+security review→loop-till-green→land for Mycelium V1, per the autonomous routine. Surveys in-flight work, coexists with other sessions, runs in its own claude/auto-loop/* branch namespace, never touches the main checkout. Opt-in; returns recommendations, never merges directly.',
   phases: [
     { title: 'Survey', detail: 'read-only world state: branches, worktrees, dirty files, handoff in-progress' },
     { title: 'Resume', detail: 'finish the loop’s own unmerged work before starting anything new' },
@@ -159,7 +159,7 @@ const SCORE = {
 // --- 0. SURVEY (read-only; a dirty tree is mapped, NOT a stop condition) ---
 phase('Survey')
 const world = await agent(
-  `You are the SURVEY step of docs/AUTONOMOUS-ROUTINE.md. READ-ONLY: run only inspection commands
+  `You are the SURVEY step of the autonomous routine. READ-ONLY: run only inspection commands
    (git status/branch/log/worktree/for-each-ref, reads). Do NOT checkout, pull, stage, commit, or edit
    anything — other sessions may be mid-task in the main checkout.
    Gather the world state so this loop can coexist with concurrent work:
@@ -172,7 +172,7 @@ const world = await agent(
    4. claimedFiles = the UNION of files under active concurrent work (dirty main + files changed on other
       recently-active branches vs baseRef). This is the territory to avoid.
    5. inProgressUnits = units OTHER sessions are mid-way on, from the bottom of
-      docs/V1-BUILD-HANDOFF-2026-05-30.md (don't duplicate them).
+      the V1 build handoff (don't duplicate them).
    6. resumable = THIS loop's own unfinished work: any ${LOOP_NS}/* branch (or worktree) with commits not
       merged into baseBranch, or a worktree with uncommitted changes. List its files + state.
    7. candidates = the "remaining/next" buildable units from the handoff. For each: tag buildable (no real
@@ -360,7 +360,7 @@ const landed = await parallel(
       `SCORE + LAND unit "${item.unit.id}" (worktree ${item.build.worktree}, ${item.unit.securitySensitive ? 'SECURITY-SENSITIVE' : 'non-sensitive'}).
        This loop owns the ${LOOP_NS}/* namespace; it must NOT push to ${baseBranch} or any other session's branch.
        1. Create/update branch ${LOOP_NS}/${item.unit.id} from ${baseRef} and apply this unit's worktree commit(s) onto it.
-       2. Score 0–100 for "correct, complete, safe to land unattended" per the rubric in docs/AUTONOMOUS-ROUTINE.md, one-line justification.
+       2. Score 0–100 for "correct, complete, safe to land unattended" per the rubric in the autonomous routine, one-line justification.
        3. git push -u origin ${LOOP_NS}/${item.unit.id}; open or update a PR into ${baseBranch} (gh).
        4. recommendation: 'auto-merge-eligible' ONLY if score >= 85 AND NOT securitySensitive; else 'pr-for-human'
           (security-sensitive ALWAYS = 'pr-for-human').

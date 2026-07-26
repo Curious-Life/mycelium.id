@@ -12,6 +12,7 @@ import { applyMigrations } from '../src/db/migrate.js';
 import { portalProvidersRouter } from '../src/portal-providers.js';
 import { jurisdictionForBaseUrl } from '../src/inference/presets.js';
 import { resolveInferenceConfigForTask, _setSubscriptionTokenReaderForTests } from '../src/inference/resolve.js';
+import { _resetModelCatalogForTests, discoverModels } from '../src/inference/model-catalog.js';
 
 const DB = 'data/verify-providers.db', KCV = 'data/verify-providers-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -285,6 +286,335 @@ rec('P14. updateSettings UPSERTS on a fresh vault (no prior row → settings per
 
   await new Promise((r) => s3.close(r));
   _setSubscriptionTokenReaderForTests(null); // restore the default live-token reader
+}
+
+
+// ── P16 (D-074) — the model list is the PROVIDER'S ANSWER, cached honestly, never a roster ──
+//
+// The defect: the subscription picker offered four Claude ids typed into AISettings.svelte, so
+// a newly-released model could not appear. The list now comes from the provider
+// (src/inference/model-catalog.js → models.js), and every answer is LABELLED — `source`
+// live/cache/fallback plus `stale` — so a degraded list can never render as a current one.
+//
+// This drives the REAL route over the REAL vault with a fetch whose ANSWER CHANGES between
+// calls: a literal roster cannot follow it, which is what makes P16b more than a shape check.
+//
+// MUTATION-TESTED: replacing the route body with a literal roster
+//   (`res.json({ok:true, models:['claude-opus-4-8','claude-sonnet-4-5'], source:'live', stale:false})`)
+//   → P16, P16b, P16c, P16d, P16e, P16f all RED (the served ids never change, never match the
+//   provider's answer, and the key is never even used).
+// MUTATION-TESTED: reporting the fallback as `source:'live', stale:false` in model-catalog.js's
+//   failure branch → P16d RED (a stale list claiming to be current — and ONLY P16d, which is
+//   what makes it the check that owns the honesty claim).
+// MUTATION-TESTED: dropping the `force` bypass in discoverModels (so ?refresh=1 re-serves the
+//   TTL cache) → P16b + P16e RED (the changed answer never reaches the client).
+// MUTATION-TESTED: returning the raw `listModels` result instead of the discovered one (no
+//   cache, no labels) → P16, P16b, P16c, P16d, P16e RED (`source`/`stale` absent, so the UI
+//   could not qualify anything).
+// MUTATION-TESTED: restoring the prose refusal for a PENDING row ('provider is not activated
+//   yet — activate it to list models') → P16g RED.
+// MUTATION-TESTED: deleting the freshClaudeSubscriptionToken lookup so the route lists with the
+//   STORED subscription token → P16h RED (the wire carries the stale copy).
+// MUTATION-TESTED: dropping the tenant from the model-cache key (`cacheKey = String(key)`)
+//   → P16i RED.
+// MUTATION-TESTED: making invalidateModelCatalog a total no-op → P16j RED (a rotated key keeps
+//   serving the previous credential's roster for the whole TTL).
+//   ⚠️ Both of those last two were demonstrated GREEN before P16i/P16j existed: the tenant-scope
+//   claim and all four invalidation call sites had NO check under them, invisible because
+//   _resetModelCatalogForTests clears the Map directly instead of going through the exported
+//   invalidator. A comment asserting a security property with no gate beneath it is exactly
+//   M-001 (independent review ×2).
+{
+  const U4 = 'd074-user';
+  try { await db.users.create(U4, 'D074'); } catch { /* row may exist */ }
+  _resetModelCatalogForTests();
+
+  // A fetch we CONTROL: `answer` is swapped between calls, so the route's output must follow it.
+  let answer = { ok: true, ids: ['claude-opus-5', 'claude-sonnet-4-6'] };
+  const KEY = 'GOODKEY-D074-SECRET';
+  const seenAuth = [];
+  const listFetch = async (_url, opts) => {
+    const h = opts?.headers || {};
+    seenAuth.push(String(h.authorization || h.Authorization || h['x-api-key'] || ''));
+    if (!answer.ok) return { ok: false, status: answer.status || 401, async text() { return '{}'; }, async json() { return {}; } };
+    return { ok: true, status: 200, async text() { return '{}'; }, async json() { return { data: answer.ids.map((id) => ({ id })) }; } };
+  };
+  const app4 = express(); app4.use(express.json());
+  app4.use('/api/v1/portal', portalProvidersRouter({ db, userId: U4, fetch: listFetch }));
+  const s4 = await new Promise((r) => { const x = app4.listen(0, '127.0.0.1', () => r(x)); });
+  const base4 = `http://127.0.0.1:${s4.address().port}/api/v1/portal`;
+  const post4 = (pth, b) => fetch(base4 + pth, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b || {}) });
+  // ⚠️ P16j needs a PUT bound to THIS app (userId U4). The first draft reused the outer `put`,
+  // which targets the local-user router — so the update landed on a different user's row, the
+  // cache was never invalidated for U4, and the check went RED for a reason that had nothing to
+  // do with the product. It found its own fixture bug before it found anything else.
+  const put4 = (pth, b) => fetch(base4 + pth, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b || {}) });
+  const get4 = (pth) => fetch(base4 + pth);
+
+  const made = await J(await post4('/providers', { provider: 'anthropic', label: 'Claude API', api_key: KEY }));
+  const pid = made.body.id;
+
+  let m = await J(await get4(`/providers/${pid}/models`));
+  rec('P16. GET /providers/:id/models returns the PROVIDER\'s list, labelled live (D-074)',
+    m.body.ok === true && m.body.source === 'live' && m.body.stale === false
+    && JSON.stringify(m.body.models) === JSON.stringify(['claude-opus-5', 'claude-sonnet-4-6']),
+    `source=${m.body.source} stale=${m.body.stale} models=${JSON.stringify(m.body.models)}`);
+
+  // P16b — DERIVED, not literal. Change what the provider answers; a forced refresh must follow
+  // it. A hardcoded roster (or a cache with no bypass) cannot produce the new set.
+  answer = { ok: true, ids: ['claude-opus-6', 'zzz-experimental-1'] };
+  const cached = await J(await get4(`/providers/${pid}/models`));
+  const forced = await J(await get4(`/providers/${pid}/models?refresh=1`));
+  rec('P16b. the list is DERIVED from the provider response, not a literal roster',
+    JSON.stringify(forced.body.models) === JSON.stringify(['claude-opus-6', 'zzz-experimental-1'])
+    && forced.body.source === 'live',
+    `forced=${JSON.stringify(forced.body.models)} source=${forced.body.source}`);
+  // P16c — and the un-forced read in between was served from CACHE (so the picker does not hit
+  // the provider on every render) and SAID so — 'cache', never 'live'.
+  rec('P16c. an un-forced read inside the TTL is served from cache and LABELLED cache',
+    cached.body.source === 'cache' && cached.body.stale === false
+    && JSON.stringify(cached.body.models) === JSON.stringify(['claude-opus-5', 'claude-sonnet-4-6']),
+    `source=${cached.body.source} stale=${cached.body.stale} models=${JSON.stringify(cached.body.models)}`);
+
+  // P16d — the FAILURE path. Nothing cached (fresh row) + the provider rejects ⇒ a usable floor
+  // that is explicitly NOT current. `ok:false` + `stale:true` + a category error, never a
+  // silently-served list that looks live.
+  _resetModelCatalogForTests();
+  answer = { ok: false, status: 401 };
+  const failed = await J(await get4(`/providers/${pid}/models`));
+  rec('P16d. an UNLISTABLE provider yields an honest state — never a stale list dressed as live',
+    failed.body.ok === false && failed.body.stale === true && failed.body.source === 'fallback'
+    && failed.body.error === 'auth_rejected' && Array.isArray(failed.body.models) && failed.body.models.length > 0,
+    `ok=${failed.body.ok} source=${failed.body.source} stale=${failed.body.stale} error=${failed.body.error} n=${failed.body.models?.length}`);
+
+  // P16e — a WARM cache + a failing refresh keeps the last real answer, still marked stale.
+  // (The user's own account listed those models; they are just older. Saying so is the contract.)
+  _resetModelCatalogForTests();
+  answer = { ok: true, ids: ['claude-opus-5'] };
+  await get4(`/providers/${pid}/models`);
+  answer = { ok: false, status: 500 };
+  const warm = await J(await get4(`/providers/${pid}/models?refresh=1`));
+  rec('P16e. a failed REFRESH over a warm cache serves the old list but marks it stale + why',
+    warm.body.ok === false && warm.body.source === 'cache' && warm.body.stale === true
+    && warm.body.error === 'provider_error' && JSON.stringify(warm.body.models) === JSON.stringify(['claude-opus-5']),
+    `ok=${warm.body.ok} source=${warm.body.source} stale=${warm.body.stale} error=${warm.body.error}`);
+
+  // P16g — the PENDING refusal is an honest state too, and a CATEGORY not prose. verify:
+  // provider-import P12d already pins the security property (a pending row causes NO outbound
+  // fetch); this pins that the REFUSAL is not mistaken for a live empty list, and that its
+  // `error` is a token the client can map to the one remedy the user has ("activate it"). The
+  // route shipped prose here, which fell through the client's category map to a generic
+  // "unavailable" and lost that remedy (independent review, LOW).
+  {
+    const pend = await J(await post4('/providers', { provider: 'anthropic', label: 'Pending', api_key: 'GOODKEY-PEND' }));
+    await db.providers.update(pend.body.id, U4, { status: 'pending' });
+    const pr = await J(await get4(`/providers/${pend.body.id}/models`));
+    rec('P16g. a PENDING row refuses with an honest state + a CATEGORY error, never prose',
+      pr.body.ok === false && pr.body.stale === true && pr.body.error === 'not_activated'
+      && !/\s/.test(String(pr.body.error)),
+      `ok=${pr.body.ok} stale=${pr.body.stale} error=${JSON.stringify(pr.body.error)}`);
+  }
+
+  // ── P16h (review MED) — the SUBSCRIPTION listing uses the LIVE token, not the stored one ──
+  // The stored copy goes stale within hours (D-021: `claude` refreshes into a config-dir-
+  // namespaced Keychain item, never back into the DB row), so listing with it 401s on any vault
+  // older than a few hours — which silently demoted "the list is the provider's answer" to the
+  // MODEL_REGISTRY floor for the exact case D-074 was filed about. Driven with an INJECTED
+  // reader (no Keychain, no `claude`): the header must carry the fresh token.
+  {
+    _setSubscriptionTokenReaderForTests(async () => ({ claudeOAuthToken: 'sk-ant-oat-FRESH' }));
+    _resetModelCatalogForTests();
+    const seen = [];
+    const subFetch = async (_url, opts) => {
+      seen.push(String((opts?.headers || {}).Authorization || (opts?.headers || {}).authorization || ''));
+      return { ok: true, status: 200, async text() { return '{}'; }, async json() { return { data: [{ id: 'claude-opus-5' }] }; } };
+    };
+    const appS = express(); appS.use(express.json());
+    appS.use('/api/v1/portal', portalProvidersRouter({
+      db, userId: 'd074-sub', fetch: subFetch,
+      importClaudeCli: async () => ({ claudeOAuthToken: 'sk-ant-oat-STORED-STALE', refreshToken: null, expiresAt: null, scopes: ['user:inference'], account: null }),
+    }));
+    const sS = await new Promise((r) => { const x = appS.listen(0, '127.0.0.1', () => r(x)); });
+    const baseS = `http://127.0.0.1:${sS.address().port}/api/v1/portal`;
+    try { await db.users.create('d074-sub', 'D074sub'); } catch { /* may exist */ }
+    const impS = await J(await fetch(`${baseS}/auth/claude/import`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ acknowledgeToS: true }) }));
+    const ms = await J(await fetch(`${baseS}/providers/${impS.body.id}/models`));
+    rec('P16h. a SUBSCRIPTION lists with the LIVE token, never the stale stored copy (D-021 class)',
+      seen.some((h) => h.includes('sk-ant-oat-FRESH')) && !seen.some((h) => h.includes('STORED-STALE'))
+      && ms.body.ok === true && ms.body.source === 'live',
+      `authSeen=${seen.map((h) => h.replace(/sk-ant-oat-/, '')).join(',')} source=${ms.body.source}`);
+    await new Promise((r) => sS.close(r));
+    _setSubscriptionTokenReaderForTests(null);
+  }
+
+  // ── P16i (review MED) — the cache is TENANT-SCOPED (CLAUDE.md §5) ─────────────────────────
+  // Driven against discoverModels DIRECTLY, because the HTTP route cannot show this: db.providers
+  // .get is user-scoped, so tenant B never reaches tenant A's row and the cross-tenant serve is
+  // unobservable from outside. Dropping the tenant from the key left verify:providers GREEN with
+  // zero FAILs — invisible because _resetModelCatalogForTests clears the Map directly. A claim in
+  // a comment with no check under it is exactly what M-001 is about.
+  {
+    _resetModelCatalogForTests();
+    const answers = ['tenant-a-model', 'tenant-b-model'];
+    let n = 0;
+    const listStub = async () => ({ ok: true, models: [answers[n++] || 'exhausted'] });
+    const a = await discoverModels({ key: 77, userId: 'tenant-a', provider: 'anthropic', apiKey: 'A', list: listStub });
+    const b = await discoverModels({ key: 77, userId: 'tenant-b', provider: 'anthropic', apiKey: 'B', list: listStub });
+    rec('P16i. the model cache is TENANT-scoped — the same row id under another user re-discovers',
+      JSON.stringify(a.models) === JSON.stringify(['tenant-a-model'])
+      && JSON.stringify(b.models) === JSON.stringify(['tenant-b-model']) && b.source === 'live',
+      `a=${JSON.stringify(a.models)} b=${JSON.stringify(b.models)} b.source=${b.source}`);
+  }
+
+  // ── P16j (review MED) — invalidation is REAL, driven through the route ───────────────────
+  // The security rationale on the PUT handler is "a new key means a DIFFERENT account's model
+  // list — drop the cached one rather than serving the previous credential's roster for up to the
+  // TTL". Making invalidateModelCatalog a total no-op left the suite GREEN. This drives it: warm
+  // the cache, change the KEY, then read WITHOUT ?refresh — the answer must be the new
+  // credential's, not the old one's.
+  {
+    _resetModelCatalogForTests();
+    answer = { ok: true, ids: ['old-credential-model'] };
+    const warm = await J(await get4(`/providers/${pid}/models`));
+    answer = { ok: true, ids: ['new-credential-model'] };
+    await put4(`/providers/${pid}`, { api_key: 'GOODKEY-ROTATED' });
+    const after = await J(await get4(`/providers/${pid}/models`));   // NOT forced
+    rec('P16j. rotating the KEY invalidates the cached list — no serving the old credential\'s roster',
+      JSON.stringify(warm.body.models) === JSON.stringify(['old-credential-model'])
+      && JSON.stringify(after.body.models) === JSON.stringify(['new-credential-model'])
+      && after.body.source === 'live',
+      `warm=${JSON.stringify(warm.body.models)} after=${JSON.stringify(after.body.models)} source=${after.body.source}`);
+  }
+
+  // P16f — CLAUDE.md §1/§4: the credential is used for the listing call and never comes back.
+  rec('P16f. the listing call carries the key but NO response ever echoes it',
+    seenAuth.some((a) => a.includes(KEY))
+    && ![m, cached, forced, failed, warm].some((r) => JSON.stringify(r.body).includes(KEY)),
+    `keyUsed=${seenAuth.some((a) => a.includes(KEY))}`);
+
+  await new Promise((r) => s4.close(r));
+}
+
+// ── P17 (D-075) — Settings renders the EFFECTIVE selection, from the RESOLVER ────────────────
+//
+// The defect: Settings → Intelligence highlighted a provider only when
+// `settings.taskModels[task].providerId` named it, while the runtime resolved through
+// `resolveEffectiveAssignment` (explicit assignment, ELSE the active provider). After #360
+// (D-029) a connected subscription auto-selects for chat + narration WITHOUT writing
+// taskModels — so the runtime ran Claude while Settings showed nothing chosen.
+//
+// GET /providers/effective-models now answers with the resolver's own function. These checks
+// drive BOTH ends over the same vault and require them to AGREE — the endpoint's providerId
+// must be the row the REAL `resolveInferenceConfigForTask` resolved to, per task.
+//
+// MUTATION-TESTED: making resolveEffectiveAssignment skip the active-provider fallback for a
+//   task (i.e. re-implementing the pre-fix screen rule) → P17a, P17b, P17c RED (chat/narrate
+//   report providerId null; P15e/P15f red too, because it is the same code the runtime uses —
+//   which is the point of the fix).
+// MUTATION-TESTED: dropping the explicit-assignment branch from resolveEffectiveAssignment
+//   → P17b RED (an explicit choice reports as the active provider instead; P15g/P15h red too).
+// MUTATION-TESTED: making the route WRITE the resolved provider into settings.taskModels
+//   ("make Settings show it by storing it") → P17a2, P17b, P17d RED.
+//   ⚠️ P17d only reds since it moved to its OWN fresh vault — see the note at P17d. With the
+//   earlier shared-vault version this mutation left P17d GREEN.
+{
+  const U5 = 'd075-user';
+  try { await db.users.create(U5, 'D075'); } catch { /* row may exist */ }
+  _setSubscriptionTokenReaderForTests(async () => ({}));
+  const app5 = express(); app5.use(express.json());
+  app5.use('/api/v1/portal', portalProvidersRouter({
+    db, userId: U5, fetch: mockFetch,
+    importClaudeCli: async () => ({ claudeOAuthToken: 'sk-ant-oat-D075', refreshToken: null, expiresAt: null, scopes: ['user:inference'], account: null }),
+  }));
+  const s5 = await new Promise((r) => { const x = app5.listen(0, '127.0.0.1', () => r(x)); });
+  const base5 = `http://127.0.0.1:${s5.address().port}/api/v1/portal`;
+  const post5 = (pth, b) => fetch(base5 + pth, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b || {}) });
+  const get5 = (pth) => fetch(base5 + pth);
+
+  const byok = await J(await post5('/providers', { provider: 'openai', label: 'Prior5', api_key: 'GOODKEY-P17', model_preference: 'gpt-4o-mini' }));
+  const byokId = byok.body.id;
+  const sub = await J(await post5('/auth/claude/import', { acknowledgeToS: true }));
+  const subId = sub.body.id;   // auto-selects as active (D-029) WITHOUT writing taskModels
+
+  // P17a — the auto-selected provider is REPORTED as the effective one, tagged 'active'.
+  let eff = await J(await get5('/providers/effective-models'));
+  const chat = eff.body.effective?.chat;
+  const narrate = eff.body.effective?.narrate;
+  rec('P17a. the effective selection reports the AUTO-selected provider (the D-075 divergence)',
+    chat?.providerId === subId && chat?.source === 'active'
+    && narrate?.providerId === subId && narrate?.source === 'active',
+    `chat=${JSON.stringify(chat)} narrate=${JSON.stringify(narrate)} subId=${subId}`);
+  // …and taskModels is genuinely EMPTY, so the pre-fix screen rule really would show nothing.
+  const s0 = await db.users.getSettings(U5);
+  rec('P17a2. …with NOTHING in taskModels — the old rule had no answer to give',
+    !s0?.taskModels?.chat && !s0?.taskModels?.narrate,
+    `taskModels=${JSON.stringify(s0?.taskModels || {})}`);
+
+  // P17b — an EXPLICIT assignment overrides, and is tagged as such, so the screen can tell the
+  // user WHY a provider is selected (pinned vs "your active provider").
+  const put5 = (pth, b) => fetch(base5 + pth, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b || {}) });
+  await put5('/providers/task-models', { task: 'narrate', providerId: byokId });
+  eff = await J(await get5('/providers/effective-models'));
+  const narrate2 = eff.body.effective?.narrate;
+  const chat2 = eff.body.effective?.chat;
+  rec('P17b. an EXPLICIT assignment is reported as source "explicit", and only for its own task',
+    narrate2?.providerId === byokId && narrate2?.source === 'explicit'
+    && chat2?.providerId === subId && chat2?.source === 'active',
+    `narrate=${JSON.stringify(narrate2)} chat=${JSON.stringify(chat2)}`);
+
+  // P17c — ⭐ ONE SOURCE OF TRUTH. For every reported task, the endpoint's providerId must be
+  // the row the REAL resolver resolves to. Driven through resolveInferenceConfigForTask (the
+  // inference-time path), compared against the row fetched by the reported id — not a string.
+  const disagreements = [];
+  for (const task of eff.body.tasks) {
+    const e = eff.body.effective[task];
+    const cfg = await resolveInferenceConfigForTask(db, U5, task);
+    const row = e.providerId == null ? null : await db.providers.get(e.providerId, U5);
+    // The row the ENDPOINT names must produce the config the RESOLVER returned. Identity via the
+    // discriminators mapRowToConfig derives: auth type (subscription vs BYOK) + vendor + model.
+    const rowIsSub = String(row?.auth_type || '').toLowerCase() === 'oauth';
+    const cfgIsSub = cfg?.providerName === 'claude_subscription';
+    const vendorOk = rowIsSub ? cfgIsSub : (String(row?.provider || '') === String(cfg?.providerName || ''));
+    const modelOk = (row?.model_preference || null) === (cfg?.cloudModel ?? null);
+    if (!row || !vendorOk || !modelOk) disagreements.push(`${task}: endpoint=${JSON.stringify(e)} resolver={providerName:${cfg?.providerName},cloudModel:${cfg?.cloudModel}} row={provider:${row?.provider},auth:${row?.auth_type},model:${row?.model_preference}}`);
+  }
+  rec('P17c. ⭐ the endpoint AGREES with the real resolver for every task (one source of truth)',
+    disagreements.length === 0, disagreements.join(' | '));
+
+  // P17d — DISPLAY, NEVER A WRITE. Reading the effective selection must not persist it: doing so
+  // would silently convert "your active provider, for now" into a pin that survives the user
+  // later changing their active provider.
+  //
+  // ⚠️ ON ITS OWN VAULT, and the FIRST read of it. The first draft snapshotted U5 — which the
+  // checks above had already read from — so a route that wrote on read had ALREADY written by
+  // the time the snapshot was taken, and before===after held: the mutation ("make the route
+  // store what it resolved") left P17d GREEN and was caught only by its neighbours. A
+  // before/after check is worthless if the "before" is taken after the damage. (Watched
+  // failing to green during the mutation sweep — the M-001 pattern, one more time.)
+  const U6 = 'd075-user-readonly';
+  try { await db.users.create(U6, 'D075ro'); } catch { /* row may exist */ }
+  const app6 = express(); app6.use(express.json());
+  app6.use('/api/v1/portal', portalProvidersRouter({ db, userId: U6, fetch: mockFetch }));
+  const s6 = await new Promise((r) => { const x = app6.listen(0, '127.0.0.1', () => r(x)); });
+  const base6 = `http://127.0.0.1:${s6.address().port}/api/v1/portal`;
+  await fetch(`${base6}/providers`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: 'openai', label: 'RO', api_key: 'GOODKEY-RO', model_preference: 'gpt-4o' }) });
+  const before = JSON.stringify((await db.users.getSettings(U6)) || {});
+  const roEff = await J(await fetch(`${base6}/providers/effective-models`));
+  const after = JSON.stringify((await db.users.getSettings(U6)) || {});
+  rec('P17d. reading the effective selection WRITES NOTHING (display must not become a pin)',
+    before === after && roEff.body.effective?.chat?.source === 'active',
+    `before=${before} after=${after} chat=${JSON.stringify(roEff.body.effective?.chat)}`);
+  await new Promise((r) => s6.close(r));
+
+  // P17e — no credential crosses this boundary. The resolver's cfg carries the OAuth token; the
+  // route projects {task, source, providerId, model} and nothing else.
+  const raw = JSON.stringify(eff.body);
+  rec('P17e. the effective-selection payload carries NO credential material',
+    !/sk-ant-oat|GOODKEY|claudeOAuthToken|apiKey|credentials/i.test(raw),
+    `payload=${raw.slice(0, 200)}`);
+
+  await new Promise((r) => s5.close(r));
+  _setSubscriptionTokenReaderForTests(null);
 }
 
 server.close(); close();

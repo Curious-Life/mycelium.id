@@ -38,6 +38,27 @@
 	function selectedCats(s: DetectedSource): string[] {
 		return (s.categories ?? []).map((c) => c.key).filter((k) => cats[`${s.source}:${k}`] !== false);
 	}
+	// How many files the CURRENT selection covers. The row's headline `s.count` is the
+	// all-category total; using it as the progress denominator (as this component used
+	// to) made a documents-only import read as "N of ~18,700" — indistinguishable from
+	// importing everything, which is exactly what the user reported seeing (D-070).
+	function selectedCount(s: DetectedSource): number {
+		const on = new Set(selectedCats(s));
+		return (s.categories ?? []).reduce((a, c) => a + (on.has(c.key) ? c.count : 0), 0);
+	}
+	// Human names for the selected categories, so the result line states what was
+	// allowed in rather than only how many rows landed.
+	function catNames(s: DetectedSource, keys: string[]): string {
+		const byKey = new Map<string, string>((s.categories ?? []).map((c) => [c.key as string, c.label.replace(/ &.*/, '').toLowerCase()]));
+		const names = keys.map((k) => byKey.get(k) ?? k);
+		if (names.length <= 1) return names[0] ?? '';
+		return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+	}
+	// Nothing ticked ⇒ nothing to import. Fail-closed at the first surface too: the
+	// server rejects an empty selection, but the user should never get that far.
+	const nothingSelected = (s: DetectedSource) => s.source === 'local-files' && !!s.categories?.length && selectedCats(s).length === 0;
+	// A strict subset is the case worth spelling out; "everything only" reads wrong.
+	const isSubset = (s: DetectedSource, keys: string[]) => !!s.categories?.length && keys.length < s.categories.length;
 
 	async function scan() {
 		phase = 'scanning'; scanErr = '';
@@ -46,9 +67,86 @@
 			found = r.sources;
 			blocked = r.blocked;
 			phase = 'done';
+			// A finished run's "✓ Done" must not survive a re-scan: it permanently disables
+			// Import (`r.ok && r.msg` below), so a user who re-scanned to pick a different
+			// selection was locked out for the session.
+			result = {};
+			void adoptRunningSweep();
 		} catch (e: any) {
 			scanErr = e?.message || 'Scan failed.'; phase = 'error';
 		}
+	}
+
+	// ── An import that was ALREADY RUNNING when we mounted ───────────────────────────
+	// A sweep OUTLIVES this component: it is a detached server job, so a reload or a
+	// navigate-away-and-back mounts a fresh row with `busy` empty and no Cancel button.
+	// That was survivable while a re-click silently re-attached; it is NOT survivable now
+	// that a re-click with a DIFFERENT selection is refused (409) — the user would be told
+	// to cancel an import with nothing on screen to cancel.
+	//
+	// ⚠️ IT IS NOT THIS ROW'S IMPORT, AND MUST NEVER BORROW THIS ROW'S CHIPS. The first
+	// attempt at this fed the adopted job through `runSweep`, which computes every label
+	// from `selectedCats()` — so a foreign documents-only job rendered against the chips'
+	// all-category total ("Importing… 120 of ~18,700", the exact string U4 exists to
+	// forbid), and worse, an all-four job under documents-only chips ended as a bare
+	// "Imported 9698 items. ✓ Done": a user who deselected Photos was told their import
+	// succeeded while photos were being ingested. That is the reported defect again, as a
+	// UI-reporting bug (round-2 review, CRITICAL 1).
+	//
+	// So the adopted job gets its OWN state, its OWN timer and its OWN labels, all driven
+	// by what the SERVER says it is allowed to import (`categories`, `total`). It never
+	// writes `result`, never fires `onImported` (the user did not start it), and never
+	// leaves a terminal "✓ Done" behind — when it ends, the row simply becomes usable.
+	let adopted = $state<SweepProgress | null>(null);
+	let adoptTimer: ReturnType<typeof setTimeout> | null = null;
+	let adopting = false;
+	onDestroy(() => { if (adoptTimer) clearTimeout(adoptTimer); });
+
+	async function adoptRunningSweep() {
+		// `importable` is the predicate the ROW renders on — adopting something with no row
+		// would poll invisibly. And one in-flight adopt at a time: `adopting` is set before
+		// the first await, so two racing adopts cannot both arm `adoptTimer` and orphan one.
+		if (adopted || adopting || busy['local-files']) return;
+		if (!importable.some((x) => x.source === 'local-files')) return;
+		adopting = true;
+		try {
+			let p: SweepProgress;
+			try { p = await pollLocalSweep(); } catch { return; }
+			if (p.status !== 'running') return;
+			adopted = p;
+			const tick = async () => {
+				try { adopted = await pollLocalSweep(); } catch { /* keep the last snapshot */ }
+				if (adopted && adopted.status === 'running') adoptTimer = setTimeout(tick, 1200);
+				else adopted = null; // terminal → drop it; the row goes back to normal
+			};
+			adoptTimer = setTimeout(tick, 1200);
+		} finally { adopting = false; }
+	}
+
+	async function stopAdopted() {
+		try { await cancelLocalSweep(); } catch { /* best-effort */ }
+		try { adopted = await pollLocalSweep(); } catch { /* keep */ }
+		if (adopted?.status !== 'running') { if (adoptTimer) clearTimeout(adoptTimer); adopted = null; }
+	}
+
+	// Labels for the adopted job — from the SERVER's enforced selection, never the chips.
+	function adoptedScope(s: DetectedSource): string {
+		const keys = adopted?.categories ?? [];
+		if (!keys.length) return '';
+		return `${catNames(s, keys)}${isSubset(s, keys) ? ' only' : ''}`;
+	}
+	function adoptedLabel(s: DetectedSource): string {
+		if (!adopted) return '';
+		const denom = adopted.total || adopted.processed || 0;
+		const pct = denom ? Math.min(100, Math.round((adopted.processed / denom) * 100)) : 0;
+		const scope = adoptedScope(s);
+		return `An import you started earlier is still running${scope ? ` — ${scope}` : ''} · `
+			+ `${adopted.processed.toLocaleString()} of ~${denom.toLocaleString()} (${pct}%)`;
+	}
+	function adoptedPct(): number {
+		if (!adopted) return 0;
+		const denom = adopted.total || adopted.processed || 1;
+		return Math.min(100, Math.round((adopted.processed / denom) * 100));
 	}
 
 	// A readable list of the blocked folders for the permission hint.
@@ -65,6 +163,11 @@
 	onDestroy(() => { if (sweepTimer) clearTimeout(sweepTimer); });
 
 	async function runImport(s: DetectedSource) {
+		// Fail-closed first surface: an empty selection is never sent as "no opinion".
+		if (nothingSelected(s)) {
+			result = { ...result, [s.source]: { ok: false, msg: 'Nothing selected — pick at least one kind of file to import.' } };
+			return;
+		}
 		// Async-job sources (the broad sweep + registry `run` sources like the
 		// recent-export bundle) share ONE progress-polled loop; the rest are a
 		// one-shot blocking POST via importDetected.
@@ -106,11 +209,28 @@
 				const stopped = d?.status === 'cancelled';
 				const n = d?.imported ?? 0;
 				const extra = d?.deduped ? ` · ${d.deduped} already in vault` : '';
-				result = { ...result, [s.source]: { ok: true, msg: `${stopped ? 'Stopped —' : 'Imported'} ${n} item${n === 1 ? '' : 's'}${extra}.` } };
-				onImported();
+				// Name the categories the SERVER enforced (it echoes them back), so the user
+				// can SEE their deselection held instead of inferring it from a count (D-070).
+				const enforced = d?.categories?.length && isSubset(s, d.categories) ? ` · ${catNames(s, d.categories)} only` : '';
+				result = { ...result, [s.source]: { ok: true, msg: `${stopped ? 'Stopped —' : 'Imported'} ${n} item${n === 1 ? '' : 's'}${extra}${enforced}.` } };
+				// Only a run that actually brought something in is an import completion. Every
+				// other caller of this callback guards on a nonzero count; this one did not, so
+				// a cancelled-at-zero sweep still told onboarding "your data is in".
+				if (n > 0 || (d?.deduped ?? 0) > 0) onImported();
 			}
 		} catch (e: any) {
-			result = { ...result, [s.source]: { ok: false, msg: e?.message || 'Import failed.' } };
+			const msg = e?.message || 'Import failed.';
+			result = { ...result, [s.source]: { ok: false, msg } };
+			// A 409 says another selection is already importing and must be cancelled first.
+			// Belt-and-braces with the post-scan adopt: if the job started in the window
+			// between the scan and this click, adopt it NOW so the Cancel it names exists.
+			// Deferred to a microtask so it lands AFTER the `finally` below resets the row.
+			// adoptRunningSweep never writes `result`, so this 409 message SURVIVES. The first
+			// version routed the adopt through runSweep, which reset the message to '' before
+			// the user could read the instruction it gave them (round-2 review, CRITICAL 1).
+			if (s.source === 'local-files' && /already running/i.test(msg)) {
+				queueMicrotask(() => { void adoptRunningSweep(); });
+			}
 		} finally {
 			busy = { ...busy, [s.source]: false };
 			sweep = null;
@@ -124,17 +244,25 @@
 		try { await cancelImportRun(); } catch { /* best-effort */ }
 	}
 
-	// "N of ~M" for the sweep; denominator is the detected total (stable) or the
-	// live-discovered total, whichever is larger.
+	// "N of ~M" for the sweep. The denominator counts ONLY the selected categories
+	// (D-070): it used to be `Math.max(s.count, …)` — the ALL-category total — so a
+	// documents-only run reported against every photo, video and audio file on the
+	// machine and read as "it imported everything anyway". A progress bar that
+	// denominates by data the user refused is a lie about scope even when the
+	// importer behaves.
+	function sweepDenom(s: DetectedSource): number {
+		const picked = selectedCount(s) || (s.categories?.length ? 0 : s.count || 0);
+		return Math.max(picked, sweep?.total || 0);
+	}
 	function sweepLabel(s: DetectedSource): string {
 		if (!sweep) return '';
-		const denom = Math.max(s.count || 0, sweep.total || 0) || sweep.processed;
+		const denom = sweepDenom(s) || sweep.processed;
 		const pct = denom ? Math.min(100, Math.round((sweep.processed / denom) * 100)) : 0;
 		return `Importing… ${sweep.processed.toLocaleString()} of ~${denom.toLocaleString()} (${pct}%) · ${sweep.imported.toLocaleString()} added`;
 	}
 	function sweepPct(s: DetectedSource): number {
 		if (!sweep) return 0;
-		const denom = Math.max(s.count || 0, sweep.total || 0) || sweep.processed || 1;
+		const denom = sweepDenom(s) || sweep.processed || 1;
 		return Math.min(100, Math.round((sweep.processed / denom) * 100));
 	}
 
@@ -152,7 +280,15 @@
 			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
 			{phase === 'scanning' ? 'Scanning this Mac…' : 'Scan this Mac for data'}
 		</button>
-		<p class="scan-sub">Obsidian, Claude Code, Hermes, OpenClaw &amp; your files — found locally, nothing leaves your device.</p>
+		<!-- ⚠️ "— nothing leaves your device." was REMOVED here for the same reason it was removed
+		     from the onboarding consent line (D-069). It was true of the SCAN (detect returns
+		     counts and dates only, never content) but it sits directly above the IMPORT button,
+		     and imported content is read by the chat agent — which is a cloud model whenever one
+		     is selected. An absolute privacy claim next to the action that breaks it is the
+		     defect, not a technicality. This is a DELETION of the absolute clause, the same
+		     operation the operator approved for ImportStep; no new claim was invented, and any
+		     replacement wording is the operator's to write. -->
+		<p class="scan-sub">Obsidian, Claude Code, Hermes, OpenClaw &amp; your files — found locally on this Mac.</p>
 		{#if phase === 'error'}<p class="scan-err">{scanErr}</p>{/if}
 	{:else}
 		{#if importable.length === 0}
@@ -191,21 +327,47 @@
 								<div class="modes" role="group" aria-label="What to import">
 									{#each s.categories as c (c.key)}
 										<button class="seg" class:on={cats[`${s.source}:${c.key}`] !== false}
+											aria-pressed={cats[`${s.source}:${c.key}`] !== false}
 											onclick={() => (cats = { ...cats, [`${s.source}:${c.key}`]: cats[`${s.source}:${c.key}`] === false })}>
 											{c.label.replace(/ &.*/, '')} · {c.count}
 										</button>
 									{/each}
 								</div>
+								<!-- State the scope the user actually chose, next to the choice. The row
+								     headline above is the all-category total and does not move when a
+								     category is switched off (D-070). -->
+								<!-- Suppressed while an earlier job runs: no import can be started from
+								     here until it finishes, so a "Will import …" promise would be a
+								     forward-looking claim next to a live job with a different scope. -->
+								{#if !(s.source === 'local-files' && adopted)}
+									<span class="mode-hint">{nothingSelected(s)
+										? 'Nothing selected — nothing will be imported.'
+										: `Will import ${selectedCount(s).toLocaleString()} file${selectedCount(s) === 1 ? '' : 's'} · ${catNames(s, selectedCats(s))}${isSubset(s, selectedCats(s)) ? ' only' : ''}`}</span>
+								{/if}
 							{/if}
 							{#if s.source === 'local-files' && busy[s.source] && sweep}
 								<span class="res prog">{sweepLabel(s)}</span>
 								<div class="bar"><div class="bar-fill" style="width:{sweepPct(s)}%"></div></div>
+							{:else if s.source === 'local-files' && adopted}
+								<!-- A job the user started EARLIER (before this mount). Every number and
+								     name here comes from the SERVER's own record of that job, never from
+								     the chips above — the chips describe what a NEW import would do. -->
+								<span class="res prog">{adoptedLabel(s)}</span>
+								<div class="bar"><div class="bar-fill" style="width:{adoptedPct()}%"></div></div>
 							{:else if r && r.msg}<span class="res" class:bad={!r.ok}>{r.msg}</span>{/if}
 						</div>
 						{#if s.source === 'local-files' && busy[s.source]}
 							<button class="imp-btn cancel" onclick={stopSweep}>Cancel</button>
+						{:else if s.source === 'local-files' && adopted}
+							<button class="imp-btn cancel" onclick={stopAdopted}>Cancel</button>
 						{:else}
-							<button class="imp-btn" onclick={() => runImport(s)} disabled={busy[s.source] || (r && r.ok && !!r.msg)}>
+							<!-- Disabled with NOTHING selected: an empty selection must never be
+							     sendable, because a request that carries no consent is the exact
+							     shape the server used to answer with "then import everything".
+							     Also disabled while an EARLIER job runs: the server would 409 a
+							     different selection, so offering the click would only produce an
+							     error the user can do nothing useful with. -->
+							<button class="imp-btn" onclick={() => runImport(s)} disabled={busy[s.source] || nothingSelected(s) || (r && r.ok && !!r.msg)}>
 								{#if busy[s.source]}Importing…{:else if r && r.ok && r.msg}✓ Done{:else}Import{/if}
 							</button>
 						{/if}

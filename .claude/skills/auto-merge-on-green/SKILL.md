@@ -9,7 +9,7 @@ description: >-
   mergeable and not a draft. Any check still pending, missing, or failed — or any
   blocking/absent-but-required review — means HOLD, never merge. Security-
   sensitive diffs always require an explicit human approval regardless of CI.
-  Pairs with the autonomous build routine (docs/AUTONOMOUS-ROUTINE.md): the
+  Pairs with the autonomous build routine (the autonomous routine): the
   routine never merges directly — landing to main goes through this gate.
 ---
 

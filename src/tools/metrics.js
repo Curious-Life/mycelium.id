@@ -31,7 +31,7 @@
  * §4.34) and surfaces low_confidence + the science_honesty_footnote inline so
  * the agent has the constraint at tool-call time.
  *
- * Design: docs/MEASUREMENT-PLANE-PR1.5-B3-DESIGN-2026-05-08.md (B3 designed
+ * Design: the measurement-plane PR1.5 design (B3 designed
  * the data layer; D shipped the agent surface that consumes it).
  *
  * @typedef {object} MetricsDomainDeps

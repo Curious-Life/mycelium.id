@@ -14,7 +14,7 @@
 
 import { createHash } from 'node:crypto';
 import { describeProvider } from './harness.js';
-import { autonomyTools, WRITE_AUTONOMOUS_TOOLS } from './autonomy-tools.js';
+import { autonomyTools, WRITE_AUTONOMOUS_TOOLS, OWNER_DESTRUCTIVE_TOOLS } from './autonomy-tools.js';
 import { hydrateHistoryBlock } from './history.js';
 import { agentDisplayName } from '../portal-chat.js';
 
@@ -54,6 +54,10 @@ export async function readAgentName(db, userId) {
  * @param {string}   opts.userMessage
  * @param {string}   [opts.systemExtra]   role preamble after "Your name is X."
  * @param {string[]} [opts.enabledTools]  gated autonomy tools this turn may use
+ * @param {boolean}  [opts.ownerTrusted]  this turn is a token-proved owner-authored 1:1 turn.
+ *                    The ONLY thing that makes OWNER_DESTRUCTIVE_TOOLS (`forget`) grantable —
+ *                    naming it in enabledTools is not enough. Defaults false (fail-closed), so
+ *                    the scheduler / reflection cycles / narration walk can never destroy data.
  * @param {Array}    [opts.history]       hydrated [{role,content}] (chronological)
  * @param {number}   [opts.recentN]       getContext recentMessages (default by model size)
  * @param {boolean}  [opts.localTools]    allow tools even on a local model (default false)
@@ -99,7 +103,7 @@ const isUsNonExempt = (cfg) => /^us/.test(cfg?.jurisdiction || 'us-standard') &&
 
 export async function runAgentTurn(
   { db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, signal, hooks } = {},
-  { userMessage, systemExtra = '', enabledTools = [], history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null, inferenceTask = 'harness', maxIterations, webSearch = false, harnessMode = 'native', sessionId = null, resume = false, ttfbMs, idleMs, deliverTool = null } = {},
+  { userMessage, systemExtra = '', enabledTools = [], isCycle = false, history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null, inferenceTask = 'harness', maxIterations, webSearch = false, harnessMode = 'native', sessionId = null, resume = false, ttfbMs, idleMs, deliverTool = null, humanTriggered = false, ownerTrusted = false } = {},
 ) {
   // CLI engine: the `claude` session OWNS the conversation memory + in-session compaction,
   // so we do NOT hydrate history into the preamble (portal-chat.js does the same). The tool
@@ -236,7 +240,21 @@ export async function runAgentTurn(
   // Tools gated on model CAPABILITY (model-profile probe), not geography: a tool-capable
   // model — cloud or a large local one — gets the autonomy grant; a no-tool model gets
   // none. `localTools` stays an explicit override for callers that force tools on local.
-  const granted = (toolsCapable || localTools) ? autonomyTools(tools, enabledTools) : [];
+  // THREE flags travel with the TURN, not the surface. They are independent NARROWING
+  // conditions gating three disjoint tiers — none of them relaxes another:
+  //   `humanTriggered` (D-063) — did an inbound human message start this turn? That is what
+  //     licenses the self-arming tools (schedule_task). The channel endpoint passes true (an
+  //     inbound DM IS the human's message); the scheduler and the narration walk do not, so a
+  //     turn no human started can never arm the agent's next turn.
+  //   `isCycle` (D-076) — unlocks CYCLE_AUTONOMOUS_TOOLS and nothing else. It originates from
+  //     the task row's immutable created_by (scheduler.js → cycleTurnOpts), so the model cannot
+  //     set it; every other caller omits it. A cycle is never humanTriggered, so unlocking its
+  //     tools does not license self-arming.
+  //   `ownerTrusted` (D-040 ↻1) — is the human the vault OWNER, proven by the per-boot daemon
+  //     token? Required TOGETHER WITH humanTriggered for the destructive tier (forget). A cycle
+  //     is never ownerTrusted, so a cycle can never forget; an owner DM is never a cycle.
+  // All fail-closed on their parameter defaults — see autonomy-tools.js.
+  const granted = (toolsCapable || localTools) ? autonomyTools(tools, enabledTools, { humanTriggered, isCycle, ownerTrusted }) : [];
   const grantedNames = new Set(granted.map((t) => t.name));
   // The model that is ACTUALLY serving this turn right now. Starts as the primary and
   // follows the provider chain if the loop falls back mid-turn (transient faults only —
@@ -259,7 +277,10 @@ export async function runAgentTurn(
     // Audit autonomous vault WRITES (RT2-H2): hash-only, fire-and-forget — the audit must
     // NEVER break or block the turn. Only fires for the gated write tools + when a sink
     // is provided (owner-trusted turns wire it; see channel-turn.js).
-    if (typeof onWrite === 'function' && WRITE_AUTONOMOUS_TOOLS.has(toolName)) {
+    // Destructive tools ride the SAME write ledger — a channel `forget` must be as traceable
+    // as a channel `remember` (CLAUDE.md §8). Missing this was why the new grant would
+    // otherwise widen capability without widening the audit.
+    if (typeof onWrite === 'function' && (WRITE_AUTONOMOUS_TOOLS.has(toolName) || OWNER_DESTRUCTIVE_TOOLS.has(toolName))) {
       try { Promise.resolve(onWrite({ tool: toolName, argHash: argHash(args) })).catch(() => {}); } catch { /* never throw */ }
     }
     return typeof out === 'string' ? out : JSON.stringify(out);

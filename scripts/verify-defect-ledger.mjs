@@ -4,7 +4,7 @@
  *
  * WHY THIS GATE EXISTS
  * --------------------
- * `docs/QA-DEFECT-LEDGER.md` is the permanent status record for every QA defect. Its whole value
+ * the QA defect ledger is the permanent status record for every QA defect. Its whole value
  * is that it CANNOT quietly drift: sprint plans renumber defects every cycle (QA6 `P1.6` became
  * QA7 `P3.1` — same defect, second appearance, one failed fix in between, invisible in both
  * plans), and a status doc nobody checks is a status doc that lies.

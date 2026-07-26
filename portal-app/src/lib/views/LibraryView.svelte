@@ -16,6 +16,15 @@
 		type LiveConnectionState,
 	} from '$lib/document-live';
 	import { applyMorph, resetMorph } from '$lib/markdown-morph';
+	import { createAutosaver } from '$lib/editor/autosave.js';
+	import {
+		canEditDoc,
+		bufferOwnsDoc,
+		shouldResumeBuffer,
+		canLeaveDoc,
+		isSaveStuck,
+		classifySaveResult,
+	} from '$lib/editor/edit-policy.js';
 	import { wrapHtmlForLive, mountLiveIframe, type LiveIframeHandle } from '$lib/iframe-live';
 	import { isSvgDoc, svgToDataUrl, fileKind } from '$lib/library/preview';
 	// MarkdownEditor (CodeMirror) is lazy-loaded — see ensureEditor() — so just
@@ -95,6 +104,11 @@
 	let documents = $state<DocListItem[]>([]);
 	let mediaItems = $state<MediaItem[]>([]);
 	let selectedMedia = $state<MediaItem | null>(null);
+	// A voice note whose WAV transcode could not be completed reaches the browser as a FAILED
+	// transfer (the serve route refuses to finish a body it cannot fill), which surfaces here as
+	// an `error` on the player. Saying so is the point: a recording that stops early must never
+	// look like a recording that ended.
+	let mediaPlaybackError = $state(false);
 	let folders = $state<Folder[]>([]);
 	let selectedDoc = $state<DocFull | null>(null);
 	let loadingDoc = $state(false);
@@ -174,14 +188,146 @@
 	// Autosave — the writing sanctuary has no Save button. Edits to `editContent`
 	// debounce into a background save; a quiet whisper reflects state. HTML docs
 	// keep the explicit textarea path; markdown docs write through MarkdownEditor.
-	let saveState = $state<'idle' | 'saving' | 'saved'>('idle');
-	let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
-	const AUTOSAVE_DEBOUNCE_MS = 800;
+	// `saveState` drives the ONLY save affordance the user sees — the whisper in
+	// the header. 'unsaved' is new (D-052): a transient save failure no longer
+	// throws an error box, so the header has to carry that state honestly instead.
+	let saveState = $state<'idle' | 'unsaved' | 'saving' | 'saved'>('idle');
+	// ── D-052: single-flight, self-draining autosave ──────────────────
+	// The state machine lives in $lib/editor/autosave.js so its invariants are
+	// executable — `npm run verify:editor-autosave` drives it with a scripted
+	// transport. Read that file's header for the four invariants; this component
+	// only supplies the host bindings (buffer, ownership, transport, state sink).
+	//
+	// The document the edit buffer BELONGS to, pinned when editing starts. Without
+	// it a save scheduled for doc A could land on doc B after a switch — the old
+	// code read `selectedDoc.path` at FIRE time, not at TYPE time, so A's text
+	// could be written over B (silent cross-document corruption). `getPersisted()`
+	// returns null whenever this no longer matches the open doc, which makes the
+	// autosaver refuse the write outright.
+	let editBufferPath = $state<string | null>(null);
+	// The path whose FULL content we have actually loaded from the server. The list
+	// row carries no content, so `selectedDoc.content` is '' until the detail GET
+	// lands — editing that placeholder and saving it would wipe the real document.
+	// Nothing may be edited or saved unless this matches the open doc.
+	let contentLoadedPath = $state<string | null>(null);
+	// Failure of the OPEN DOCUMENT's detail fetch. Deliberately separate from the
+	// list-level `loadError`, whose banner replaces the entire library and whose
+	// retry reloads the list — the wrong affordance for one unreadable document.
+	let docLoadError = $state<string | null>(null);
+	// Reactive mirror of the autosaver's consecutive-failure count (the machine's
+	// own counter is a plain closure variable, invisible to Svelte).
+	let autosaverFailures = $state(0);
 
-	function scheduleAutosave() {
-		saveState = 'idle';
-		if (autosaveTimer) clearTimeout(autosaveTimer);
-		autosaveTimer = setTimeout(() => { void autosave(); }, AUTOSAVE_DEBOUNCE_MS);
+	const autosaver = createAutosaver({
+		getBuffer: () => editContent,
+		// Ownership + load gate, both decided by `bufferOwnsDoc` (edit-policy.js) so
+		// the rule is executable rather than re-derived inline here.
+		getPersisted: () => {
+			if (!selectedDoc) return null;
+			if (!bufferOwnsDoc({ editBufferPath, openPath: selectedDoc.path, contentLoadedPath })) return null;
+			return selectedDoc.content ?? '';
+		},
+		save: async (content) => {
+			const doc = selectedDoc;
+			// Re-check ownership and capture path/title BEFORE the first await, so a
+			// doc switch racing this call can never redirect the write. Reporting
+			// "true" here is NOT a claim that a write happened — it means "there is
+			// nothing legitimate to write, stop cleanly". Returning false instead would
+			// arm an endless retry against a doc we no longer own. The machine only
+			// reaches this after isDirty(), which already checks ownership, so this is
+			// the second, defence-in-depth layer.
+			if (!doc || !bufferOwnsDoc({ editBufferPath, openPath: doc.path, contentLoadedPath })) return true;
+			const path = doc.path;
+			const title = doc.title;
+			// Self-write echo guard: the live broadcaster fires a doc-updated for
+			// this write within ~300ms; flagging the path tells our SSE handler to
+			// ignore it.
+			markSelfWrite(path);
+			try {
+				const res = await api('/portal/documents', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ path, title, content }),
+				});
+				const verdict = classifySaveResult({ ok: res.ok, status: res.status });
+				if (verdict === 'ok') {
+					savePermanentlyRejected = false;
+					// Advance the persisted marker only if this is still the same open doc.
+					if (selectedDoc && selectedDoc.path === path) {
+						selectedDoc = { ...selectedDoc, content };
+					}
+					return true;
+				}
+				// A 4xx (other than 408/429) will keep being refused however often we
+				// resend, so flag it: we stop hammering and surface the escape hatch
+				// instead of resubmitting the user's plaintext every 10s forever. The
+				// buffer is still kept — 'permanent' never means discard.
+				if (verdict === 'permanent') {
+					// The server will refuse this request however often we resend it, so
+					// STOP — resubmitting the user's plaintext every 10s to an endpoint
+					// that already rejected it is both futile and a needless repeated
+					// transmission of vault content. 'permanent' never means discard: the
+					// buffer stays, the header keeps reading "Unsaved", and the escape
+					// hatch (Copy text / Discard) is latched on.
+					savePermanentlyRejected = true;
+					leaveRefused = true;
+					return 'permanent';
+				}
+				return false;
+			} catch (e) {
+				// Never log buffer text — only the failure reason.
+				console.error('[Library] Autosave attempt failed:', e instanceof Error ? e.message : e);
+				return false;
+			}
+		},
+		onState: (s) => { saveState = s; },
+		onFailures: (n) => { autosaverFailures = n; },
+	});
+
+	const scheduleAutosave = () => autosaver.schedule();
+	const flushSave = () => autosaver.flush();
+
+	// After this many consecutive failed attempts the trouble is no longer a
+	// transient hiccup, so we surface an escape hatch (Copy text / Discard) next to
+	// the "Unsaved" whisper. We keep RETRYING regardless — giving up would be the
+	// only way to lose the buffer — but the user must never be trapped in a document
+	// they cannot leave. 3 attempts ≈ 800ms + 1.6s + 3.2s of quiet retrying first.
+	const SAVE_STUCK_AFTER_FAILURES = 3;
+	// A REFUSED leave (or a permanent rejection) LATCHES the hatch on, regardless of
+	// the failure count. The count alone is starvable: `schedule()` zeroes it on
+	// every keystroke, so someone typing steadily on a dead connection could be
+	// refused an exit and never be offered a way out. Latched — only an explicit
+	// release (clean exit / discard / new buffer) clears it.
+	let leaveRefused = $state(false);
+	let savePermanentlyRejected = $state(false);
+	const saveStuck = $derived(isSaveStuck({
+		failures: autosaverFailures,
+		threshold: SAVE_STUCK_AFTER_FAILURES,
+		leaveRefused: leaveRefused || savePermanentlyRejected,
+	}));
+
+
+	// Copy the unsaved buffer out so a stuck save can never mean lost writing.
+	async function copyEditBufferToClipboard() {
+		try {
+			await navigator.clipboard.writeText(editContent);
+			toasts.success?.('Your unsaved text is on the clipboard.');
+		} catch {
+			toasts.error('Could not reach the clipboard — select the text and copy it manually.');
+		}
+	}
+
+	// The ONLY user-facing way to abandon a stuck buffer. Explicit, labelled, and
+	// never automatic — nothing else in this component discards unsaved text.
+	function discardStuckEdit() {
+		editBufferPath = null;
+		autosaver.cancel();
+		leaveRefused = false;
+		savePermanentlyRejected = false;
+		editing = false;
+		editContent = '';
+		showRawMarkdown = false;
+		agentUpdatedWhileEditing = false;
 	}
 
 	function onEditorChange(next: string) {
@@ -189,57 +335,115 @@
 		scheduleAutosave();
 	}
 
-	async function autosave() {
-		if (!selectedDoc) return;
-		if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; }
-		const path = selectedDoc.path;
-		const content = editContent;
-		// Nothing to do if the buffer already matches what's persisted.
-		if (content === (selectedDoc.content ?? '')) { saveState = 'saved'; return; }
-		saveState = 'saving';
-		// Self-write echo guard: the live broadcaster fires a doc-updated for this
-		// write within ~300ms; flagging the path tells our SSE handler to ignore it.
-		markSelfWrite(path);
-		try {
-			const res = await api('/portal/documents', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ path, title: selectedDoc.title, content }),
-			});
-			if (res.ok) {
-				selectedDoc = { ...selectedDoc, content };
-				saveState = 'saved';
-			} else {
-				// Don't fail silently — your edits aren't saved; tell you so.
-				saveState = 'idle';
-				toasts.error(`Couldn't save your changes (${res.status}). Your edits are still here — try again.`);
-			}
-		} catch (e) {
-			console.error('[Library] Autosave failed:', e);
-			saveState = 'idle';
-			toasts.error('Couldn’t save your changes — check your connection. Your edits are still here.');
-		}
-	}
-
 	// In-place tab navigation (workspace openInActiveTab) can UNMOUNT this view
 	// with unsaved edits — without this flush, keystrokes would be lost. The guard
-	// is `editing` (DIRTINESS scope), deliberately NOT `autosaveTimer` (a pending
-	// timer): after a FAILED autosave the timer is already null while the buffer
-	// still differs from what's persisted — the failure toast promises "your edits
-	// are still here", so the flush must retry on destroy too. autosave() no-ops
-	// when the buffer already matches persisted, reads the buffer synchronously,
-	// and the request outlives the component. Not unconditional: outside edit mode
-	// editContent can be stale ('' or a previous doc's buffer).
+	// is `editing` (DIRTINESS scope), deliberately NOT a pending timer: after a
+	// FAILED save the buffer still differs from what's persisted, so the flush must
+	// retry on destroy too. flushSave() no-ops when the buffer already matches
+	// persisted. Not unconditional: outside edit mode editContent can be stale ('' or
+	// a previous doc's buffer) — `editBufferPath` is the second guard.
+	//
+	// Dispatch timing: the buffer, path and title are captured SYNCHRONOUSLY (before
+	// any await suspends), so the write is correctly bound even though the component
+	// is going away. The `fetch` itself is not always synchronous — with the
+	// encrypted portal channel configured, `api()` awaits a dynamic import first
+	// (api.ts → getSecureModules) — but a SPA unmount doesn't stop microtasks, so the
+	// request still goes out and outlives the component. A full page unload is the
+	// one case nothing can save; that was true before this change too.
+	//
+	// KNOWN RESIDUAL, deliberately not "fixed": if that final flush FAILS (offline at
+	// the moment of an unmount), the edit is lost — `dispose()` suppresses the retry
+	// because a retry from a destroyed component can overwrite text a remounted view
+	// has since saved. This is the same outcome as before this change, and it is the
+	// ONLY remaining loss path; every other exit (Done, Back, doc-switch,
+	// folder-change) flushes and refuses to leave.
+	// A sessionStorage rescue was built for this and then REMOVED: it wrote unsaved
+	// vault plaintext to unencrypted browser storage (CLAUDE.md §1) with no sweep on
+	// logout, and on recovery it auto-saved the stash over whatever the server had
+	// gained meanwhile — trading a rare silent loss for a silent overwrite plus a new
+	// at-rest plaintext surface. Any future rescue must be encrypted, swept on
+	// lock/logout, and must ASK before writing rather than auto-saving.
 	onDestroy(() => {
-		if (editing) void autosave();
+		if (editing) void flushSave();
+		// Kill the retry timer. Without this an orphaned retry keeps firing from a
+		// destroyed component, closed over ITS buffer — and if the user reopens the
+		// Library and saves, the orphan can land afterwards and overwrite the newer
+		// text. Any request already on the wire still completes.
+		autosaver.dispose();
 	});
 
 	// Exit editing — flush any pending autosave first so no keystroke is lost.
+	// Does NOT leave edit mode while text is still owed to the server. Leaving
+	// would strand the buffer: the "Unsaved" whisper lives inside `{#if editing}`,
+	// and the next close would unpin `editBufferPath` and turn the armed retry into
+	// a permanent no-op — a silent loss. Staying in edit mode keeps the buffer, the
+	// indicator, and the retry all alive until the save actually lands.
 	async function finishEditing() {
-		await autosave();
+		await flushSave();
+		if (autosaver.isDirty()) {
+			// Still retrying — stay put so the buffer, the "Unsaved" whisper and the
+			// armed retry all survive. Say so, or the button reads as broken (nothing
+			// on screen changes: the whisper already said "Unsaved").
+			leaveRefused = true;
+			toasts.error("Still saving your changes — staying here so nothing is lost. Give it a moment, or copy your text out.");
+			return;
+		}
 		editing = false;
 		showRawMarkdown = false;
 		agentUpdatedWhileEditing = false;
+		// UNPIN once clean. Leaving the buffer pinned after a successful exit makes a
+		// stale `editContent` look authoritative: an agent rewrite then lands via SSE
+		// (allowed, since `editing` is false), `isDirty()` flips true against the
+		// agent's new content, and both the editor's resume shortcut AND the checkbox
+		// pre-flush would write our stale text back over the agent's work. A clean
+		// exit owns nothing.
+		releaseEditBuffer();
+	}
+
+	// Drop the edit buffer and its pin. Only ever called when the buffer is clean
+	// (finishEditing) or the user explicitly abandoned it — never as a side effect
+	// of closing something.
+	function releaseEditBuffer() {
+		editBufferPath = null;
+		editContent = '';
+		autosaver.reset();
+		leaveRefused = false;
+		// Must be cleared with the buffer. Left latched, `saveStuck` stays true and the
+		// one-click Discard button renders next to "Unsaved" on every keystroke of a
+		// perfectly healthy save — an unconfirmed data-loss affordance offered during
+		// normal typing.
+		savePermanentlyRejected = false;
+	}
+
+	// Close the open document. Always unpins `editBufferPath` alongside `editing`
+	// so a stale buffer can never be written to whatever doc is opened next — the
+	// two must move together, which is why every close goes through here.
+	function closeOpenDoc() {
+		selectedDoc = null;
+		editing = false;
+		editBufferPath = null;
+		contentLoadedPath = null;
+		autosaver.reset();
+		leaveRefused = false;
+	}
+
+	// Gate on leaving the open document (switch / back). Unpinning the buffer is
+	// what makes a later retry a no-op, so we must not unpin while text is still
+	// owed to the server: flush first, and REFUSE the close if it didn't land.
+	// Fail-closed — the doc stays open with the buffer intact and the retry armed,
+	// rather than closing and dropping the edit. This is the one save message the
+	// user still gets, and only here: your text is about to go out of view, so
+	// silence would be the dangerous choice. The transient mid-typing hiccup that
+	// used to raise an error box (D-052) never reaches this path.
+	async function canLeaveOpenDoc(): Promise<boolean> {
+		if (!editing) return true;
+		await flushSave();
+		if (canLeaveDoc({ editing, dirtyAfterFlush: autosaver.isDirty() })) return true;
+		// Refused. Reveal the Copy text / Discard hatch so this can never become a
+		// door the user cannot open.
+		leaveRefused = true;
+		toasts.error("Couldn't save your changes yet — still retrying. Your edits are safe here; give it a moment, or copy them out.");
+		return false;
 	}
 
 	// New document
@@ -423,8 +627,9 @@
 	function patchListRemove(path: string) {
 		documents = documents.filter((d) => d.path !== path);
 		if (selectedDoc?.path === path) {
-			selectedDoc = null;
-			editing = false;
+			// The doc was deleted server-side — there is nothing left to save it to,
+			// so drop the buffer rather than resurrecting a deleted document.
+			closeOpenDoc();
 		}
 	}
 
@@ -433,9 +638,15 @@
 		const current = activeFolderId;
 		if (prevFolderId !== undefined && current !== prevFolderId) {
 			prevFolderId = current;
-			selectedDoc = null;
-			editing = false;
-			loadDocuments();
+			// The folder list always reloads, but closing the OPEN DOC goes through
+			// the same guard as Back / doc-switch. A fire-and-forget flush here was a
+			// silent-loss path: flush() cancels the armed backoff retry to make its
+			// one attempt, and the immediately-following close unpinned the buffer, so
+			// on failure nothing re-armed and the text was gone with no notice.
+			void (async () => {
+				if (await canLeaveOpenDoc()) closeOpenDoc();
+				loadDocuments();
+			})();
 		}
 	});
 
@@ -585,8 +796,28 @@
 	}
 
 	async function selectDoc(doc: DocListItem, updateParams = true) {
+		// Switching away from a doc being edited: persist its buffer FIRST, and
+		// abort the switch if that didn't succeed (see canLeaveOpenDoc).
+		if (editing && editBufferPath && editBufferPath !== doc.path) {
+			if (!(await canLeaveOpenDoc())) return;
+		}
 		loadingDoc = true;
 		editing = false;
+		editBufferPath = null;
+		// `selectedDoc.content` starts as a PLACEHOLDER — the list row carries no
+		// content, so it is '' until the detail GET lands. Editing that placeholder
+		// would make the buffer look like an empty document and the first save would
+		// write '' over the real text. `contentLoadedPath` is the proof that the
+		// content we hold actually came from the server for THIS path; until it
+		// matches, editing is refused and no save can be issued.
+		contentLoadedPath = null;
+		autosaver.reset();
+		leaveRefused = false;
+		savePermanentlyRejected = false;
+		// Doc-scoped, NOT the list-level `loadError`: that one replaces the whole
+		// library with "Could not load library" and its Try-again reloads the LIST,
+		// which is the wrong thing to offer for a single failed document.
+		docLoadError = null;
 		selectedDoc = { ...doc, content: '' };
 		// Phase C: the workspace owns the URL — record the open doc in this tab's
 		// params; the store mirrors it to /library?doc=… and restores it on reload.
@@ -595,11 +826,20 @@
 			const res = await api(`/portal/documents/${doc.path}`);
 			if (res.ok) {
 				const data = await res.json();
-				selectedDoc = { ...doc, ...data.document };
+				const loaded: DocFull = { ...doc, ...data.document };
+				selectedDoc = loaded;
+				contentLoadedPath = doc.path;
+			} else {
+				// Fail closed: we do NOT know this document's content, so we must not
+				// let it be edited — a save would destroy whatever is really stored.
+				docLoadError = `Couldn't open this document (${res.status}). It can't be edited until it loads.`;
 			}
-		} catch {}
+		} catch {
+			docLoadError = "Couldn't open this document — check your connection. It can't be edited until it loads.";
+		}
 		loadingDoc = false;
 	}
+
 
 	// Phase C deep-link / reload restore: when this tab's `doc` param names a
 	// document, open it. Guarded against looping with selectDoc's own setParams.
@@ -612,13 +852,30 @@
 
 	function startEditing() {
 		if (!selectedDoc) return;
+		// Refuse to edit content we haven't actually loaded (see selectDoc): the
+		// placeholder is '', and saving that would wipe the stored document.
+		if (!canEditDoc({ contentLoadedPath, openPath: selectedDoc.path })) return;
 		void ensureEditor(); // lazy-load CodeMirror on first edit
-		editContent = selectedDoc.content || '';
+		// RESUME, don't reset — but ONLY when this doc's buffer is genuinely still
+		// owed (see shouldResumeBuffer). Re-seeding a dirty buffer would overwrite the
+		// user's text with the older persisted text; resuming a CLEAN/released buffer
+		// would write text that may predate an agent's rewrite back over their work.
+		const resuming = shouldResumeBuffer({
+			editBufferPath,
+			openPath: selectedDoc.path,
+			dirty: autosaver.isDirty(),
+		});
+		if (!resuming) {
+			editContent = selectedDoc.content || '';
+			// Pin the buffer to THIS doc — every save is refused unless it still matches.
+			editBufferPath = selectedDoc.path;
+			autosaver.reset();
+			leaveRefused = false;
+		}
 		editing = true;
 		// Default to the live writing surface (WYSIWYG); raw markdown is one
 		// quiet toggle away for power editing.
 		showRawMarkdown = false;
-		saveState = 'idle';
 		agentUpdatedWhileEditing = false;
 	}
 
@@ -628,6 +885,13 @@
 		if (!selectedDoc) return;
 		editing = false;
 		editContent = '';
+		// Explicit user discard — unpin the buffer and cancel any armed retry so a
+		// pending autosave can't write the abandoned text back over the reload.
+		// This is the ONLY place allowed to drop a dirty buffer: the user asked for
+		// the agent's version instead. Every other close path flushes first.
+		editBufferPath = null;
+		autosaver.cancel();
+		leaveRefused = false;
 		showRawMarkdown = false;
 		agentUpdatedWhileEditing = false;
 		await reloadCurrentDoc();
@@ -703,6 +967,13 @@
 			// flat shape just in case some upstream proxy unwraps.
 			const next = fresh?.document ?? fresh;
 			const nextContent = typeof next?.content === 'string' ? next.content : null;
+			// This IS an authoritative content load, so keep the invariant
+			// "contentLoadedPath is set by every authoritative load" true by
+			// construction rather than by a reachability argument.
+			if (nextContent !== null) {
+				contentLoadedPath = selectedDoc.path;
+				docLoadError = null;
+			}
 			if (nextContent !== null && nextContent !== selectedDoc.content) {
 				selectedDoc = { ...selectedDoc, ...next };
 				flashPulse();
@@ -757,6 +1028,14 @@
 				const fresh = await res.json();
 				if (!selectedDoc || selectedDoc.path !== path) return;
 				const newContent = fresh?.document?.content ?? fresh?.content;
+				if (typeof newContent === 'string') {
+					// Authoritative load — keep the invariant that every such load marks
+					// the path loaded and clears a stale doc error. Without this, a doc
+					// whose first GET failed stays behind the error branch (and stays
+					// uneditable) even after SSE has fetched its real content.
+					contentLoadedPath = selectedDoc.path;
+					docLoadError = null;
+				}
 				if (typeof newContent === 'string' && newContent !== selectedDoc.content) {
 					selectedDoc = { ...selectedDoc, ...(fresh.document ?? fresh) };
 					flashPulse();
@@ -778,9 +1057,14 @@
 				refetch();
 			},
 			onDelete: () => {
-				if (selectedDoc?.path === path) {
-					selectedDoc = null;
-					editing = false;
+				if (selectedDoc?.path !== path) return;
+				// Someone else (an agent, another device) deleted this doc while it was
+				// open. There is nothing left to save into, so the buffer goes — but if
+				// the user was mid-paragraph, say so rather than vanishing their text.
+				const hadUnsavedText = editing && autosaver.isDirty();
+				closeOpenDoc();
+				if (hadUnsavedText) {
+					toasts.error('This document was deleted elsewhere while you were writing — your unsaved text could not be kept.');
 				}
 			},
 			onConnectionState: (state) => { liveConnectionState = state; },
@@ -883,17 +1167,32 @@
 		});
 	}
 
-	// Handle checkbox click in read-only preview mode
+	// Handle checkbox click in read-only preview mode.
+	// This is the ONE write to /portal/documents that doesn't come from the
+	// autosaver, so it has to respect the same single-flight rule — otherwise a
+	// checkbox toggle can race an editor save for the same path and one of the two
+	// silently loses (found in adversarial review of D-052).
+	let checkboxWriteInFlight = false;
 	async function handleReadOnlyCheckboxClick(checkboxIndex: number) {
 		if (!selectedDoc?.content) return;
-		const updated = toggleCheckboxInContent(selectedDoc.content, checkboxIndex);
+		// Only ever act on content we actually loaded — never a list placeholder.
+		if (contentLoadedPath !== selectedDoc.path) return;
+		if (checkboxWriteInFlight) return;
+		// If the editor still owes text for this doc, IT owns the content — refuse.
+		// Flushing first was wrong: the pending buffer may predate content the server
+		// has since gained (an agent rewrite), so the flush would write stale text and
+		// then the toggle would be applied on top of it, replacing the newer document.
+		if (autosaver.isDirty()) return;
+		const before = selectedDoc.content;
+		const updated = toggleCheckboxInContent(before, checkboxIndex);
 		selectedDoc = { ...selectedDoc, content: updated };
 		// Auto-save — flag self-write so the live broadcaster's echo
 		// for this exact change doesn't fight the local optimistic
 		// update we just applied.
 		markSelfWrite(selectedDoc.path);
+		checkboxWriteInFlight = true;
 		try {
-			await api('/portal/documents', {
+			const res = await api('/portal/documents', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
@@ -902,8 +1201,22 @@
 					content: updated,
 				}),
 			});
+			if (!res.ok) {
+				// Fail closed: roll the optimistic toggle back so the tick can't claim a
+				// state the vault never stored.
+				if (selectedDoc && selectedDoc.content === updated) {
+					selectedDoc = { ...selectedDoc, content: before };
+				}
+				toasts.error(`Couldn't update that checkbox (${res.status}).`);
+			}
 		} catch (e) {
-			console.error('[Library] Auto-save failed:', e);
+			console.error('[Library] Checkbox write failed:', e instanceof Error ? e.message : e);
+			if (selectedDoc && selectedDoc.content === updated) {
+				selectedDoc = { ...selectedDoc, content: before };
+			}
+			toasts.error("Couldn't update that checkbox — check your connection.");
+		} finally {
+			checkboxWriteInFlight = false;
 		}
 	}
 
@@ -989,7 +1302,7 @@
 			insertFormat('[', '](url)');
 		} else if (mod && e.key === 's') {
 			e.preventDefault();
-			void autosave();
+			void flushSave(); // explicit save → skip the debounce, drain now
 		}
 	}
 
@@ -1187,10 +1500,7 @@
 			const res = await api(`/portal/documents/${encodedPath}`, { method: 'DELETE' });
 			if (res.ok) {
 				documents = documents.filter(d => d.path !== doc.path);
-				if (selectedDoc?.path === doc.path) {
-					selectedDoc = null;
-					editing = false;
-				}
+				if (selectedDoc?.path === doc.path) closeOpenDoc();
 				closeContextMenu();
 			} else {
 				console.error('[Library] Delete failed:', res.status);
@@ -1284,7 +1594,7 @@
 		// If this doc is open + dirty, flush the pending autosave to the OLD path
 		// first (it still exists pre-rename) so no keystroke is lost; we re-point
 		// selectedDoc.path on success so later autosaves target the new path.
-		if (selectedDoc?.path === oldPath) await autosave();
+		if (selectedDoc?.path === oldPath) await flushSave();
 		// The rename broadcasts remove(old) + upsert(new); swallow BOTH echoes.
 		markSelfWrite(oldPath);
 		markSelfWrite(newPath);
@@ -1298,6 +1608,11 @@
 				documents = documents.map((d) => (d.path === oldPath ? { ...d, path: newPath } : d));
 				if (selectedDoc?.path === oldPath) {
 					selectedDoc = { ...selectedDoc, path: newPath };
+					// Re-pin the edit buffer to the new identity IN LOCKSTEP. If this
+					// is missed, isDirty() sees buffer(old) != open(new) and silently
+					// refuses every later save — the user would keep typing into a
+					// buffer that never persists.
+					if (editBufferPath === oldPath) editBufferPath = newPath;
 					setParams?.({ doc: newPath });
 				}
 				showChangeLink = false;
@@ -1354,6 +1669,12 @@
 				void loadDocuments(); // refresh the list in the background
 				if (created?.path) {
 					selectedDoc = { ...created };
+					// The create response IS authoritative content for this path (we
+					// just wrote it), so mark it loaded. Without this, startEditing()'s
+					// load gate refuses and the user lands on a read-only empty doc with
+					// a disabled Edit button — the very "editor never opened" failure the
+					// comment above describes.
+					contentLoadedPath = created.path;
 					setParams?.({ doc: created.path });
 					startEditing();
 				}
@@ -1632,7 +1953,7 @@
 				if (res.ok) documents = documents.filter((x) => x.path !== d.path);
 			} catch (e) { console.error('[Library] bulk delete failed:', e); }
 		}
-		if (selectedDoc && selectedPaths.has(selectedDoc.path)) { selectedDoc = null; editing = false; }
+		if (selectedDoc && selectedPaths.has(selectedDoc.path)) closeOpenDoc();
 		clearSelection();
 		bulkBusy = false;
 	}
@@ -1729,7 +2050,7 @@
 			<div class="flex items-center justify-between gap-3">
 				<div class="flex items-center gap-2 min-w-0 flex-1">
 					<button
-						onclick={() => { selectedDoc = null; editing = false; setParams?.({ doc: null }); }}
+						onclick={async () => { if (!(await canLeaveOpenDoc())) return; closeOpenDoc(); setParams?.({ doc: null }); }}
 						class="p-1.5 -ml-1.5 rounded-lg text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-elevated)] transition-colors flex-shrink-0"
 						aria-label="Back to library"
 						title="Back to library"
@@ -1798,11 +2119,32 @@
 							 header (no separate footer bar) — edits persist automatically,
 							 Done flushes + exits. -->
 						<span
-							class="hidden sm:inline text-xs text-[var(--color-text-tertiary)] transition-opacity mr-1 select-none"
+							class="hidden sm:inline text-xs transition-opacity mr-1 select-none {saveState === 'unsaved' ? 'text-[var(--color-text-secondary)]' : 'text-[var(--color-text-tertiary)]'}"
 							class:opacity-0={saveState === 'idle'}
 						>
-							{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : ''}
+							{saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved' : saveState === 'unsaved' ? 'Unsaved' : ''}
 						</span>
+						{#if saveState === 'unsaved' && saveStuck}
+							<!-- Escape hatch. We refuse to close a doc whose buffer hasn't
+								 persisted (that would strand the text), which without this
+								 could trap the user in the document while the vault is
+								 unreachable. Copy takes the text somewhere safe; Discard is
+								 the explicit, labelled way out — never automatic. -->
+							<button
+								onclick={copyEditBufferToClipboard}
+								class="px-2.5 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg border border-[var(--color-border)] transition-colors"
+								title="Copy your unsaved text to the clipboard"
+							>
+								Copy text
+							</button>
+							<button
+								onclick={discardStuckEdit}
+								class="px-2.5 py-1.5 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-danger,#b4453c)] rounded-lg border border-[var(--color-border)] transition-colors"
+								title="Stop trying to save and discard your unsaved changes"
+							>
+								Discard
+							</button>
+						{/if}
 						<button
 							onclick={finishEditing}
 							class="px-3 py-1.5 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] rounded-lg border border-[var(--color-border)] hover:border-[var(--color-text-tertiary)] transition-colors"
@@ -1813,9 +2155,10 @@
 					{:else}
 						<button
 							onclick={startEditing}
-							class="p-1.5 hover:bg-azure/20 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-azure"
+							disabled={contentLoadedPath !== selectedDoc.path}
+							class="p-1.5 hover:bg-azure/20 rounded-lg transition-colors text-[var(--color-text-secondary)] hover:text-azure disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
 							aria-label="Edit"
-							title="Edit document"
+							title={contentLoadedPath === selectedDoc.path ? 'Edit document' : 'Still loading this document…'}
 						>
 							<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
 								<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
@@ -2073,6 +2416,21 @@
 					<div class="flex items-center justify-center py-12">
 						<div class="w-8 h-8 border-2 border-aurum/30 border-t-aurum rounded-full animate-spin"></div>
 					</div>
+				{:else if docLoadError}
+					<!-- This DOCUMENT couldn't be read. Scoped here on purpose: the
+						 library list is fine, so we must not replace it with a
+						 whole-library error whose retry reloads the wrong thing.
+						 Editing stays refused — we don't know the real content, and
+						 saving a guess would destroy it. -->
+					<div class="flex flex-col items-center justify-center py-12 gap-3 text-center">
+						<p class="text-sm text-[var(--color-text-secondary)] max-w-sm">{docLoadError}</p>
+						<button
+							onclick={() => selectedDoc && selectDoc(selectedDoc, false)}
+							class="px-3 py-1.5 text-sm rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-tertiary)] transition-colors"
+						>
+							Try again
+						</button>
+					</div>
 				{:else if editing}
 					<!-- ═══ EDITOR MODE ═══ -->
 					<div class="flex flex-col gap-3">
@@ -2150,7 +2508,7 @@
 									bind:this={mdEditor}
 									value={editContent}
 									onChange={onEditorChange}
-									onSave={autosave}
+									onSave={flushSave}
 								/>
 							{:else}
 								<div class="min-h-[60vh] flex items-center justify-center text-[var(--color-text-tertiary)] text-sm">
@@ -2294,8 +2652,8 @@
 						{@const m = item.media}
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<div
-							onclick={() => (selectedMedia = m)}
-							onkeydown={(e) => { if (e.key === 'Enter') selectedMedia = m; }}
+							onclick={() => { selectedMedia = m; mediaPlaybackError = false; }}
+							onkeydown={(e) => { if (e.key === 'Enter') { selectedMedia = m; mediaPlaybackError = false; } }}
 							role="button"
 							tabindex="0"
 							class="flex items-start gap-2 sm:gap-3 rounded-lg sm:rounded-xl p-2.5 sm:p-3 transition-all duration-150 cursor-pointer border bg-[var(--color-surface)] w-full text-left border-[var(--color-border)] hover:border-aurum/50 group"
@@ -2400,8 +2758,8 @@
 						{@const m = item.media}
 						<!-- svelte-ignore a11y_no_static_element_interactions -->
 						<div
-							onclick={() => (selectedMedia = m)}
-							onkeydown={(e) => { if (e.key === 'Enter') selectedMedia = m; }}
+							onclick={() => { selectedMedia = m; mediaPlaybackError = false; }}
+							onkeydown={(e) => { if (e.key === 'Enter') { selectedMedia = m; mediaPlaybackError = false; } }}
 							role="button"
 							tabindex="0"
 							class="flex flex-col rounded-xl transition-all duration-150 cursor-pointer border bg-[var(--color-surface)] text-left relative group border-[var(--color-border)] hover:border-aurum/50 overflow-hidden"
@@ -2541,7 +2899,20 @@
 						 scripts, so an attachment SVG is safe here without inlining. -->
 					<img src={selectedMedia.url} alt={selectedMedia.filename || 'image'} class="max-h-[55vh] w-auto mx-auto rounded-lg object-contain" />
 				{:else if selectedMedia.type === 'voice'}
-					<audio controls preload="metadata" src={selectedMedia.playbackUrl || selectedMedia.url} class="w-full"></audio>
+					<audio
+						controls
+						preload="metadata"
+						src={selectedMedia.playbackUrl || selectedMedia.url}
+						class="w-full"
+						onerror={() => { mediaPlaybackError = true; }}
+						onplaying={() => { mediaPlaybackError = false; }}
+					></audio>
+					{#if mediaPlaybackError}
+						<p class="mt-2 text-xs text-[var(--color-warning,#c08a3e)]">
+							This recording couldn't be decoded for playback, so what you hear may be incomplete.
+							The original audio is unchanged in your vault.
+						</p>
+					{/if}
 				{:else if selectedMedia.type === 'video'}
 					<!-- svelte-ignore a11y_media_has_caption -->
 					<video controls preload="metadata" src={selectedMedia.playbackUrl || selectedMedia.url} class="max-h-[60vh] w-full rounded-lg bg-black"></video>
@@ -2880,9 +3251,19 @@
 		overflow-x: hidden;
 		min-height: 0;
 	}
-	/* While editing, drop the bottom padding so the sticky Done/save bar hugs the
-	   very bottom of the viewport (no dead gap beneath it). */
+	/* While editing, drop the TOP and bottom padding of the scroll container.
+	   TOP (bug fix): the formatting toolbar is `sticky top-0` INSIDE this scroll
+	   region, but a sticky box is clamped to its containing block — the padded
+	   CONTENT box. With the container's top padding present, the toolbar could
+	   only rise to `padding-top` below the header, leaving a transparent strip
+	   above it through which the scrolling text showed. Zeroing padding-top makes
+	   the containing-block top coincide with the scrollport top, so the toolbar
+	   sits FLUSH under the header with no see-through gap. (Left/right padding
+	   from `p-3 sm:p-6` is untouched, so the measure is preserved.)
+	   BOTTOM: keeps the sticky agent-cue / end-of-doc hugging the viewport bottom
+	   (no dead gap beneath it). */
 	.editor-flush {
+		padding-top: 0;
 		padding-bottom: 0;
 	}
 	/* .doc-detail-view inherits flex parent; scroll handled by .library-content. */

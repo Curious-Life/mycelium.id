@@ -107,7 +107,7 @@ export function composeOnboardingGreeting({ name, messageCount = 0, territoryCou
 // (Personality is no longer a 4-option enum tone knob. The agent's character is its
 //  self.md "Being" — authored on the Character page, loaded every turn as WHO YOU ARE —
 //  alongside the shared AGENT_NATURE + MYCELIUM_ORIENTATION. The old PERSONALITY_GUIDE
-//  one-liner relic was removed; design docs/AGENT-CHARACTER-AND-VOICE §5.3.)
+//  one-liner relic was removed; design in the agent character-and-voice design §5.3.)
 
 // The chat agent's identity — the single highest-leverage prompt in the app (it
 // is the whole self of the primary surface). STATIC by design: dynamic state
@@ -120,7 +120,7 @@ export function composeOnboardingGreeting({ name, messageCount = 0, territoryCou
 // powers a model wouldn't otherwise guess it has). Then the live-chat mode guidance:
 // the competence/guest posture. The vault framing and the bold-internal/careful-external
 // rule now live in MYCELIUM_ORIENTATION (de-duped from here). See
-// docs/AGENT-CAPABILITY-MAP-2026-07-19.md.
+// the agent capability map.
 const CHAT_SYSTEM = `${AGENT_NATURE}
 
 ${MYCELIUM_ORIENTATION}
@@ -173,7 +173,7 @@ export function portalChatRouter({ db, userId, tools, handlers, enqueueEnrichmen
   // (default) = the in-process agent loop — the watchdog + retry turn-driver extracted
   // from this route so the same core serves channel + scheduler turns; 'cli' = the
   // Claude Code engine (C2). The native path is behavior-identical to the previous
-  // module-scoped loop. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+  // module-scoped loop. See the harness-CLI design.
 
   const auth = (req, res) => { const u = authenticatePortalRequest(req); if (isCsrfDeny(u)) { res.status(403).json({ error: 'csrf' }); return null; } if (!u) { res.status(401).json({ error: 'Unauthorized' }); return null; } return u; };
 

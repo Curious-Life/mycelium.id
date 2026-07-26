@@ -2,7 +2,7 @@
 // (messages AND documents). Lifted from capture.js's normalizeCreatedAt so both
 // the message choke-point and the document path share one correct implementation.
 //
-// Design: docs/DESIGN-import-system-robustness-2026-06-19.md
+// Design: the import-robustness design
 //   - UTC-normalized output (ISO-8601 Z), format-tolerant input.
 //   - Naive datetime strings (no offset) are interpreted under `assumeTZ`
 //     (default UTC) — NEVER the server's local zone, which would silently shift

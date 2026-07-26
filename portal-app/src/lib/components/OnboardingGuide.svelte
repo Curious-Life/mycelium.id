@@ -295,10 +295,12 @@
 			// Refresh status immediately
 			await fetchStatus();
 			activeSection = null;
-			// Auto-open chat if agent sent a welcome greeting
+			// Auto-open chat if agent sent a welcome greeting.
+			// D-073 — expanded, not just the input bar: the greeting is the first thing a new
+			// user should read, and a collapsed chat hides it behind a click.
 			if (data.greeting) {
 				const { navigationState } = await import('$lib/stores/navigation');
-				setTimeout(() => navigationState.setChatOpen(true), 600);
+				setTimeout(() => navigationState.openChatExpanded(), 600);
 			}
 		} catch (e: any) {
 			claudeAuthError = e.message || 'Authentication failed';

@@ -7,7 +7,7 @@
  * lib/api.ts for secure-fetch), so this module can be loaded by a node
  * test runner without resolving the SvelteKit `$lib` alias.
  *
- * @see docs/WORKSTREAM-C-PORTAL-DESIGN-2026-05-08.md (Step 1)
+ * @see the portal workstream design (Step 1)
  * @see packages/server/lib/metrics-handlers.js (server-side handlers)
  */
 

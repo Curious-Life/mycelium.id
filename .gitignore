@@ -110,10 +110,21 @@ portal-app/.gen-mount-chat-error/
 portal-app/.gen-drive-channel/
 # D-028 part 2 — the MindscapeView loading-jitter measurement harness (verify:mindscape-loading).
 portal-app/.gen-mount-mindscape-loading/
+# D-065 / D-073 chat geometry + first-message gate (mounts ChatFloat and drives its resize grips).
+portal-app/.gen-mount-chat-geometry/
+portal-app/.gen-verify-chat-geometry/
+
+# D-034 ↻1 — the REAL-BROWSER rail-scroll probe (portal-app/test/browser-mindscape-rail.mjs
+# emits a self-contained page here; layout is unmeasurable in jsdom, so this is where the
+# "does it actually scroll to the bottom" evidence is produced).
+portal-app/.gen-browser-rail/
 
 # Worktree symlinks (regenerable; machine-specific absolute paths — never commit)
 /.build-cache
 /pipeline/.venv
+
+# stray mount-harness scratch output (accidentally committed in #378)
+mo.json
 
 # public-release hygiene
 _*.mjs

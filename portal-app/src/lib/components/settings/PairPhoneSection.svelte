@@ -1,5 +1,5 @@
 <!--
-	Pair a phone by QR — the primary, no-typing path (docs/PHONE-QR-PAIRING-DESIGN-2026-07-19.md).
+	Pair a phone by QR — the primary, no-typing path (the phone QR-pairing design).
 	Shows a QR the phone scans, then an approval card (device name + 6-digit SAS to compare),
 	and a list of paired devices with per-device revoke. The pairing ceremony is LOOPBACK-ONLY
 	on the server, so this panel only works from the desktop portal (that is the intended

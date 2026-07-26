@@ -6,7 +6,7 @@ Single-user, single-agent **agent-server** for two-way conversational channels
 key-holder. This daemon is the host the deferred `reply` MCP tool
 (`src/tools/reply.js`) was written against.
 
-See the design: `docs/CHANNEL-INTEGRATIONS-DESIGN-2026-06-06.md`.
+See the design: the channel-integrations design.
 
 ## Status — Phase 0–2 (egress + inbound + the agent turn = two-way works)
 
@@ -161,7 +161,7 @@ ANTHROPIC_API_KEY=… MYCELIUM_MCP_BEARER=… npm run smoke:agent-live     # SDK
 ```
 
 (The Claude Agent SDK API shape is verified against the real installed package
-v0.3.167 — see docs/CHANNEL-DEPTH-SWEEP-2026-06-06.md; the smokes cover the
+v0.3.167 — see the channel depth-sweep notes; the smokes cover the
 remaining billed-turn / live-platform / ffmpeg behavior.)
 
 ## Security

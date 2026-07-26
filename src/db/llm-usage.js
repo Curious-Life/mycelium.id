@@ -2,7 +2,7 @@
  * LLM token-usage namespace — append-only accounting of every generation call's
  * input/output token consumption, by source/area/provider/model. Powers the
  * /portal/usage transparency surface. @see migrations/0014_llm_usage.sql,
- * docs/TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md §12.
+ * the text-generation abstraction design §12.
  *
  * COUNTS + DIMENSIONS ONLY — never any prompt/completion text (§1). Plaintext
  * metadata, same boundary as audit_log / background_jobs / cycle_metrics. Writes

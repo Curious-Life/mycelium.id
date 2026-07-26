@@ -10,7 +10,7 @@
 // renderPath is PURE FORMATTING — the caller resolves support ids → text/territory
 // first (claim.supportMids / claim.supportLeaves), so this module has no I/O.
 //
-// See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.6.
+// See the persona-claims design §3.6.
 
 /** Cheap token estimate (~4 chars/token). v1 heuristic; swap for a real
  *  tokenizer only if it mis-budgets in practice (deferral §8). */

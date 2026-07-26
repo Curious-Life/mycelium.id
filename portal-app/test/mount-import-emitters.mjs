@@ -16,6 +16,7 @@
 //   chat  — ChatFloat's uploadFiles success path (archive importResult / loose attachment).
 import { JSDOM } from 'jsdom';
 import { compile, compileModule } from 'svelte/compiler';
+import { build } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -37,6 +38,17 @@ if (!dom.window.matchMedia) {
 }
 
 mkdirSync(GEN, { recursive: true });
+
+// $lib/chat-geometry (D-065) is pure, dependency-free TypeScript that ChatFloat imports, so this
+// harness compiles the REAL module rather than stubbing it — the mounted component must clamp with
+// the product's own geometry. Without this the `chat` probe dies on an unresolved `$lib` specifier:
+// every other `$lib` import here is rewritten to a stub one at a time, and a new one is invisible
+// until it fails.
+await build({
+  entryPoints: ['src/lib/chat-geometry.ts'],
+  outfile: resolve(GEN, 'chat-geometry.js'),
+  format: 'esm', platform: 'neutral', target: 'es2022', logLevel: 'silent',
+});
 
 // ── The REAL store, compiled (compileModule can't parse TS return annotations — strip) ────────
 const storeSrc = readFileSync(STORE, 'utf8').replace(/\)\s*:\s*(?:number|void)\s*\{/g, ') {');
@@ -144,6 +156,7 @@ function compileView(srcPath, name, extraRewrites = (s) => s) {
     .replace(/from ['"]\$lib\/stores\/chat['"]/g, `from './chat-stores-stub.js'`)
     .replace(/from ['"]\$lib\/vps-identity['"]/g, `from './vps-stub.js'`)
     .replace(/from ['"]\$lib\/timeline\/utils['"]/g, `from './timeline-stub.js'`)
+    .replace(/from ['"]\$lib\/chat-geometry['"]/g, `from './chat-geometry.js'`)
     .replace(/from ['"]\$app\/environment['"]/g, `from './env-stub.js'`)
     .replace(/from ['"]\$app\/navigation['"]/g, `from './goto-stub.js'`);
   js = extraRewrites(js);

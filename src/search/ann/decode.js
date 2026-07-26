@@ -98,7 +98,7 @@ export async function encryptVector(vec, scope, masterKey, userId = null) {
 // vault — no inner AES-GCM envelope, no base64 (which doubled storage ~2.43×).
 // Confidentiality is the SQLCipher file itself. Same byte layout as encodeVector's
 // pre-base64 buffer and the Python encode_vector_raw, so a value written by either
-// side decodes on the other. @see docs/DESIGN-sqlcipher-stageA-vectors-2026-06-19.md
+// side decodes on the other. @see the SQLCipher stage-A vectors design
 
 /**
  * Encode a Float32Array as raw little-endian bytes for direct BLOB storage.

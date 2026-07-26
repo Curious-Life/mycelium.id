@@ -10,7 +10,7 @@
 //   - file stays ciphertext at rest
 //   - the endpoint's SECURITY gates: isTrustedLoopback (loopback-only, XFF rejected)
 //     + the named-target allowlist (unknown / partial → rejected)
-// @see docs/DESIGN-sqlcipher-backfill-job-nomic-2026-06-19.md
+// @see the SQLCipher Nomic backfill-job design
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';

@@ -36,6 +36,7 @@ import { createLocalBackend } from './backend/local.js';
 import { createSqliteBackend } from './backend/sqlite.js';
 import { loadFromDb, ID_PREFIX, stripPrefix } from './d1-loader.js';
 import { setMindSearch } from './registry.js';
+import { renderRef } from '../core/item-ref.js';
 
 const DEFAULT_USER = 'local-user';
 
@@ -51,7 +52,7 @@ function chooseBackend({ db, embedder, userId, searchBackend }) {
   const want = (searchBackend ?? process.env.MYCELIUM_SEARCH_BACKEND ?? '').toLowerCase();
   // The on-disk index lives in a SEPARATE encrypted sidecar handle (db._sqliteSearch),
   // NOT inside the vault (db._sqlite) — so a corrupt regenerable index is a file-level
-  // rm+rebuild, never a fatal/un-DROPpable vault error (docs/SEARCH-SIDECAR-DESIGN).
+  // rm+rebuild, never a fatal/un-DROPpable vault error (the search-sidecar design).
   // If the sidecar is unavailable (open failed, or a context that didn't open one),
   // fall back to the in-RAM local backend — search must never break boot.
   if (want === 'sqlite' && db && db._sqliteSearch) {
@@ -421,9 +422,14 @@ function snippet(text, n = 240) {
   return (text ?? '').toString().replace(/\s+/g, ' ').trim().slice(0, n);
 }
 
+// D-040 ↻1: this used to SELECT the id (see the messages query above) and then DROP it,
+// so a searchMindscape hit was un-addressable — the agent could see a memory it had no way
+// to forget/mark/link, and guessing produced a success-shaped miss. The ref is the compact
+// form (src/core/item-ref.js) precisely because it rides every rendered row.
 function formatMessage(m) {
   const who = m.agent_id ? `[${m.agent_id}] ` : '';
-  return `${who}${snippet(m.content)}`;
+  const ref = renderRef('message', m.id);
+  return `${ref ? `${ref} ` : ''}${who}${snippet(m.content)}`;
 }
 
 function formatProfile(p) {
@@ -431,9 +437,12 @@ function formatProfile(p) {
   return `**${p.name}**${count}\n${snippet(p.essence)}`;
 }
 
+// The PATH is the id `forget`/`mark` take for a document, so it must always be rendered —
+// before D-040 ↻1 a titled document showed only its title and was un-addressable.
 function formatDocument(d) {
   const label = d.title || d.path || '(untitled)';
-  return `**${label}**\n${snippet(d.summary)}`;
+  const ref = renderRef('document', d.path);
+  return `**${label}**${ref ? ` ${ref}` : ''}\n${snippet(d.summary)}`;
 }
 
 // Re-exports for tests + downstream units.

@@ -6,6 +6,12 @@
 //   L5 re-run → fully deduped (docs + attachments idempotent)
 //   L6 managed Photos library package + dotdirs are NOT walked
 //
+// NOTE (D-070): `categories` is REQUIRED — there is no "default all" any more, because a
+// missing selection used to widen to every category and import the media a user had just
+// deselected. Every call below therefore states its selection. The consent behaviour itself
+// (empty → nothing, missing → throw, UI → wire → disk) is owned by verify:import-consent,
+// which is the gate with teeth for it; L4 here is only the importer-level filter.
+//
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -15,6 +21,7 @@ import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { boot } from '../src/index.js';
 import { importLocalFiles } from '../src/ingest/local-files-import.js';
+import { ALL_FILE_CATEGORIES } from '../src/ingest/file-categories.js';
 
 const DB = 'data/verify-localfiles.db';
 const KCV = 'data/verify-localfiles-kcv.json';
@@ -51,7 +58,8 @@ const msgExists = (id) => !!raw.prepare('SELECT 1 FROM messages WHERE id = ?').g
 const attCount = () => raw.prepare('SELECT COUNT(*) c FROM attachments').get().c;
 const distinctBlobs = () => raw.prepare('SELECT COUNT(DISTINCT local_path) c FROM attachments').get().c;
 
-const r1 = await importLocalFiles(db, { userId, folderPath: root });
+const ALL = [...ALL_FILE_CATEGORIES];
+const r1 = await importLocalFiles(db, { userId, folderPath: root, categories: ALL });
 rec('L1 text → document + memory', !!docPath('import/local-files/' + path.basename(root) + '/notes/idea.md') && msgExists(`local:${path.basename(root)}/notes/idea.md`) && r1.documents.created === 2,
   JSON.stringify(r1.documents));
 rec('L2 media → attachments + linked memories', r1.attachments.imported === 3 && attCount() === 3,
@@ -62,7 +70,7 @@ rec('L6 dotdir + .photoslibrary package NOT walked (no hidden/managed rows)',
   !docPath('import/local-files/' + path.basename(root) + '/.cache/hidden.md') && r1.scanned === 5,
   `scanned=${r1.scanned}`);
 
-const r2 = await importLocalFiles(db, { userId, folderPath: root });
+const r2 = await importLocalFiles(db, { userId, folderPath: root, categories: ALL });
 rec('L5 re-run fully deduped (docs + attachments idempotent)',
   r2.documents.created === 2 && r2.documents.deduped === 2 && r2.attachments.imported === 0 && r2.attachments.deduped === 3,
   JSON.stringify({ docs: r2.documents, atts: r2.attachments }));
@@ -76,7 +84,7 @@ rec('L4 category filter: documents-only sweep imports no new media',
 // L7 async-job progress: onProgress fires with running counts; final = all processed.
 {
   const prog = [];
-  const rp = await importLocalFiles(db, { userId, folderPath: root, onProgress: (p) => prog.push(p) });
+  const rp = await importLocalFiles(db, { userId, folderPath: root, categories: ALL, onProgress: (p) => prog.push(p) });
   const last = prog[prog.length - 1] || {};
   rec('L7 onProgress fires; final processed === total === scanned',
     prog.length >= 2 && last.total === rp.scanned && last.processed === rp.scanned && rp.scanned === 5,
@@ -86,7 +94,7 @@ rec('L4 category filter: documents-only sweep imports no new media',
 {
   let n = 0;
   const prog = [];
-  const rc = await importLocalFiles(db, { userId, folderPath: root, onProgress: (p) => prog.push(p), shouldCancel: () => (n++ >= 1) });
+  const rc = await importLocalFiles(db, { userId, folderPath: root, categories: ALL, onProgress: (p) => prog.push(p), shouldCancel: () => (n++ >= 1) });
   const last = prog[prog.length - 1] || {};
   rec('L8 shouldCancel stops early (cancelled flag + partial processed < scanned)',
     rc.cancelled === true && last.processed >= 1 && last.processed < 5,

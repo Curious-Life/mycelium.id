@@ -125,6 +125,27 @@ rec('U12. check_for_update error branches are labelled + non-empty, state lock i
   !/\.lock\(\)\.unwrap\(\)/.test(checkBody),
   'error strings stage-labelled + guarded against empty; no panicking lock');
 
+// U13 — D-022 root cause: registering the command is NOT enough. The window loads a REMOTE
+//        origin, so Tauri v2 rejects every custom command that no capability permits
+//        ("Command check_for_update not allowed by ACL", tauri-2.11.2
+//        crates/tauri/src/webview/mod.rs) — which is exactly what the operator saw on v0.1.13
+//        once #359 stopped swallowing the reason. The three updater commands the UI invokes
+//        must therefore be BOTH declared in build.rs (so an allow-* permission exists at all)
+//        AND granted in the capability set. verify:tauri-acl derives this for every command;
+//        this is the updater-specific guard so a D-022 regression REDs here too.
+// MUTATION-TESTED: dropped "allow-check-for-update" from capabilities/default.json (the exact
+//   D-022 defect) → U13 REDs; restored → GREEN.
+// MUTATION-TESTED: reverted build.rs to a bare `tauri_build::build()` → U13 REDs; restored → GREEN.
+const buildrs = read('src-tauri/build.rs').replace(/\/\/[^\n]*/g, '');
+const capPerms = (() => {
+  try { return JSON.parse(read('src-tauri/capabilities/default.json')).permissions || []; } catch { return []; }
+})();
+const aclGap = ['app_version', 'check_for_update', 'install_update'].filter(
+  (c) => !capPerms.includes(`allow-${c.replace(/_/g, '-')}`) || !new RegExp(`"${c}"`).test(buildrs));
+rec('U13. the invoked updater commands are ACL-permitted (declared in build.rs + granted in the capability)',
+  aclGap.length === 0,
+  aclGap.length ? `would be rejected with "Command <cmd> not allowed by ACL": ${aclGap.join(', ')}` : 'app_version + check_for_update + install_update permitted');
+
 console.log('\n' + '='.repeat(60));
 console.log(fail ? 'VERDICT: NO-GO — updater wiring incomplete' : 'VERDICT: GO — auto-updater wiring intact (real-key + on-Mac smoke = operator)');
 console.log('='.repeat(60));

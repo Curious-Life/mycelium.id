@@ -3,7 +3,7 @@
 # Two transports (see d1_client.py for the same split):
 #   * BRIDGE MODE (at-rest blindness, A′): ``MYCELIUM_DB_BRIDGE_URL`` set → POST to
 #     the long-running loopback ``vault-bridge.js``, which owns the only handle to
-#     the whole-file SQLCipher vault. See docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md.
+#     the whole-file SQLCipher vault. See the at-rest blindness design.
 #   * LEGACY MODE: unset → open the plaintext vault directly via stock ``sqlite3``;
 #     batch_encrypted shells out to the spawn-per-call local-write-bridge.js.
 #

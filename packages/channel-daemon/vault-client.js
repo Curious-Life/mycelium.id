@@ -10,7 +10,7 @@
  *
  * Localhost REST is no-auth by design (same-machine trust boundary). If the
  * daemon and vault ever split hosts this base URL MUST become the OAuth-HTTP
- * surface (Bearer + TLS) — see docs/CONNECTORS.md security notes.
+ * surface (Bearer + TLS) — see the connectors doc security notes.
  *
  * Every call is soft-fail: audit/authority/persist failures are logged and
  * surfaced as a typed result, never thrown, so a vault hiccup never crashes a

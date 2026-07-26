@@ -53,5 +53,5 @@ psutil>=5.9              # optional memory reporting in cluster.py
 # build on the Intel runner. cryptography 49.x dropped Intel/universal2 wheels
 # (arm64-only), which would force a source build on x86_64; revisit the cap if the
 # Intel bundle is retired. 48.0.1 clears all four CVEs (pip-audit verified).
-# Verified on PyPI 2026-06-19. See docs/DESIGN-macos-signed-distribution-2026-06-17.md.
+# Verified on PyPI 2026-06-19. See the macOS signed-distribution design.
 cryptography>=48.0.1,<49

@@ -9,7 +9,7 @@
 // $generate.error is rendered in ZERO places app-wide, the error became SILENCE. Illuminate's
 // render condition (realms exist) IS the route's skip condition ⇒ it failed 100% of the time
 // it was visible, with no feedback at all.
-// @see docs/DISTILLATION-SURFACE-DESIGN-2026-07-16.md §2/§2a.
+// @see the distillation-surface design §2/§2a.
 //
 // NOTHING HERE IS GREPPED. G1-G5 drive the REAL module (esbuild strips types; only `./api` is
 // stubbed); D2a-D2e mount the REAL components against the REAL route responses. A source grep is

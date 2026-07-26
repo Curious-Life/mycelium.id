@@ -11,6 +11,6 @@
 -- vault kept the stale copy) and an edited content-addressed note duplicated.
 -- With content_hash, capture can detect a real change and UPDATE-in-place +
 -- re-enrich so the mindscape reflects the edit. See
--- docs/DESIGN-connector-content-upsert-2026-06-04.md.
+-- the connector content-upsert design.
 
 ALTER TABLE messages ADD COLUMN content_hash TEXT;

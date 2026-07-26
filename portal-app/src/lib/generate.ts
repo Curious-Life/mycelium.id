@@ -33,7 +33,7 @@ import { api } from './api';
 // 'error' below — and since $generate.error is rendered in ZERO places app-wide, it became
 // SILENCE. That is why Illuminate "does nothing": its render condition (realms exist) IS the
 // route's skip condition, so it fails 100% of the time it is visible.
-// @see docs/DISTILLATION-SURFACE-DESIGN-2026-07-16.md §2a — the same defect class as §3.5's
+// @see the distillation-surface design §2a — the same defect class as §3.5's
 // invisible drainer `paused`: a state the server has and the client cannot represent.
 export type GenPhase = 'idle' | 'embedding' | 'starting' | 'running' | 'done' | 'error' | 'up-to-date';
 

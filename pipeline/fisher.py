@@ -14,7 +14,7 @@ Pure math + numpy. No I/O, no auth, no master-key access — safe to import from
 anywhere. The orchestration (D1 reads/writes, windowing, milestone rules) lives
 in compute-fisher.py.
 
-What this module covers (see docs/MEASUREMENT-LAYER-BUILDOUT-PLAN §Fisher):
+What this module covers (see the measurement-layer buildout plan, Fisher section):
   - Activation vectors from message counts (Laplace-smoothed)
   - Fisher geodesic distance (Bhattacharyya/Hellinger on the categorical simplex)
   - Trajectory length, displacement, exploration ratio

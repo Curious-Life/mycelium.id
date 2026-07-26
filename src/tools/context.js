@@ -158,6 +158,24 @@ export function createContextDomain(deps) {
         if (flagged) sections.push(`---\n# FLAGGED FOR DISCUSSION\n\n${flagged.trim()}`);
       }
 
+      // ⚠️ THIS PREAMBLE DELIBERATELY RENDERS NO CURATE REFS (`[msg:…]`/`[fact:…]`/`[ent:…]`,
+      // src/core/item-ref.js) — do not "helpfully" add them. Every other read surface does.
+      //
+      // WHY (independent security review, 2026-07-26; D-040 ↻1). getContext output is
+      // concatenated into the SYSTEM prompt of every turn (src/agent/run-turn.js), and the
+      // RECENT MESSAGES block below replays vault rows that can be attacker-authored — a
+      // connector-captured email, an ingested message. `forget` is now granted on the owner's
+      // 1:1 DM. Rendering refs here would place a valid deletion handle for every neighbouring
+      // row directly beside injected text, inside the system prompt, on a turn with no
+      // iteration cap: "delete everything listed above" becomes literally actionable, and the
+      // "no bulk verb" + "you must have read it" mitigations both collapse. Prose in
+      // OWNER_SYSTEM would be the ONLY remaining defense — one layer, contra CLAUDE.md §2.
+      //
+      // Refs therefore come only from a retrieval the agent DELIBERATELY performed
+      // (searchMindscape / getDailyMessages / listDocuments / getDocument). "Forget that" costs
+      // one extra retrieval hop, which is the flow `forget`'s own description already prescribes.
+      // Bonus: it also removes ~300 tokens/turn that trimToTokenBudget was displacing.
+
       // ── facts you know (durable; pinned-first; sensitive excluded) ──
       if (want(include, 'facts') && db?.facts) {
         try {

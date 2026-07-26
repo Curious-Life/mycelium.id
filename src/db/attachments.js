@@ -77,13 +77,61 @@ export function createAttachmentsNamespace(deps) {
     // refusal (or any transient failure) during import is eventually retried instead of silently
     // dropped. SELECTS ONLY ids (no transcript, no filename — §1 content-free) and REQUIRES user_id
     // in the WHERE (SQL-layer tenant enforcement). Audio predicate mirrors isAudio()/mediaTypeOf().
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    //  D-076: "HAS SOME TEXT" IS NOT "IS DONE" — the predicate that made truncation PERMANENT
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // This filter used to be `transcript IS NULL OR transcript = ''`. transcribe-attachment.js
+    // PROGRESSIVELY SAVES every ~10 segments, so the instant a 30-minute recording wrote its first
+    // partial the row stopped matching — permanently. Not "capped after 3 attempts": excluded
+    // immediately, by construction, with no marker anywhere that anything was missing. Whatever
+    // interrupted the decode (a python OOM-kill, a supervisor restart, a blown live-turn budget)
+    // became a silent, unrecoverable truncation, and a manual re-transcribe hit the same wall.
+    //
+    // Eligibility is now "no text OR text known to be incomplete". The incomplete marker is
+    // EXPLICIT (`metadata.transcription.incomplete = 1`, written by transcript-coverage.js in the
+    // SAME UPDATE as the partial text) and its absence means "not pending" — so every LEGACY row
+    // that already holds a good transcript and carries no marker is still excluded, exactly as
+    // before. Without that asymmetry this change would re-transcribe the entire existing library.
+    //
+    // ⚠️ `json_valid` IS LOAD-BEARING, NOT DEFENSIVE NOISE. A bare
+    // `json_extract(metadata, '$…')` ABORTS THE WHOLE QUERY with "malformed JSON" the moment any
+    // one row's `metadata` is not valid JSON (verified against better-sqlite3 3.49.2) — the drain
+    // would stop finding ANY work because of one unrelated legacy row. NULL metadata is fine
+    // (json_extract returns NULL), non-JSON text is not.
+    //
+    // Still SELECTS ONLY ids (no transcript, no filename — §1 content-free) and REQUIRES user_id in
+    // the WHERE (SQL-layer tenant enforcement). Audio predicate mirrors isAudio()/mediaTypeOf().
     async listPendingTranscription(userId, { limit = 10 } = {}) {
       const result = await d1Query(
         `SELECT id FROM attachments
            WHERE user_id = ?
              AND local_path IS NOT NULL
-             AND (transcript IS NULL OR transcript = '')
-             AND (file_type LIKE 'audio/%' OR file_type IN ('voice', 'audio'))
+             AND (
+                   transcript IS NULL OR transcript = ''
+                   OR (metadata IS NOT NULL AND json_valid(metadata)
+                       AND json_extract(metadata, '$.transcription.incomplete') = 1)
+                 )
+             -- An EARNED complete=1 beats "has no text". Without this, a genuinely silent recording
+             -- (an empty transcript plus complete) still matched the first clause and was fully re-decoded
+             -- up to the attempt cap on EVERY boot, because the drain cap is in-memory. The
+             -- comment in the no-speech branch of transcribe-attachment.js asserted this already held;
+             -- it did not (adversarial review, MEDIUM-9).
+             -- SQL THREE-VALUED LOGIC: a row whose coverage record has no complete key at all
+             -- makes json_extract return NULL, so ... = 1 is NULL and NOT NULL is NULL — which is
+             -- not TRUE, so the row is DROPPED. Written with plain = this clause silently excluded every
+             -- partial it was meant to leave alone, i.e. it re-created D-076. IS is the NULL-safe
+             -- comparison and always yields 0/1. Pinned by gate check D10.
+             AND NOT (metadata IS NOT NULL AND json_valid(metadata)
+                      AND json_extract(metadata, '$.transcription.complete') IS 1)
+             -- The audio predicate mirrors isAudio()/mediaTypeOf() — EXCEPT that a row already
+             -- carrying a transcription coverage record is audio BY CONSTRUCTION (only the
+             -- transcriber writes that key). Rows arrive with a NULL or non-audio file_type from
+             -- the channel daemon, which decides the kind itself; the live turn would then write a
+             -- partial the drain could never select, leaving it stuck while the portal promised
+             -- "the rest will be picked up automatically" (adversarial review, MEDIUM-8).
+             AND (file_type LIKE 'audio/%' OR file_type IN ('voice', 'audio')
+                  OR (metadata IS NOT NULL AND json_valid(metadata)
+                      AND json_extract(metadata, '$.transcription.incomplete') = 1))
            ORDER BY created_at ASC
            LIMIT ?`,
         [userId, limit],

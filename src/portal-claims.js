@@ -8,7 +8,7 @@
 // reaches a response (every sensitive column is in ENCRYPTED_FIELDS). Structural
 // keys (window_end, granularity, status) are plaintext. Mirrors the shape of
 // portalMeasurementRouter's /frequency/series so ClaimsView can reuse
-// TimeSeries.svelte. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.9.
+// TimeSeries.svelte. See the persona-claims design §3.9.
 import express from 'express';
 import { isCsrfDeny } from './http/require-vault-auth.js';
 import { toConfidence } from './claims/confidence.js';

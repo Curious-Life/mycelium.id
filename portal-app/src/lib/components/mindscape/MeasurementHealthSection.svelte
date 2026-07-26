@@ -4,7 +4,7 @@
 	verdict map with the pipeline_state ledger). Makes a stale metric family
 	DIAGNOSABLE: fresh / stale-because-failed / never-ran / chronically-broken
 	(quarantined). Content-free: counts, timestamps, and a bounded stage-error
-	class only — no message content. @see docs/DESIGN-measurement-narration-hardening-2026-06-18.md §4.4
+	class only — no message content. @see the measurement-narration hardening design §4.4
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';

@@ -5,7 +5,7 @@
 // it — but ONLY after PROVING the live vault is a working, keyed ciphertext file.
 // This gate proves the purge is correct (happy path) AND fail-safe (it KEEPS the
 // backup on every doubt: no key, live vault still plaintext, wrong key) so it can
-// never destroy the only good copy. @see docs/DESIGN-sqlcipher-stage0-mandatory-2026-06-19.md
+// never destroy the only good copy. @see the SQLCipher stage-0 design
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, existsSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';

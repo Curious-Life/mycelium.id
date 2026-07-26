@@ -9,7 +9,7 @@ name: verify
 # `npm run verify` is THE gate — it is the only chain this workflow runs, so a
 # gate that is not in it gates nothing. `verify:chains` runs FIRST inside it and
 # fails the build if any registered verify:* gate has drifted out of the chain
-# (that drift went unnoticed for months — see docs/VERIFY-CHAIN-DIVERGENCE-2026-07-16.md).
+# (that drift went unnoticed for months — see the verify-chain divergence writeup).
 # Do NOT add a gate here as a separate step; add it to `verify`.
 
 on:
@@ -111,7 +111,7 @@ jobs:
   # against a pinned dep surfaces on the next PR/push instead of shipping silently.
   # --require-hashes also rejects a lock whose hashes don't resolve. Independent of
   # the verify job so a dep-CVE gives a distinct red signal.
-  # See docs/PYTHON-DEPS-SUPPLY-CHAIN-2026-06-19.md (Finding 3).
+  # See the Python-deps supply-chain notes (Finding 3).
   audit:
     name: pip-audit (pipeline supply-chain)
     runs-on: ubuntu-latest

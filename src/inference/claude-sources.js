@@ -1,6 +1,6 @@
 // Where a Claude subscription credential can live — ONE ordered probe over EVERY
 // known store, with an honest, discriminated result.
-// Design: docs/CLAUDE-SUBSCRIPTION-DESIGN-2026-07-15.md §3.2 (the connect ladder).
+// Design: the Claude-subscription design §3.2 (the connect ladder).
 //
 // WHY THIS EXISTS (the "worked on one device but not another" bug):
 // `claude` NAMESPACES its macOS Keychain item by config dir —

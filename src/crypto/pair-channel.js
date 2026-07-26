@@ -1,5 +1,5 @@
 // src/crypto/pair-channel.js — the QR device-pairing secure channel
-// (docs/PHONE-QR-PAIRING-DESIGN-2026-07-19.md §3.3, Unit B).
+// (the phone QR-pairing design §3.3, Unit B).
 //
 // A direct ephemeral-X25519 ECDH channel between the Mac (ephemeral keypair, shown
 // as `epk` in the QR) and the phone (its own X25519 keypair). Both sides derive one

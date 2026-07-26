@@ -8,8 +8,7 @@ Protocol.
 
 ## Start here
 
-- **docs/ARCHITECTURE.md** — the as-built system. Read this first.
-- **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — narrative walkthrough.
+- **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the as-built system, narrative walkthrough. Read this first.
 - **[docs/SETUP.md](docs/SETUP.md)** — stand it up locally (Node 22, keys, verify, Claude Desktop).
 - **[docs/guide/](docs/guide/)** — the Handbook (concepts) + Reference (MCP tools, connect, ingest, gateway, security model).
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — setup, the verify gate, branch/PR conventions.
@@ -43,7 +42,7 @@ the work, not after:
 - **sweep-first-design** — before any structural change: inventory the load-bearing assumptions, verify each against live code with file:line citations, and pivot when the code contradicts the plan.
 - **pre-deletion-caller-audit** — before deleting/renaming code, schema, config, an endpoint, or a tool: inventory every caller, prove migration with evidence, define falsifiable criteria first.
 - **deploy-and-verify** — run the `verify:*` gate(s) for the changed surface (and the full suite before "done"), then smoke the real process the user runs.
-- **living-docs** — after any change to what the system *is*, keep `docs/ARCHITECTURE.md` + the guide current, as-built, with file-path evidence.
+- **living-docs** — after any change to what the system *is*, keep `docs/HOW-IT-WORKS.md` + the guide current, as-built, with file-path evidence.
 - **handoff-discipline** — at the end of a session that produced commits or decisions, write a structured handoff so the next session picks up cleanly.
 - **auto-merge-on-green** — fail-closed merge gate: merge only when every check **and** review passes and the PR is mergeable; security-sensitive diffs always need a human approval.
 

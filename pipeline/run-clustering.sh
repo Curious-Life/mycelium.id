@@ -7,7 +7,7 @@
 # so the tables they write are populated. Stages NOT ported: embed-mindscape,
 # compute-cognitive-fingerprint, check-milestones (milestones come from Step 7).
 # (describe-chronicles WAS ported — it runs in Step 3 below, fail-soft.)
-# See docs/MEASUREMENT-LAYER-STATE-2026-06-04.md for the full as-built map.
+# See the measurement-layer state map for the full as-built map.
 #
 # Present stages, in dependency order:
 #   1. sync       — messages w/ embedding_768 → clustering_points (256D)

@@ -1,4 +1,4 @@
-// Verify — content-aware upsert (Tier 1, docs/DESIGN-connector-content-upsert-2026-06-04.md).
+// Verify — content-aware upsert (Tier 1, the connector content-upsert design).
 // No network. Proves captureMessage's insert / no-op / update(+re-enrich)
 // contract; that an update re-enriches (nlp_processed=0, embedding_768 NULL,
 // clustering_points dropped) while staying ENCRYPTED at rest (content) with a

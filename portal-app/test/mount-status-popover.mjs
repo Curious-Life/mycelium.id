@@ -233,8 +233,18 @@ writeFileSync(`${GEN}/generate-spy.js`, `export { fmtSeconds } from './generate.
 
 // ── PipelineStatus.svelte — the shipped expanded detail, compiled + its four specifiers rewired
 // (pipeline → the shared store above; generate/api/navigation → real fmtSeconds + inert spies). ─
+// QA9/D-067: PipelineStatus's disclosure is the shared <CollapsibleHeader> — the same pattern this
+// very component (the vault-pill) is the origin of. Compiled for REAL, not stubbed: PipelineStatus
+// binds to it, and Svelte 5 requires the child to declare that prop `$bindable`.
+writeFileSync(
+  `${GEN}/CollapsibleHeader.svelte.js`,
+  compile(readFileSync(resolve('src/lib/components/mindscape/CollapsibleHeader.svelte'), 'utf8'),
+    { generate: 'client', name: 'CollapsibleHeader', css: 'injected' }).js.code,
+);
+
 const psSrc = readFileSync('src/lib/components/mindscape/PipelineStatus.svelte', 'utf8');
 const psJs = compile(psSrc, { generate: 'client', name: 'PipelineStatus', css: 'injected' }).js.code
+  .replace(/from\s+['"]\.\/CollapsibleHeader\.svelte['"]/g, `from './CollapsibleHeader.svelte.js'`)
   .replace(/from\s+['"]\$lib\/pipeline['"]/g, `from './pipeline.js'`)
   .replace(/from\s+['"]\$lib\/generate['"]/g, `from './generate-spy.js'`)
   .replace(/from\s+['"]\$lib\/api['"]/g, `from './api-stub.js'`)

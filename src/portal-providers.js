@@ -12,7 +12,7 @@
 //     on their OWN box and knowingly accept the ToS risk. We IMPORT the user's
 //     existing Claude Code login (~/.claude/.credentials.json) — never mint tokens
 //     via Anthropic's client_id. /auth/claude/import requires acknowledgeToS:true
-//     (fail-closed without it). See docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md.
+//     (fail-closed without it). See the Claude-subscription driver design.
 //   - The key blob is written once on create/update and never echoed back. The
 //     listing carries metadata only (providers.list() omits `credentials`); the
 //     decrypt path is reached only for the connectivity probe + the inference
@@ -25,7 +25,13 @@ import { listModels } from './inference/models.js';
 import { PROVIDER_PRESETS, isLoopbackUrl, jurisdictionForBaseUrl } from './inference/presets.js';
 import { assertSafeBaseUrlResolved } from './inference/base-url.js';
 import { KNOWN_PROVIDERS } from './inference/known-providers.js';
-import { INFERENCE_TASKS, ONBOX_TASKS } from './inference/resolve.js';
+import { INFERENCE_TASKS, ONBOX_TASKS, effectiveSelection, freshClaudeSubscriptionToken } from './inference/resolve.js';
+import { discoverModels, invalidateModelCatalog } from './inference/model-catalog.js';
+// D-074: the picker's "use the default" option must NAME the default rather than assert
+// "your plan's default" it cannot know. These two constants ARE the chat defaults the harness
+// applies when model_preference is empty (src/agent/harness.js) — served, never re-typed
+// client-side, so the option label can never disagree with what actually runs.
+import { DEFAULT_ANTHROPIC_CHAT_MODEL, DEFAULT_OPENAI_CHAT_MODEL } from './agent/harness.js';
 import { ROLE_RECOMMENDATIONS, INTELLIGENCE_FUNCTIONS, tasksForFunction } from './inference/role-models.js';
 import { resolveMcpBearer, readRemoteConfig } from './remote/config.js';
 import { importFromClaudeCli, ClaudeImportError, readClaudeAccount } from './inference/claude-oauth.js';
@@ -234,6 +240,46 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     } catch { bad(res, 500, 'failed to read task models'); }
   });
 
+  // ── D-075: the EFFECTIVE per-task selection — what will ACTUALLY run ────────────────────
+  // GET /providers/task-models above returns the user's EXPLICIT assignments and nothing
+  // else. Settings used to render its selection from that alone, so a provider the system
+  // auto-selected (a connected subscription becoming the active provider — D-029/#360, which
+  // deliberately does NOT write taskModels) showed as "nothing selected" while chat and
+  // narration were already running on it. Two rules for one question is the whole defect.
+  //
+  // This route answers the question ONCE, with the resolver's own code:
+  // `effectiveSelection` → `resolveEffectiveAssignment`, the same function
+  // `resolveInferenceConfigForTask` runs at inference time (src/inference/resolve.js). The
+  // screen renders this; it does not recompute it.
+  //
+  //   source 'explicit' — the user assigned this provider to this task
+  //   source 'active'   — auto: it falls back to the vault's active provider
+  //   source 'none'     — nothing resolvable (env, else on-box Ollama)
+  //
+  // ON-BOX tasks (categorize/enrich) are deliberately ABSENT: they select a local model NAME
+  // read by the drainer, not a provider row, and inventing a providerId for them here would
+  // be a third meaning for the same field (see ONBOX_TASKS in resolve.js).
+  //
+  // READ-ONLY. It resolves and projects; it never writes settings. Displaying the effective
+  // model must never turn an auto-selection into a stored explicit one — that would silently
+  // pin the user to today's default and survive a later provider change.
+  //
+  // SECURITY: `effectiveSelection` projects exactly {task, source, providerId, model}. The
+  // credential lives on the resolver's `cfg`, which this route never sees.
+  //
+  // ⚠️ MUST precede the '/providers/:id' family (PUT/DELETE, and '/providers/:id/models'):
+  // Number('effective-models') is NaN, so a later-declared numeric-id route that matched first
+  // would 400 this away. (An earlier version of this comment cited a `GET /providers/:id`, which
+  // does not exist — the hazard is real for the routes that DO exist; independent review, LOW.)
+  router.get('/providers/effective-models', async (_req, res) => {
+    try {
+      const cloudTasks = INFERENCE_TASKS.filter((t) => !ONBOX_TASKS.has(t));
+      const effective = {};
+      for (const t of cloudTasks) effective[t] = await effectiveSelection(db, userId, t);
+      ok(res, { tasks: cloudTasks, effective });
+    } catch { bad(res, 500, 'failed to resolve the effective model selection'); }
+  });
+
   // Assign (or clear) a task's provider/model. Body: { task, providerId|null, model? }.
   // Cloud tasks store { providerId, model? } (provider row must exist). ON-BOX tasks
   // (categorize/enrich) store { model } — a LOCAL Ollama model NAME, no provider row.
@@ -313,8 +359,27 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     } catch { res.json({ ok: false, models: [], error: 'unreachable' }); }
   });
 
-  // Same, for an ALREADY-SAVED provider (uses its stored key) — lets the UI offer
-  // a model dropdown when editing a connected provider, without re-entering the key.
+  // Same, for an ALREADY-SAVED provider (uses its stored key) — the model picker for a
+  // CONNECTED provider (Settings → Connect an AI → the subscription card's model select).
+  //
+  // ── D-074: this list is the PROVIDER'S ANSWER, never a roster ───────────────────────────
+  // The picker used to render a hand-written list of four Claude ids baked into
+  // AISettings.svelte, with this route's result merely APPENDED to it. So a newly-released
+  // model either never appeared (when the OAuth token lacks models:list scope, which fails
+  // silently) or appeared last, below four ids that looked like the real menu. The roster is
+  // gone; discoverModels (src/inference/model-catalog.js) owns the answer and LABELS it:
+  //
+  //   source 'live'     — a current answer from the provider
+  //   source 'cache'    — the last answer, within the 5-minute TTL (stale:false), or an older
+  //                       one served because the refresh just failed (stale:true + error)
+  //   source 'fallback' — nothing cached and the provider is unreachable: the dated
+  //                       MODEL_REGISTRY floor, always stale:true, so the UI says so
+  //
+  // `?refresh=1` bypasses the TTL — the explicit Refresh click. The UI must never present a
+  // stale/fallback list as current; the fields to do that honestly are in the response.
+  //
+  // SECURITY unchanged: the stored key/token is used for the listing call and is never
+  // returned, logged, or echoed; `error` stays a category (models.js), never the body.
   router.get('/providers/:id/models', async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return bad(res, 400, 'invalid id');
@@ -330,15 +395,50 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       // until activated" has to mean unreachable, or the claim rots into the same
       // stale-prose trap this file's history is full of. Refuse until armed.
       if (String(row.status || '').toLowerCase() === 'pending') {
-        return res.json({ ok: false, models: [], error: 'provider is not activated yet — activate it to list models' });
+        // stale:true — a refusal is emphatically NOT a live list; the UI must qualify it.
+        // `error` is a CATEGORY (`not_activated`), not prose: every other value in this field
+        // comes from models.js as a token the client maps to its own copy, and the one prose
+        // value here fell through the client's map to a generic "unavailable" — losing the only
+        // remedy the user could act on (independent review, LOW).
+        return res.json({ ok: false, models: [], source: 'fallback', stale: true, fetchedAt: null, error: 'not_activated' });
       }
       let apiKey = null, token = null;
       // A BYOK provider stores `.apiKey`; a SUBSCRIPTION stores `.claudeOAuthToken`
       // (listModels then uses the Bearer + Claude-Code headers instead of x-api-key).
       try { const c = row.credentials ? JSON.parse(row.credentials) : {}; apiKey = c.apiKey || null; token = c.claudeOAuthToken || null; } catch { /* malformed → no key */ }
-      const r = await listModels({ provider: row.provider, baseUrl: row.base_url, apiKey, token, fetch });
-      res.json({ ok: r.ok, models: r.models || [], error: r.ok ? null : r.error });
-    } catch { res.json({ ok: false, models: [], error: 'unreachable' }); }
+      // ⚠️ THE STORED SUBSCRIPTION TOKEN IS STALE WITHIN HOURS — that is D-021's root cause and
+      // the whole reason freshClaudeSubscriptionToken exists (see the header of
+      // src/inference/resolve.js): `claude` refreshes into a config-dir-NAMESPACED Keychain item,
+      // never back into the DB row, and POST /auth/claude/refresh refreshes the dir without
+      // rewriting the row. Listing with the stored copy therefore 401s on any vault older than a
+      // few hours, which quietly demoted D-074's headline — "the list is the provider's answer" —
+      // to the MODEL_REGISTRY floor for the exact case the defect was filed about (independent
+      // review ×2, MED). Prefer the live token; fail-closed to the stored one when there is none,
+      // which is the same contract withFreshSubscriptionToken gives the inference path.
+      if (token && isSubscriptionRow(row)) {
+        try { const fresh = await freshClaudeSubscriptionToken(); if (fresh) token = fresh; }
+        catch { /* keep the stored token — a stale attempt beats no attempt */ }
+      }
+      const r = await discoverModels({
+        key: id, userId, provider: row.provider, baseUrl: row.base_url, apiKey, token,
+        force: req.query?.refresh === '1' || req.query?.refresh === 'true',
+        list: (a) => listModels({ ...a, fetch }),
+      });
+      const prov = String(row.provider || '').toLowerCase();
+      // `defaultModel` = what runs FOR CHAT when model_preference is empty. Non-secret, and only
+      // for the two vendors whose chat default the harness actually hardcodes; null everywhere
+      // else (an OpenAI-compatible endpoint's default is the endpoint's business, not ours).
+      //
+      // ⚠️ CHAT ONLY, and the UI must say so. The SAME empty model_preference resolves to a
+      // DIFFERENT model on the non-chat paths — cloud.js's DEFAULT_ANTHROPIC_MODEL
+      // (claude-sonnet-4-6) serves narrate/enrich. Labelling this bare "App default" would
+      // promise one model and run another on half the jobs, which is the same class of
+      // dishonesty as the stale roster (independent review ×2, MED).
+      const defaultModel = (prov === 'anthropic' || prov === 'claude') && !row.base_url ? DEFAULT_ANTHROPIC_CHAT_MODEL
+        : (prov === 'openai' && !row.base_url) ? DEFAULT_OPENAI_CHAT_MODEL
+          : null;
+      res.json({ ok: r.ok, models: r.models, source: r.source, stale: r.stale, fetchedAt: r.fetchedAt, error: r.error, defaultModel });
+    } catch { res.json({ ok: false, models: [], source: 'fallback', stale: true, fetchedAt: null, error: 'unreachable' }); }
   });
 
   // NOTE: the "Smart routing" (multi-provider cascade) UI + its GET/PUT /providers/routing
@@ -588,6 +688,9 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
       if (typeof b.base_url === 'string') fields.base_url = b.base_url;
       if (typeof b.api_key === 'string' && b.api_key.trim()) fields.credentials = JSON.stringify({ apiKey: b.api_key.trim() });
       if (Object.keys(fields).length) await db.providers.update(id, userId, fields);
+      // D-074: a new key or endpoint means a DIFFERENT account's model list — drop the cached
+      // one rather than serving the previous credential's roster for up to the TTL.
+      if ('credentials' in fields || 'base_url' in fields) { try { invalidateModelCatalog(id, userId); } catch { /* non-fatal */ } }
       ok(res);
     } catch { bad(res, 500, 'failed to update provider'); }
   });
@@ -596,8 +699,16 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
   router.delete('/providers/:id', async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return bad(res, 400, 'invalid id');
-    try { await db.providers.remove(id, userId); ok(res); }
-    catch { bad(res, 500, 'failed to delete provider'); }
+    try {
+      await db.providers.remove(id, userId);
+      // Drop this row's discovered model list. NOT because ids get reused — `ai_providers.id` is
+      // `INTEGER PRIMARY KEY AUTOINCREMENT` (migrations/0001_init.sql), which SQLite never
+      // reuses, so an earlier version of this comment claiming otherwise was wrong (independent
+      // review, LOW). The reason is simply that a deleted provider's list is dead state, and
+      // leaving it means the process holds a list for a row that no longer exists.
+      try { invalidateModelCatalog(id, userId); } catch { /* non-fatal */ }
+      ok(res);
+    } catch { bad(res, 500, 'failed to delete provider'); }
   });
 
   // Connectivity test — a 1-token request with this row's key. Reports a category
@@ -752,6 +863,10 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     try {
       for (const r of (await db.providers.list(userId)).filter(isSubscriptionRow)) {
         try { await db.providers.remove(r.id, userId); } catch { /* best-effort */ }
+        // D-074: drop the row's discovered model list too. Not doing so left the process holding
+        // a list for a provider the user just disconnected — harmless, but dead state that a
+        // reconnect (new row, new id) would never clear (independent review, LOW).
+        try { invalidateModelCatalog(r.id, userId); } catch { /* non-fatal */ }
       }
       ok(res);
     } catch { bad(res, 500, 'failed to disconnect'); }
@@ -820,6 +935,10 @@ export function portalProvidersRouter({ db, userId = 'local-user', fetch = globa
     // Drop the native path's short-lived token cache too, so the reconnect is immediate on BOTH
     // the CLI and native paths rather than lingering for up to the cache TTL (D-021).
     try { invalidateSubscriptionTokenCache(); } catch { /* non-fatal */ }
+    // D-074: and the discovered model list. Reconnecting can switch ACCOUNTS (a different
+    // plan exposes a different set), and the old row was just deleted, so clear the whole
+    // catalogue rather than reason about which id held what.
+    try { invalidateModelCatalog(); } catch { /* non-fatal */ }
     return { id, activated };
   }
 

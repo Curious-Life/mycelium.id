@@ -56,6 +56,7 @@ import {
   SearchValidationError,
   SearchClientError,
 } from './search-client.js';
+import { renderRef } from '../core/item-ref.js';
 
 export function createDocumentsDomain(deps) {
   if (!deps) throw new TypeError('createDocumentsDomain: deps required');
@@ -422,7 +423,7 @@ export function createDocumentsDomain(deps) {
       // Strip any leading [YYYY-MM-DD] prefixes from the agent's entry
       // before our own prefix is applied. Same bug class as
       // updateInternalModel — agent habit of adding a date in content
-      // produced double-dated entries. See docs/MIND-MODEL-COMPACTION-DESIGN-V3-2026-05-07.md PR-C.
+      // produced double-dated entries. See the mind-model compaction design (v3) PR-C.
       const cleanedEntry = String(args.entry || '').replace(/^(\[\d{4}-\d{2}-\d{2}\]\s+)+/, '');
       const newEntry = `${prefix} ${cleanedEntry}`;
 
@@ -453,7 +454,9 @@ export function createDocumentsDomain(deps) {
     getDocument: async (args) => {
       const doc = await getDocument(args.path);
       if (!doc) return `Document not found: ${args.path}`;
-      return `# ${doc.title || args.path}\n\n${doc.content}`;
+      // The ref rides the header so a titled document read here is still addressable by
+      // forget/mark without the agent having to remember the path it passed in (D-040 ↻1).
+      return `# ${doc.title || args.path} ${renderRef('document', args.path)}\n\n${doc.content}`;
     },
 
     listDocuments: async (args) => {

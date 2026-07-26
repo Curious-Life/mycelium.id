@@ -3,7 +3,7 @@
 // A dedicated Whisper model (faster-whisper CT2 via pipeline/transcribe-service.py)
 // the user downloads ONCE; src/enrich/transcribe-audio.js then prefers it over
 // the slow audio-capable-LLM path. Design:
-// docs/WHISPER-TRANSCRIPTION-DESIGN-2026-06-11.md.
+// the transcription design.
 //
 //   GET  /transcription/status    → { health, model, catalog }
 //   POST /transcription/download  → { model } — persists the choice, ensures the

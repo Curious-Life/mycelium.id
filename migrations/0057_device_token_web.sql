@@ -1,7 +1,7 @@
 -- 0057_device_token_web.sql — generalize device_tokens from "phone pairing" to
 -- "per-client tokens", so the SAME token+session mechanism backs BOTH the mobile
 -- app (kind='phone', minted by QR pairing) and a web browser (kind='web', minted
--- after password/passkey login). See docs/UNIFIED-AUTH-DESIGN-2026-07-24.md.
+-- after password/passkey login). See the unified-auth design.
 --
 --  • kind:            a NON-secret label only. It changes NO authorization — a
 --                     kind='web' token has exactly the authority of a kind='phone'

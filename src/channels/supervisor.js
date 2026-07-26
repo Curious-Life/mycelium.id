@@ -2,7 +2,7 @@
 // (packages/channel-daemon, the Telegram/Discord bridge) lifecycle, mirroring
 // src/embed/supervisor.js. Without this the daemon never runs in the packaged
 // app: nothing spawned it and packages/ wasn't even bundled (the #1 "my bot
-// doesn't reply" cause — see docs/CHANNEL-DAEMON-RELIABILITY-DESIGN-2026-06-08.md).
+// doesn't reply" cause — see the channel-daemon reliability design).
 //
 // This supervisor (run by the Node server, so it behaves identically in npm-dev,
 // Tauri-dev, and the bundled app):

@@ -51,7 +51,7 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
   // raw-read verify gates (plaintext temp DBs) green. The aliased driver
   // (better-sqlite3-multiple-ciphers) makes `cipher`/`key` no-op-safe in plain
   // mode. temp_store=MEMORY prevents plaintext spill to on-disk temp files.
-  // @see docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md, keystore.deriveDbKey.
+  // @see the at-rest blindness design, keystore.deriveDbKey.
   if (dbKeyHex) {
     if (!/^[0-9a-f]{64}$/i.test(dbKeyHex)) throw new Error('dbKeyHex must be 64-char hex');
     db.pragma(`cipher='sqlcipher'`);
@@ -65,14 +65,14 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
   // while the other writes throws SQLITE_BUSY immediately. 5 s lets the loser wait
   // for the WAL writer to commit instead of failing the write. Prerequisite for
   // withTransaction (a db.transaction can hold the write lock longer than a single
-  // statement). @see docs/DOCUMENTS-LAYER-HARDENING-DESIGN-2026-06-29.md §8 step 0.
+  // statement). @see the documents-layer hardening design §8 step 0.
   db.pragma('busy_timeout = 5000');
   // Bound the WAL's on-disk residue: after each checkpoint the -wal file is truncated
   // back to ≤64 MB instead of retaining its high-water mark. Under a heavy pipeline
   // pass the WAL can balloon (31 MB seen in the corruption repro); a long-lived reader
   // (e.g. the once/day integrity check) blocks checkpoints, so without this the file
   // keeps its peak size. Caps disk pressure on a near-full volume (a corruption
-  // co-factor). @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+  // co-factor). @see the vault-concurrency-fix design.
   db.pragma('journal_size_limit = 67108864');
 
   async function query(sql, params = []) {
@@ -121,7 +121,7 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
   //
   // better-sqlite3 may RE-RUN `fn` if it hits SQLITE_BUSY, so `fn` MUST be pure
   // synchronous SQL with fixed params — no random IV, no external side effects.
-  // @see docs/DOCUMENTS-LAYER-HARDENING-DESIGN-2026-06-29.md §3a.
+  // @see the documents-layer hardening design §3a.
   function withTransaction(fn, { tables = [] } = {}) {
     for (const t of tables) {
       const enc = ENCRYPTED_FIELDS[t];

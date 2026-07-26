@@ -7,7 +7,7 @@
 //     editable, re-syncs cleanly when the note is edited and re-imported; and
 //   • a MEMORY (captureMessage, path-stable id) — the ONLY ingestion
 //     path that reaches the mindscape (the drainer + clustering sync are
-//     messages-only; see docs/DESIGN-import-connectors-2026-06-04.md, Pivot A).
+//     messages-only; see the import-connectors design, Pivot A).
 //
 // Two input modes (provide exactly one):
 //   • { folderPath } — Node walks the directory (Tauri native-picker path);

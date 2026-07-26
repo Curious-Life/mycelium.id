@@ -2,7 +2,7 @@
 // production Mycelium's `POST /portal/export` (one plaintext `manifest.json`
 // with ~47 table families inline + `attachments/{id}/{file}` binaries + an
 // `agents/` tree) into this V1 vault, re-encrypting everything under the V1 key.
-// Design: docs/VAULT-IMPORT-FROM-CANONICAL-DESIGN-2026-06-10.md.
+// Design: the vault-import design.
 //
 // HOW DATA LANDS (the whole crypto story): every row goes through db.rawQuery —
 // the SAME auto-encrypting adapter passthrough every namespace uses
@@ -171,6 +171,27 @@ export async function restoreTable(db, table, rows, { userId, overrides = {} }) 
         const content = typeof r.content === 'string' ? r.content.trim() : '';
         const hasAttachment = (r.attachment_id != null && r.attachment_id !== '') || (r.attachmentId != null && r.attachmentId !== '');
         if (!content && !hasAttachment) { out.skippedEmpty++; continue; }
+        // ⛔ THE ENRICHMENT STRIP LIVES HERE, NOT IN A PER-CALLER `overrides` (D-047 ↻1).
+        // The line 10 above already nulls `embedding_768` for EVERY table unconditionally — so any
+        // caller that restores messages WITHOUT passing the enrichment overrides lands rows with no
+        // vector but with the exporting vault's `categories_processed` and `nlp_processed` intact.
+        // That is `tagged > embedded` straight out of an import, and permanently: a row left at
+        // `nlp_processed = 1|2` fails selectPendingEnrichment's `(nlp_processed = 0 OR NULL)` so it
+        // NEVER re-embeds, while `categories_processed = 1` means selectPendingCategories never
+        // re-selects it either. Tagged forever, unsearchable forever.
+        // `src/ingest/restore-core.js` was exactly that caller — `restoreTable(db, 'messages', part,
+        // { userId })`, no overrides — reachable in production through the `recent-export` import
+        // route (ingest/registry.js). Two of the three message-restore paths carried the strip in
+        // their own MESSAGE_OVERRIDES and the third silently did not; the fix is to stop making it
+        // optional. Same argument this file already makes for the credential policy: a rule a
+        // future import route can forget is a rule that will be forgotten. (Callers may still pass
+        // the overrides — they are now redundant, not wrong.)
+        // `cols`-guarded like the `scope` / `embedding_768` strips above: only real columns of the
+        // live schema are set, so this cannot fabricate a field on an older/newer table shape.
+        for (const c of ['nlp_processed', 'categories_processed']) if (cols.has(c)) r[c] = 0;
+        for (const c of ['nlp_processed_at', 'nlp_error', 'categorized_at', 'categories_model', 'domain', 'register', 'subregister']) {
+          if (cols.has(c)) r[c] = null;
+        }
       }
       // Multi-tenant floor: an attachments row may only carry a local_path
       // namespaced under its own user. Fail-closed here so no restore path (a
@@ -428,9 +449,17 @@ async function readBinaryEntry(zip, name) {
 }
 
 /** Strip canonical enrichment products so the local pipeline regenerates them. */
+// ⛔ `categories_processed: 0` IS PART OF THE STRIP (D-047 ↻1). This override nulls the vector
+// and resets the embed stage, but used to leave `categories_processed` at whatever the exporting
+// vault had — so a restore landed rows counted as TAGGED with NO EMBEDDING, i.e. `tagged >
+// embedded` on the first read, before the drainer had run once. The L1 labels are an enrichment
+// product exactly like `entities`; strip them with the rest so the local pipeline regenerates
+// them in the right order (embed → categorize).
 const MESSAGE_OVERRIDES = {
   nlp_processed: 0, nlp_processed_at: null, nlp_error: null,
   embedding_768: null, entities: null, relations: null, entity_summary: null,
+  categories_processed: 0, categorized_at: null, categories_model: null,
+  domain: null, register: null, subregister: null,
 };
 
 /**
