@@ -1,4 +1,4 @@
-// verify:documents-hardening — Cleanup Phase 1 (docs/DOCUMENTS-LAYER-HARDENING-DESIGN-2026-06-29.md)
+// verify:documents-hardening — Cleanup Phase 1 (the documents-layer hardening design)
 //
 //   Part A — the withTransaction primitive (createDb directly, plaintext temp DB)
 //     A1 busy_timeout pragma is 5000 (concurrent two-process writes wait, not SQLITE_BUSY)

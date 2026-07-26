@@ -9,7 +9,7 @@
 //   - reading it back returns {__b64__} decoding to the EXACT bytes
 //   - a normal string/number param + a normal TEXT cell are untouched (no mis-tag)
 //   - the file stays ciphertext at rest
-// @see docs/DESIGN-sqlcipher-vectors-768-anchor-2026-06-19.md
+// @see the SQLCipher 768-anchor vectors design
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync } from 'node:fs';

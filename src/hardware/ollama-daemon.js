@@ -135,7 +135,7 @@ function allowlistEnv(env) {
 // bounded model-SWAP LATENCY (Ollama evicts/reloads instead of co-residing), and a short KEEP_ALIVE
 // stops an idle model from squatting RAM indefinitely. This is the safe, well-understood Phase-1
 // lever; a global local-inference gate / chat-preempts-drain scheduler is the held Phase-2 work
-// (see docs/PIPELINE-COMPUTE-REVIEW-2026-07-21.md).
+// (see the pipeline-compute review).
 //
 // APPLIED ONLY to daemons we START (spawnServe — the spawn + alt-port self-heal paths), NEVER to an
 // adopted user daemon (start() returns before spawnServe on adopt), and ONLY when the user has not

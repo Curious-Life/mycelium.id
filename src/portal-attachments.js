@@ -23,6 +23,8 @@ import { clampStored } from './enrich/text-limits.js';
 import { transcribeAttachment } from './enrich/transcribe-attachment.js';
 import { getTranscriberHealth } from './transcribe/supervisor.js';
 import { serviceState, isRetryable, transcribeNotReadyReason } from './system/service-state.js';
+import { readCoverage } from './enrich/transcript-coverage.js';
+import { parseByteRange } from './portal-audio-stream.js';
 
 const LIST_SCAN_CAP = 2000; // rows decrypted per list call — personal-scale guard
 
@@ -55,6 +57,24 @@ export const TRANSCRIBE_FAULT_MESSAGE = Object.freeze({
   'engine-down': 'The transcription engine isn’t running — retry, or re-select the model in Settings.',
   'service-error': 'The transcription service refused the job — retry, or re-select the model in Settings.',
   'engine-error': 'The transcription engine failed part-way through this recording. Any text it did produce was kept — you can retry.',
+  // ── D-076: the vocabulary for a PARTIAL transcript ────────────────────────────────────────
+  // These reasons did not exist because the state did not exist: a transcription that covered
+  // only part of a recording was recorded as finished, so there was nothing to say. Each one
+  // promises the SAME two things, because both are now true: the text so far is kept, and the
+  // remainder is picked up automatically (the background drain resumes from recorded coverage).
+  'stream-truncated': 'The transcription service stopped sending part-way through this recording. The text so far is saved and the rest will be picked up automatically.',
+  incomplete: 'Only part of this recording has been transcribed so far. The text so far is saved and the rest will be picked up automatically.',
+  partial: 'Only part of this recording has been transcribed so far. The text so far is saved and the rest will be picked up automatically.',
+  'audio-truncated': 'Decoding this recording ran past its budget, so only part of the audio was transcribed. The rest will be picked up automatically.',
+  'window-failed': 'One or more sections of this recording could not be transcribed. The rest is saved and the missing parts will be retried automatically.',
+  // ⚠️ THIS ONE DELIBERATELY DOES NOT PROMISE AUTOMATIC RECOVERY. It is written when the only
+  // available engine was the general chat model, which returns text with no timestamps, no
+  // segment stream and no completion signal — so we cannot verify it covered the whole recording,
+  // and we mark it unverified rather than assert it is done. But the background drain hard-gates on
+  // Whisper health, so on a vault with an audio-capable Ollama and NO transcription model there is
+  // nothing to pick it up (second adversarial review, HIGH-2). Telling the owner it will be
+  // handled automatically would be a promise the system cannot keep; this names the actual action.
+  'unverified-engine': 'This was transcribed by the chat model, which can’t confirm it captured the whole recording. Set up a transcription model in Settings to have it re-done accurately.',
   timeout: 'This recording took longer than the transcription time limit. Try again, or split the file.',
   'transport-error': 'Lost contact with the transcription service part-way through — retry.',
   canceled: 'Transcription was canceled.',
@@ -148,24 +168,16 @@ export function portalAttachmentsRouter({ db, userId, getHealth = getTranscriber
       // Type / Content-Disposition) are already set by each branch before calling.
       const sendRange = (buf) => {
         const total = buf.length;
-        const hdr = req.headers.range;
-        const m = hdr && /^bytes=(\d*)-(\d*)$/.exec(String(hdr).trim());
-        if (m) {
-          let start = m[1] === '' ? NaN : parseInt(m[1], 10);
-          let end = m[2] === '' ? NaN : parseInt(m[2], 10);
-          if (Number.isNaN(start)) { // suffix range: bytes=-N → last N bytes
-            const n = Number.isNaN(end) ? total : end;
-            start = Math.max(0, total - n); end = total - 1;
-          }
-          if (Number.isNaN(end) || end >= total) end = total - 1;
-          if (Number.isFinite(start) && start >= 0 && start <= end && start < total) {
-            res.status(206);
-            res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
-            res.setHeader('Content-Length', end - start + 1);
-            return res.end(buf.subarray(start, end + 1));
-          }
-          res.status(416).setHeader('Content-Range', `bytes */${total}`); // unsatisfiable
+        const range = parseByteRange(req.headers.range, total); // shared with the streamed WAV path
+        if (range === 'unsatisfiable') {
+          res.status(416).setHeader('Content-Range', `bytes */${total}`);
           return res.end();
+        }
+        if (range) {
+          res.status(206);
+          res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${total}`);
+          res.setHeader('Content-Length', range.end - range.start + 1);
+          return res.end(buf.subarray(range.start, range.end + 1));
         }
         res.setHeader('Content-Length', total);
         return res.send(buf);
@@ -173,17 +185,27 @@ export function portalAttachmentsRouter({ db, userId, getHealth = getTranscriber
 
       // ?format=wav — in-process OGG/Opus → WAV transcode for browser playback
       // (WKWebView can't decode Opus; Telegram voice notes are always OGG).
-      // Fail-soft: a failed transcode serves the original bytes.
+      //
+      // ⚠️ STREAMED, NOT BUFFERED — AND THAT IS THE FIX, NOT AN OPTIMISATION. This branch used to
+      // call `oggOpusToWav(bytes)`, whose `maxSeconds` defaults to 900: every recording over 15
+      // minutes was served as a 15-minute WAV that just stopped, with nothing in the response
+      // saying so (the playback sibling of D-076). The cap could not simply be raised because the
+      // buffered decode holds the whole thing in one Buffer — ~172 MB for 30 minutes. The stream
+      // takes the exact length from the Ogg granule, serves any byte range from it, and holds one
+      // ~2.9 MB window at a time; a decode that cannot deliver what the header promised fails the
+      // transfer instead of completing a short body. See src/portal-audio-stream.js.
+      //
+      // Fail-soft is preserved: `false` means "not a decodable Opus stream" and the original
+      // bytes are served below, exactly as before.
       if (req.query.format === 'wav' && /ogg|opus/i.test(row.file_type || '')) {
         try {
-          const { oggOpusToWav } = await import('./enrich/ogg-opus.js');
-          const wav = await oggOpusToWav(bytes);
-          if (wav) {
-            res.setHeader('Content-Type', 'audio/wav');
-            if (row.file_name) res.setHeader('Content-Disposition', `inline; filename="${String(row.file_name).replace(/[^\w. -]/g, '_')}.wav"`);
-            return sendRange(wav);
-          }
-        } catch { /* fall through to raw bytes */ }
+          const { streamOggAsWav } = await import('./portal-audio-stream.js');
+          if (await streamOggAsWav({ req, res, ogg: bytes, fileName: row.file_name })) return;
+        } catch (err) {
+          if (res.headersSent) { res.destroy(); return; } // mid-body fault: never finish a short body
+          console.error('[portal-attachments] wav stream failed:', err?.message);
+          /* fall through to raw bytes */
+        }
       }
 
       // Inline ONLY for allowlisted media; everything else downloads as an
@@ -298,7 +320,11 @@ export function portalAttachmentsRouter({ db, userId, getHealth = getTranscriber
       transcribeAttachment(db, userId, row.id, {
         onProgress: (p) => { state.coveredSec = p.coveredSec; state.durationSec = p.durationSec; state.segments = p.segments; },
       }).then((r) => {
-        state.status = r.ok ? 'done' : 'error';
+        // D-076: a partial run is NOT 'done' and it is NOT a flat 'error' either — it is work that
+        // advanced and will continue. Reporting it as 'done' is the defect; reporting it as 'error'
+        // would tell the owner their recording failed when most of it succeeded.
+        state.status = r.ok ? 'done' : (r.partial ? 'partial' : 'error');
+        if (r.ok === false && r.partial) { state.coveredSec = r.coveredSec ?? state.coveredSec; state.durationSec = r.durationSec ?? state.durationSec; }
         if (!r.ok) {
           // Carry the CAUSE, not just "error". `message` is owner-facing copy derived from a
           // fixed reason enum (never a raw service string); `detail` is the supervisor/service
@@ -325,15 +351,43 @@ export function portalAttachmentsRouter({ db, userId, getHealth = getTranscriber
       const row = await db.attachments.getById(id, userId);
       if (!row || row.user_id !== userId) return res.status(404).json({ error: 'not-found' });
       const job = jobs.get(id);
+      const cov0 = readCoverage(row.metadata);
+      // ⚠️ A TERMINAL JOB IS A MEMORY OF ONE PASS; COVERAGE IS THE CURRENT TRUTH.
+      // `jobs` is never cleared, and 'partial' is specifically a state the BACKGROUND DRAIN is
+      // expected to resolve — so serving the stale entry meant the owner kept reading "the rest
+      // will be picked up automatically" long after the drain HAD finished the row, with frozen
+      // coveredSec/durationSec beside it (adversarial review, MEDIUM-7). The entry is not simply
+      // dropped, because that would also discard the fault REASON + owner copy on the first poll
+      // after a failure (the QA6 §2 guarantee). Instead: coverage retires the entry once the row is
+      // genuinely complete, and otherwise the live row's coverage refreshes the stale numbers.
+      if (job && job.status !== 'running' && cov0?.complete) jobs.delete(id);
+      const live = jobs.get(id);
       // transcript is the PROGRESSIVELY-saved text, so the UI can show it fill in live.
-      if (job) return res.json({
-        status: job.status, coveredSec: job.coveredSec, durationSec: job.durationSec, segments: job.segments,
-        error: job.error,
+      if (live) return res.json({
+        status: live.status,
+        coveredSec: live.status === 'running' ? live.coveredSec : (cov0?.coveredSec ?? live.coveredSec),
+        durationSec: live.status === 'running' ? live.durationSec : (cov0?.durationSec ?? live.durationSec),
+        segments: live.status === 'running' ? live.segments : (cov0?.segments ?? live.segments),
+        error: live.error,
         // The REASON, in words, plus whether a Retry is honest — so the Media page can stop
         // rendering the raw enum ("no-text") as the owner's whole explanation.
-        message: job.message ?? null, detail: job.detail ?? null, retryable: job.retryable ?? null,
+        message: live.message ?? null, detail: live.detail ?? null, retryable: live.retryable ?? null,
         hasTranscript: !!row.transcript, transcript: row.transcript || null,
       });
+      // ⚠️ D-076: "HAS TEXT" IS NOT "DONE". With no job in flight this used to answer
+      // `row.transcript ? 'done' : 'idle'`, so after a restart a PROGRESSIVELY-SAVED partial read
+      // back as a finished transcription — the UI's half of the same lie the drain predicate told.
+      // Coverage is the arbiter; 'partial' is the honest third state and carries how far it got.
+      const cov = cov0;
+      if (row.transcript && cov && cov.incomplete && !cov.complete) {
+        return res.json({
+          status: 'partial', hasTranscript: true, transcript: row.transcript,
+          coveredSec: cov.coveredSec, durationSec: cov.durationSec, segments: cov.segments,
+          // The recorded fault picks the copy: 'unverified-engine' must NOT read as "we'll finish
+          // it for you", because on that configuration nothing will.
+          retryable: true, message: TRANSCRIBE_FAULT_MESSAGE[cov.fault] || TRANSCRIBE_FAULT_MESSAGE.partial,
+        });
+      }
       return res.json({ status: row.transcript ? 'done' : 'idle', hasTranscript: !!row.transcript, transcript: row.transcript || null });
     } catch (err) {
       res.status(500).json({ error: 'status-failed' });

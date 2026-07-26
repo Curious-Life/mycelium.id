@@ -18,7 +18,7 @@
 //     ~/.claude). Mycelium passes no token.
 //
 // Scoped to the interactive chat (trusted input) only. See
-// docs/HARNESS-CLI-DESIGN-2026-07-02.md for the stream-json mapping + threat model.
+// the harness-CLI design for the stream-json mapping + threat model.
 import { spawn as nodeSpawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -244,7 +244,7 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, log
         // deltas below ALSO reset it (redundant but explicit for the streaming-flag logic).
         lastActivity = Date.now();
         // stream-json event envelope — see canonical runner.js:388-424 + the mapping
-        // table in docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+        // table in the harness-CLI design.
         if (data?.type === 'stream_event' && data.event) {
           const ev = data.event;
           if (ev.type === 'content_block_start') {

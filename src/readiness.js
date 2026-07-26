@@ -16,7 +16,7 @@
 // privately any more" — that was false when written (independent review, 2026-07-15), and
 // a false claim here is exactly how the next reader concludes the job is done.
 //
-// WHY THIS EXISTS (the sweep that produced it — docs/DATA-READINESS-DESIGN-2026-07-15.md
+// WHY THIS EXISTS (the sweep that produced it — the data-readiness design
 // §2.8): the same facts were computed in several places, differently, and they disagreed:
 //   • "empty"      — the onboarding rail used `messageCount > 0`, the mindscape view used
 //                    `points.length > 0`. Both true through the whole middle of onboarding
@@ -281,8 +281,17 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
   async function tags() {
     try {
       const c = await db.messages.categoriesBacklogCached(userId);
-      return { total: Number(c?.total || 0), tagged: Number(c?.tagged || 0), pending: Number(c?.pending || 0) };
-    } catch { return { total: 0, tagged: 0, pending: 0, unknown: true }; }
+      // `pending` is now "categorizable NOW" (untagged AND embedded) — the drain predicate.
+      // `blockedOnEmbed` is the rest of the untagged work, still queued behind embedding. Both are
+      // surfaced: a consumer that wants "how much labeling is left" must add them, and one that
+      // wants "how much can run right now" must not (D-047 ↻1).
+      return {
+        total: Number(c?.total || 0),
+        tagged: Number(c?.tagged || 0),
+        pending: Number(c?.pending || 0),
+        blockedOnEmbed: Number(c?.blockedOnEmbed || 0),
+      };
+    } catch { return { total: 0, tagged: 0, pending: 0, blockedOnEmbed: 0, unknown: true }; }
   }
 
   // ── embedder ───────────────────────────────────────────────────────────────
@@ -601,6 +610,10 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
         db.messages?.categoriesBacklogCached?.(userId),
         db.messages?.nlpBacklogCached?.(userId),
       ]);
+      // ⚠️ `cat.pending` is now the DRAIN predicate (untagged AND embedded), so this sum stopped
+      // DOUBLE-COUNTING: a row waiting to be embedded already rides in `emb.pending`, and it used
+      // to be counted a second time as categorize-pending. Do NOT add `cat.blockedOnEmbed` here to
+      // "restore" the old number — that number was the bug (D-047 ↻1).
       const waiting = Number(emb?.pending || 0) + Number(cat?.pending || 0) + Number(nlp?.pending || 0);
       return { paused, pausedAt, waiting };
     } catch {
@@ -654,6 +667,13 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       const catTotal = Number(cat?.total || 0);
       const catTagged = Number(cat?.tagged || 0);
       const catPending = Number(cat?.pending || 0);
+      // D-047 ↻1: untagged rows the drain CANNOT select yet because they are not embedded.
+      // `catPending` is now the drain predicate exactly ("categorizable now"), so on a large
+      // import it is near-zero while thousands of rows wait — reading only it would render the
+      // categorize stage `done` mid-import, the silent-dormancy lie this slice exists to prevent.
+      // `catLeft` is the honest "labeling still to do" total the stage counts against.
+      const catBlockedOnEmbed = Number(cat?.blockedOnEmbed || 0);
+      const catLeft = catPending + catBlockedOnEmbed;
       const points = Number(ms?.pointCount || 0);
       // ⚠️ §3.2a — mindscape() NEVER throws; on a transient getNoiseStats failure it returns
       // {pointCount:0, unknown:true} (its own HIGH-4 catch). Reading that as points===0 would let
@@ -721,7 +741,7 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // is categorizePaused (its own control), independent of embed's.
       if (embedded === 0) stages.push({ key: 'categorize', state: 'pending', paused: categorizePaused });
       else if (labStatus === 'no_model') stages.push({ key: 'categorize', state: 'blocked', reason: 'no_model', action: approveModel, paused: categorizePaused });
-      else if (categorizePaused && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'paused', action: resume, paused: true });
+      else if (categorizePaused && catLeft > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'paused', action: resume, paused: true });
       // ⚠️ QA6 — THE STAGE IS DEFERRED, NOT IDLE, AND NOT RUNNING. The drainer serializes the two
       // on-box stages: while embedding still has a backlog it is actively draining, categorize +
       // enrich do not run at all (drainer.js, `waitOnEmbed`). Without this arm the stage rendered
@@ -735,10 +755,30 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // Carries NO action — a deferral has no remedy for the user to apply, and the design forbids a
       // named block without one only where a remedy EXISTS. `paused` is still carried so the
       // co-located Stop control stays reachable during a long import.
-      else if (catWaitingOnEmbed && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_embed', paused: categorizePaused });
-      else if (catWaitingOnCompute && catPending > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_compute', paused: categorizePaused });
+      // ⚠️ D-047 ↻1 — THE SECOND, STRUCTURAL waiting_embed ARM, and it is not a duplicate of the
+      // one above. `catWaitingOnEmbed` is the drainer's per-CYCLE SCHEDULING decision (it chose to
+      // defer the block this tick). This arm is the STANDING DATA FACT: there is untagged work
+      // that CANNOT be selected because those rows have no vector yet (selectPendingCategories'
+      // `embedding_768 IS NOT NULL`). They come apart constantly — the commonest case is embed
+      // stalled/refused, where the drainer does NOT defer (that is the starvation release valve,
+      // and it is the release that let categorize outrun embed in the first place) yet the stage
+      // is genuinely blocked on embedding for every row it cannot see. Without this arm those
+      // cycles render `done` over an untagged corpus.
+      else if (catWaitingOnEmbed && catLeft > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_embed', paused: categorizePaused });
+      else if (catWaitingOnCompute && catLeft > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_compute', paused: categorizePaused });
       else if (DOWN.has(labStatus)) stages.push({ key: 'categorize', state: 'blocked', reason: 'ollama_down', action: checkLabeler, paused: categorizePaused });
-      else if (catPending > 0) stages.push({ key: 'categorize', state: 'running', count: { done: catTagged, total: catTotal }, etaSeconds: categorizeEta(st, catPending, categorizePaused, false), paused: false });
+      // ⚠️ PRICED OVER `catLeft`, NOT `catPending` (QA9 review, F4). `catPending` is now only the
+      // rows labelable RIGHT NOW; mid-import that is ~one batch while thousands wait, so an ETA over
+      // it renders "~30s left" on the mindscape rail while the StatusPopover — which counts the same
+      // work honestly — renders hours. portal-activity.js made the same switch, and its comment
+      // claims "the two surfaces stop contradicting each other"; this arm was the one that still did.
+      else if (catPending > 0) stages.push({ key: 'categorize', state: 'running', count: { done: catTagged, total: catTotal }, etaSeconds: categorizeEta(st, catLeft, categorizePaused, false), paused: false });
+      // Nothing labelable right now, but untagged work remains behind embedding. ⚠️ IT CARRIES THE
+      // `resume` ACTION WHEN EMBED IS PAUSED (QA9 review, F8): the two stages pause independently,
+      // and with the ordering predicate an embed pause now stops categorize for every un-embedded
+      // row. The "a deferral has no remedy" rationale above does NOT apply then — the remedy is
+      // resuming EMBEDDING, and a block with a real remedy must offer it.
+      else if (catBlockedOnEmbed > 0) stages.push({ key: 'categorize', state: 'blocked', count: { done: catTagged, total: catTotal }, reason: 'waiting_embed', ...(embedPaused ? { action: resume } : {}), paused: categorizePaused });
       else stages.push({ key: 'categorize', state: 'done', count: { done: catTagged, total: catTotal }, paused: categorizePaused });
 
       // cluster — the map. A map that EXISTS is done. Below the floor the user is stranded unless

@@ -178,7 +178,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // session is BOUND to a device_tokens row: matchSync() JOINs and dies with the
     // token (validity==token-liveness, no independent TTL — R0). Sync hot-path
     // matcher, raw secrets never stored. @see src/db/device-sessions.js,
-    // docs/UNIFIED-AUTH-DESIGN-2026-07-24.md.
+    // the unified-auth design.
     deviceSessions: createDeviceSessionsNamespace({ d1Query, rawDb }),
 
     // Connectors (data-connection operational state for the sync scheduler +
@@ -254,7 +254,7 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     db.spaceContent = createSpaceContentWriter({ keyManager: db.spaceKeyManager, spaceCrypto: db.spaceCrypto, oplog: db.spaceOplog, selfDid: federationDeps.selfDid });
   }
 
-  // On-disk search index sidecar (docs/SEARCH-SIDECAR-DESIGN-2026-07-02.md): the
+  // On-disk search index sidecar (the search-sidecar design): the
   // FTS5/vec0 index lives in a SEPARATE encrypted file (mycelium.search.db), NOT in
   // the vault — so a corrupt regenerable index self-heals (file rm + rebuild) instead
   // of a fatal, un-DROPpable vault error, and its heavy bulk-build checkpoint never

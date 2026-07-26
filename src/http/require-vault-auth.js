@@ -1,6 +1,6 @@
 // src/http/require-vault-auth.js — the fail-closed per-request gate for the
 // portal/REST vault-data surface (Phase 1, step 1.2 of the mobile plan; design:
-// docs/DESIGN-portal-auth-relay-2026-06-05.md).
+// the portal-auth relay design).
 //
 // V1 history: the portal+REST server (:8787) had NO per-request auth — it was
 // "always signed in" and bound to localhost. To reach it from a phone over the
@@ -57,7 +57,11 @@ function expectedBearer() {
 
 /** Extract the raw token from an `Authorization: Bearer <token>` header, or null. */
 function bearerToken(authz) {
-  const m = /^Bearer\s+(.+)$/i.exec(String(authz || '').trim());
+  // (\S.*), not (.+): \s+ and . overlap on spaces, so \s+(.+) backtracks
+  // polynomially on an attacker-controlled Authorization header of many spaces
+  // (js/polynomial-redos). Anchoring the token to a non-whitespace first char
+  // removes the overlap — linear, identical result after trim. (Same fix as auth-shim.js.)
+  const m = /^Bearer\s+(\S.*)$/i.exec(String(authz || '').trim());
   return m ? m[1].trim() : null;
 }
 

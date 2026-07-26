@@ -16,8 +16,8 @@
  * — they NEVER inline rawQuery, so scope filtering and tenant isolation
  * pass through the canonical DB layer.
  *
- * Spec: docs/architecture/FISHER-TRAJECTORY.md
- * Plan: docs/architecture/FISHER-IMPLEMENTATION.md (§6)
+ * Spec: the Fisher trajectory spec
+ * Plan: the Fisher implementation plan (§6)
  *
  * @typedef {object} FisherToolsDeps
  * @property {object} db       — needs db.fisher.* (and db.topology for territory names)

@@ -14,7 +14,7 @@
 # <repo>/.build-cache/runtime-<arch>/ and reused; only the app code re-syncs each
 # run, so iterative `cargo tauri build`s stay fast. Wired as tauri.conf
 # `build.beforeBuildCommand`. Verified relocatable by Spikes P + N
-# (docs/DESIGN-packaged-app-distribution-2026-06-02.md).
+# (the packaged-app distribution design).
 #
 # macOS, arm64 OR x86_64 — set MYC_ARCH (defaults to host). The bundled
 # Node/Python/wheels + node_modules better_sqlite3.node are arch-specific and do
@@ -22,7 +22,7 @@
 # Apple Silicon => macos-14). node_modules is rsync'd from the host's npm install,
 # so run `npm ci` on the target-arch runner before this script. Needs network at
 # BUILD time (downloads + pip + npm) — never at the user's runtime.
-# See docs/DESIGN-macos-signed-distribution-2026-06-17.md.
+# See the macOS signed-distribution design.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,7 +39,7 @@ check_tools node npm curl rsync
 # Defaults to the host arch; override with MYC_ARCH=x86_64|arm64 to stage an
 # Intel bundle on an Intel runner (native wheels + better_sqlite3.node + bundled
 # Node/Python are arch-specific and DO NOT cross-compile — build each arch on a
-# runner of that arch; see docs/DESIGN-macos-signed-distribution-2026-06-17.md).
+# runner of that arch; see the macOS signed-distribution design).
 MYC_ARCH="${MYC_ARCH:-$(uname -m)}"
 case "$MYC_ARCH" in
   arm64|aarch64) MYC_ARCH=arm64;  PBS_ARCH=aarch64; NODE_ARCH=arm64 ;;

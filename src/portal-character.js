@@ -32,6 +32,8 @@ import { lineDiff, diffStat } from './mindfiles/diff.js';
 import { estimateTokens } from './inference/token-budget.js';
 import { createVoiceRenderer } from './tts/voice-render.js';
 import { createVoiceSampleStore, MAX_SAMPLE_BYTES } from './tts/voice-sample-store.js';
+import { getQwenTtsHealth } from './tts/qwen3-tts-supervisor.js';
+import { normalizeHealth } from './system/service-state.js';
 import { mindAgentRoot } from './paths.js';
 
 const BEING_FILE = 'self.md';
@@ -288,7 +290,22 @@ export function portalCharacterRouter({
     // vocabulary vs free-form) is OPEN — kept free-form + owner-only for now.
     const instruct = req.body?.instruct ? String(req.body.instruct).slice(0, 300) : undefined;
     const r = await voiceRenderer.renderWithSample({ agentId, text, instruct });
-    if (!r.ok) return res.status(r.status).json({ ok: false, error: r.error });
+    if (!r.ok) {
+      // Carry the REAL reason + whether retrying can help (D-003 ↻2). `error` is an
+      // allowlisted token, `detail` is already sanitized by voice-render.js, and
+      // `terminal` is what stops the UI from saying "try again shortly" about a
+      // condition that will never change on its own.
+      // `service` is the supervisor's own state — the operator could previously see
+      // NOTHING of it (getQwenTtsHealth had zero consumers), which is why a halted
+      // supervisor looked identical to a warming one.
+      const service = normalizeHealth(getQwenTtsHealth());
+      return res.status(r.status).json({
+        ok: false, error: r.error,
+        ...(r.detail ? { detail: r.detail } : {}),
+        terminal: !!r.terminal,
+        service: { state: service.state, status: service.status, remedy: getQwenTtsHealth()?.remedy || null },
+      });
+    }
     res.setHeader('content-type', 'audio/wav');
     res.setHeader('cache-control', 'no-store');
     res.send(r.audio);

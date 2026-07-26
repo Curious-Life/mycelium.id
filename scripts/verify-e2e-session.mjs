@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// verify-e2e-session.mjs — Phase 2a gate (docs/E2E-REACHABILITY-DESIGN-2026-07-19.md).
+// verify-e2e-session.mjs — Phase 2a gate (the E2E-reachability design).
 //
 // PART 1 — FROZEN VECTOR: fixed (es,ee,cnonce,sn,ep,eb) → fixed session keys + a frame
 //   AEAD. The iOS E2ESessionTests pins the SAME constants → cross-language parity, no device.

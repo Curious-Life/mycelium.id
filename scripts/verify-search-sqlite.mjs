@@ -150,7 +150,7 @@ async function main() {
   seed.run('m-budget', 'u1', 'quarterly budget and finances', '2026-06-03T00:00:00.000Z');
   const fakeDb = {
     _sqlite: intRaw,
-    _sqliteSearch: intRaw, // sidecar contract: the sqlite backend uses _sqliteSearch (docs/SEARCH-SIDECAR-DESIGN)
+    _sqliteSearch: intRaw, // sidecar contract: the sqlite backend uses _sqliteSearch (the search-sidecar design)
     rawQuery: (sql, params = []) => { try { return { results: intRaw.prepare(sql).all(...params) }; } catch { return { results: [] }; } },
   };
   const sh = createSearchHelpers({ db: fakeDb, userId: 'u1', searchBackend: 'sqlite' });

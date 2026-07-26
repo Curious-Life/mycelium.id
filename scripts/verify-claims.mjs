@@ -5,7 +5,7 @@
 // a read through the JS adapter auto-decrypts + coerces a numeric confidence back
 // to a Number, that scope is auto-tagged (SCOPE_AWARE_TABLES), and the regression
 // that internal_model_items no longer registers PHANTOM columns. PASS/FAIL ledger.
-// See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+// See the persona-claims design.
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import crypto from 'node:crypto';

@@ -7,7 +7,7 @@
 // event loop). Instead we spawn src/db/vault-integrity-check.mjs DETACHED (its own
 // process, read-only) and throttle it to once/24h. On a corrupt verdict we log loudly
 // and drop a marker file the app can surface; we never auto-overwrite the vault (that
-// policy is operator-gated). @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+// policy is operator-gated). @see the vault-concurrency-fix design.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -3,7 +3,7 @@
 -- A device session is NOT a better-auth session. It is a vault-local, narrower
 -- credential whose ONLY purpose is to let an ambient COOKIE carry EXACTLY the
 -- authority of the device token it was minted from — no more. Two clients use it,
--- one mechanism (docs/UNIFIED-AUTH-DESIGN-2026-07-24.md, "one mechanism, two
+-- one mechanism (the unified-auth design, "one mechanism, two
 -- on-ramps"):
 --   • the embedded WKWebView portal (mobile) — cannot set an Authorization header
 --     on the SPA's same-origin fetches, so it presents this cookie instead; the

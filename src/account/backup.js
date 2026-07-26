@@ -3,7 +3,7 @@
 // `.myvault` file the user keeps in their own storage, and "restore from backup"
 // → drop that file back + paste the recovery key (the existing /account/restore
 // path then verifies the key against the restored kcv.json and opens the REAL
-// data — see docs/VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md).
+// data — see the vault-backup and remote-access design).
 //
 // WHY THIS IS SAFE TO PRODUCE WITHOUT A KEY: encryption is column-level — every
 // sensitive cell in mycelium.db is an AES-256-GCM wrapped-DEK envelope

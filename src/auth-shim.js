@@ -6,7 +6,7 @@ import { parseCookies } from './http/require-vault-auth.js';
 // The unified device-session cookie (U7). Server-set only — HttpOnly (so it is not
 // JS-readable and not client-injectable) with validity derived per request from the
 // backing device token (no independent TTL — R0). See src/db/device-sessions.js +
-// docs/UNIFIED-AUTH-DESIGN-2026-07-24.md.
+// the unified-auth design.
 const DEVICE_SESSION_COOKIE = 'mycelium_device_session';
 const CSRF_COOKIE = 'mycelium_csrf';
 const SESSION_COOKIE_MAX_AGE = 34560000; // 400 d — persistent by design; the token binding is the lifetime
@@ -198,7 +198,7 @@ export function authShimRouter({ userId, handle = 'local', getHandle, getRequire
   });
 
   // ─── Unified device-session cookie (U7) — one mechanism, two on-ramps ──────────
-  // docs/UNIFIED-AUTH-DESIGN-2026-07-24.md. The session is a vault-local cookie
+  // the unified-auth design. The session is a vault-local cookie
   // BOUND to a device_tokens row: validity==token-liveness, no independent TTL (R0).
   // Every failure returns JSON, NEVER a redirect and NEVER a Set-Cookie, so the iOS
   // navigation delegate can distinguish "revoked" (401) from transient (503) and

@@ -3,15 +3,15 @@
 
 The hierarchy's cluster COUNTS are deterministic √n targets (cluster.py
 scale_targets) — a deliberate fix for the k=2 realm-collapse the cosine-silhouette
-selector produced on anisotropic embeddings (docs/REALM-K-CLUSTERING-FIX-DESIGN-
-2026-06-17.md). That fix is correct, but it left the realm/theme/territory counts
+selector produced on anisotropic embeddings (the realm-k clustering-fix design).
+That fix is correct, but it left the realm/theme/territory counts
 as ASSUMPTIONS presented as measurements, with nothing watching whether the
 resulting partition is actually well-formed.
 
 This module adds three CHEAP, READ-ONLY diagnostics that are *stored as health
 metrics and never used to select k* (re-introducing silhouette/DBCV selection
 would re-introduce the original bug — see the decision log,
-docs/CLUSTERING-ALGORITHM-DECISION-LOG-2026-06-19.md):
+the clustering-algorithm decision log):
 
   1. realm_max_share   — largest realm's fraction of points. The collapse's
                          signature was one realm holding 0.78; a healthy run is

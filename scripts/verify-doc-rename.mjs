@@ -1,5 +1,5 @@
 // verify:doc-rename — atomic document path/slug rename + cascade
-// (docs/DOCUMENT-SLUG-RENAME-DESIGN-2026-06-29.md §7).
+// (the document slug-rename design §7).
 //
 //   R1 documents.path moved old→new; old gone, new present
 //   R2 row id UNCHANGED (document_versions / embeddings / FTS linkage intact)

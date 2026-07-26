@@ -1,5 +1,5 @@
 // src/crypto/space-seal.js — E2E shared-spaces sealed box (the SpaceCrypto KEY layer
-// of the "Space Key Lockbox", docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md).
+// of the "Space Key Lockbox", the shared-spaces E2E design).
 //
 // Seals a per-space Content Encryption Key (CEK) to one member's published X25519
 // keyAgreement key, so ONLY that member can unwrap it. This is anonymous public-key

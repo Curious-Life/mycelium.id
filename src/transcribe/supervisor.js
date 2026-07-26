@@ -1,7 +1,7 @@
 // src/transcribe/supervisor.js — ONE owner for the local transcription service
 // (pipeline/transcribe-service.py, :8093) lifecycle. Faithful clone of the
 // embed supervisor (src/embed/supervisor.js) for the dedicated Whisper STT
-// path (docs/WHISPER-TRANSCRIPTION-DESIGN-2026-06-11.md).
+// path (the transcription design).
 //
 // OPT-IN BY DESIGN: unlike the embedder (always required), the Whisper service
 // only runs once the user picked a transcription model (users.settings

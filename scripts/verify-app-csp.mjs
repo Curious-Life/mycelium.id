@@ -2,7 +2,7 @@
 //
 // The Tauri webview loads the REST server as a REMOTE origin (127.0.0.1:8787), so
 // Tauri's compile-time CSP can't cover it — the CSP must ride the HTTP response
-// (docs/APP-SANDBOX-HARDENING-DESIGN-2026-06-16.md, D2). This gate boots a REAL
+// (the app-sandbox hardening design, D2). This gate boots a REAL
 // vault, serves the canonical built shell, and asserts on EVERY response class
 // (SPA shell, SPA fallback, data 404): a CSP with `script-src 'self' 'sha256-…'`
 // (≥1 hash, NO 'unsafe-inline'), framing locked, plus the companion headers — and

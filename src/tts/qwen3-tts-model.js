@@ -3,7 +3,7 @@
 // snapshot from Hugging Face (mlx-community/Qwen3-TTS-12Hz-*). Replaces Kokoro,
 // which the operator judged "quite bad"; Qwen3-TTS WON a live listening test on
 // the operator's own hardware (2026-07-15) — see
-// docs/AGENT-CHARACTER-AND-VOICE-DESIGN-2026-07-15.md §0 (V1) + §2 (evidence).
+// the agent character-and-voice design §0 (V1) + §2 (evidence).
 //
 // The portal "Download model" button triggers startDownload(); the UI polls
 // getModelState(). Files land under <dataDir>/models/qwen3-tts/<variant>/ and

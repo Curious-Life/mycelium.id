@@ -14,7 +14,7 @@
 //
 // `quality` = COMPANION-suitability (warmth/EQ for personal growth — NOT generic
 // capability), from the curated family-prior in catalog-meta.js. See
-// docs/DYNAMIC-CATALOG-DESIGN-2026-06-05.md.
+// the dynamic-catalog design.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

@@ -102,10 +102,10 @@ SEED_PHRASES: dict[str, list[str]] = {
 # the single-pole constructs above, an axis is scored as a SIGNED LEAN:
 #   lean = mean over window of ( cos(msg, +pole_centroid) − cos(msg, −pole_centroid) )
 # (the generalization of affective_volatility's cos_pos−cos_neg; see
-# docs/DESIGN-inner-states-engine-2026-06-24.md). Seeds are POOLED across languages
+# the inner-states engine design). Seeds are POOLED across languages
 # into one centroid per pole — pooling is the denoiser that makes a single
 # multilingual axis transfer to any language (proven: pipeline/lab/inner-states-
-# spike.py). Method/evidence: docs/DESIGN-inner-states-embeddings-2026-06-24.md.
+# spike.py). Method/evidence: the inner-states embeddings design.
 #
 # AXIS_LANGS documents the languages present; the schema allows growth (more
 # phrases / more languages bump ANCHOR_VERSION via the seed-content hash).
@@ -517,7 +517,7 @@ def all_content_hashes() -> dict[str, str]:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Inner-States Atlas · Phase A — Affective core (Layer 1)
-# Authored 2026-06-21 per docs/INNER-STATES-ATLAS-SPEC.md (scope: valence +
+# Authored 2026-06-21 per the inner-states atlas spec (scope: valence +
 # arousal circumplex + Plutchik-8; surfacing = neutral labels).
 #
 # DELIBERATELY NOT WIRED. These constructs are kept OUT of SEED_PHRASES /
@@ -720,7 +720,7 @@ ATLAS_CONSTRUCTS = tuple(ATLAS_SEED_PHRASES.keys())
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Character Resonance · user-vector derivation — the 8 COGNITIVE DIMENSIONS
-# Authored 2026-06-21 per docs/CHARACTER-RESONANCE-DESIGN.md §1. These let us
+# Authored 2026-06-21 per the character-resonance design §1. These let us
 # derive a user's 8-D cognitive vector FROM TEXT so it can be matched against the
 # 2,000-figure atlas (portal-app/src/lib/curious/characterResonance.ts), which is
 # authored on exactly these 8 axes. Each axis has a LOW pole (0.0) and a HIGH

@@ -19,6 +19,13 @@ function reasonFor(code) {
   switch (code) {
     case 'voice-sample-pending': return 'voice-sample-pending';
     case 'render-service-unavailable': return 'render-service-unavailable';
+    // The SPECIFIC vault reasons (D-003 ↻2). These used to all arrive as an
+    // undefined code and collapse into 'render-failed', which is why three QA
+    // cycles could not tell the actual residual failure apart from any other.
+    case 'voice-runtime-missing': return 'voice-runtime-missing';
+    case 'voice-model-unavailable': return 'voice-model-unavailable';
+    case 'voice-synth-failed': return 'voice-synth-failed';
+    case 'voice-sample-unreadable': return 'voice-sample-unreadable';
     case 'auth': return 'voice-provider-auth';
     case 'rate_limited': return 'voice-provider-rate-limited';
     case 'network': return 'render-service-unreachable';

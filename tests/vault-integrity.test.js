@@ -1,7 +1,7 @@
 // tests/vault-integrity.test.js — the detached, throttled boot integrity check.
 // Covers the standalone probe's exit codes (0 ok / 1 corrupt / 2 error) and the
 // scheduler's throttle + marker behavior. @see src/db/integrity.js,
-// src/db/vault-integrity-check.mjs, docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+// src/db/vault-integrity-check.mjs, the vault-concurrency-fix design.
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

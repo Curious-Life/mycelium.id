@@ -1,6 +1,6 @@
 // Shared async-import job runner — the ONE background-job envelope every import
 // uses (generalizes the local-files `sweepJob`, portal-import.js). Design:
-// docs/UNIFIED-IMPORT-ARCHITECTURE-2026-07-03.md.
+// the unified-import architecture.
 //
 // SINGLE-FLIGHT PER RUNNER INSTANCE — and that is the whole guarantee. A second start()
 // on THIS runner while its job runs returns the running job's progress instead of spawning

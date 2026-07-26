@@ -6,7 +6,7 @@
 // (pipeline/discover-claims.mjs), never by a tool call. The agent reads them here
 // and they also ride along in getContext. db.claims is injected at factory time
 // (the MCP handler contract is `(args) => string`). See
-// docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.8.
+// the persona-claims design §3.8.
 import { toConfidence } from '../claims/confidence.js';
 
 const GRANULARITIES = ['day', 'week', 'month', 'quarter'];

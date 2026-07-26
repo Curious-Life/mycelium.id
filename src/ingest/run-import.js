@@ -6,7 +6,7 @@
 // parsers/writers (captureMessage, saveDocument, importMyceliumVault, …) are
 // unchanged — we unify the ENTRY, not the writers.
 //
-// Design: docs/DESIGN-import-unification-phase2-2026-06-19.md §2.1.
+// Design: the import-unification design §2.1.
 // Phase 2a wires the ARCHIVE kind (the dispatch previously inlined in
 // portal-uploads.js `processArchive`). Behavior is byte-identical — same
 // detection, same parser calls, same { importResult } | { error } shapes —
@@ -203,7 +203,16 @@ async function runLooseFile(input, ctx) {
     // Whisper model, so it's a no-op when transcription isn't configured — cost §10).
     // In-process = the app's single vault writer; the transcript fills in async and
     // surfaces in the Media view once done.
-    Promise.resolve().then(() => transcribeAttachment(ctx.db, ctx.userId, attachmentId)).catch(() => {});
+    //
+    // ⛔ `interactive: false` IS EXPLICIT, NOT A DEFAULT WE INHERITED (D-068, D-001 tripwire).
+    // Import transcription is BULK and must stay BULK. runBundle() funnels EVERY audio entry of
+    // a zip through this exact line (run-import.js runBundle → runLooseFile), so flipping it to
+    // INTERACTIVE would put a 5,000-file audio archive onto the single resident model slot,
+    // preempting describe/categorize in a loop — reopening D-001 from the other side. Only the
+    // LIVE inbound turn (internal-router /attachment-context) is INTERACTIVE. Nobody is blocked
+    // here: this call is fire-and-forget with its result discarded, and a `compute-busy` refusal
+    // is recovered by the background transcription drain (transcribe-retry.js). Gate C18 pins it.
+    Promise.resolve().then(() => transcribeAttachment(ctx.db, ctx.userId, attachmentId, { interactive: false })).catch(() => {});
   }
   const label = humanizeFilename(filename);
   const msgText = caption

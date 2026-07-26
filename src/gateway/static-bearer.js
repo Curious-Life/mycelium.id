@@ -50,7 +50,10 @@ export function matchStaticBearer(authHeader, env = process.env, expectedOverrid
   const expected = typeof candidate === 'string' && candidate.length >= MIN_BEARER_LEN ? candidate : null;
   if (!expected) return false;                       // not configured → fail closed
   if (typeof authHeader !== 'string') return false;
-  const m = /^Bearer\s+(.+)$/i.exec(authHeader);
+  // (\S.*), not (.+): \s+(.+) backtracks polynomially on an attacker-controlled
+  // all-whitespace Authorization header (js/polynomial-redos). Same fix as
+  // auth-shim.js / require-vault-auth.js. Behaviour-identical after the token compare.
+  const m = /^Bearer\s+(\S.*)$/i.exec(authHeader);
   if (!m) return false;
   const presented = Buffer.from(m[1]);
   const want = Buffer.from(expected);

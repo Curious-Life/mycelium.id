@@ -9,7 +9,7 @@
 // Enabled ONLY when MYCELIUM_AT_REST is truthy — the operator's step-5 switch.
 // When on, the DB-file key is HKDF-derived from USER_MASTER (keystore.deriveDbKey),
 // held in process memory only, never logged/stored. @see db-cipher-migrate.js,
-// docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md.
+// the at-rest blindness design.
 import { existsSync } from 'node:fs';
 import { deriveDbKey } from '../account/keystore.js';
 import { isPlaintextSqlite } from '../account/db-cipher-migrate.js';
@@ -25,7 +25,7 @@ export function atRestEnabled() {
 // the pipeline subprocesses (compute-*.js → import boot) set MYCELIUM_DB to a temp
 // fixture, so the fixture matched "canonical" and got born-encrypted (broke 29 gates).
 // Entry-point gating is the only signal that distinguishes the real server launch from
-// a library importer. @see src/index.js, docs/PRE-FREEZE-SECURITY-DESIGN-2026-06-19.md.
+// a library importer. @see src/index.js, the pre-freeze security design.
 
 /** True iff the vault FILE at dbPath is already whole-file encrypted (no plaintext
  *  SQLite magic header). Self-detection so any launcher opens it keyed. */

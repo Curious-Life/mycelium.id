@@ -23,6 +23,55 @@ export const FILE_CATEGORIES = {
   },
 };
 
+/**
+ * The complete, canonical category set — the ONLY place the four keys are
+ * enumerated. Callers validate a user's selection against this; nothing may
+ * treat "unknown" or "missing" as "all" (D-070: a deselected category was
+ * imported anyway when the selection arrived empty).
+ */
+export const ALL_FILE_CATEGORIES = Object.freeze(Object.keys(FILE_CATEGORIES));
+
+/**
+ * Fail-closed normalisation of a user's category selection.
+ * Returns ONLY the recognised keys, in canonical order, de-duplicated.
+ * A non-array, an empty array, or an array of unknown keys all normalise to
+ * `[]` — i.e. IMPORT NOTHING. There is deliberately no widening branch: an
+ * ambiguous selection must never become "import everything".
+ * @param {unknown} selection
+ * @returns {string[]}
+ */
+export function normalizeCategorySelection(selection) {
+  if (!Array.isArray(selection)) return [];
+  const picked = new Set(selection.filter((c) => typeof c === 'string'));
+  return ALL_FILE_CATEGORIES.filter((c) => picked.has(c));
+}
+
+/**
+ * ONE walk shape for BOTH the detector (which advertises the counts the user
+ * consents to) and the importer (which acts on that consent).
+ *
+ * They used to disagree: the detector counted at maxDepth 5 and skipped only
+ * dotdirs + managed packages, while the importer walked maxDepth 8 and also
+ * pruned SKIP_DIRS. So a documents-only import could enrol MORE documents than
+ * its own chip advertised (measured on the pre-fix tree: chip said 7, the
+ * importer enrolled 9) — and, against an all-category progress denominator,
+ * that is indistinguishable from "it imported everything anyway", which is
+ * exactly what the user reported (D-070). The number a user agrees to and the
+ * number that lands MUST come from the same walk.
+ */
+export const SWEEP_MAX_DEPTH = 8;
+/**
+ * Directories neither walk descends: VCS internals, package/dep trees, caches,
+ * and ~/Library (never "useful context", and enormous). Kept here rather than in
+ * either walker so they cannot drift apart again.
+ */
+export const SWEEP_SKIP_DIRS = new Set(['.git', '.svn', '.hg', 'node_modules', '.Trash', '.trash', '.cache', 'Caches', '.npm', '.obsidian', '.smart-env', 'Library']);
+/** True when a directory entry name must not be descended by either walk. */
+export function isSkippedSweepDir(name) {
+  const n = String(name);
+  return n.startsWith('.') || SWEEP_SKIP_DIRS.has(n) || isManagedPackageDir(n);
+}
+
 // The subset of `document` extensions whose bytes are UTF-8 text we can read
 // directly into a document body + a mindscape memory. The rest (pdf/doc/docx/
 // odt/pages/epub) are binary containers — imported as ENCRYPTED attachments,

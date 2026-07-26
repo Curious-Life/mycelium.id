@@ -2,7 +2,7 @@
 	// ClaimsView — the durable person-level claims the system has formed
 	// (PersonaTree adoption), with a confidence-over-time chart per claim. Reads
 	// the owner-gated /portal/claims/* endpoints; TimeSeries breaks the line on
-	// null windows (honest gaps). See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.9.
+	// null windows (honest gaps). See the persona-claims design §3.9.
 	import { onMount } from 'svelte';
 	import { navigationState } from '$lib/stores/navigation';
 	import { apiGet } from '$lib/api';

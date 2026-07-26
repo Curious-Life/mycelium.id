@@ -2,7 +2,7 @@
 	// Character Resonance — the self-knowledge mirror. Shows the historical /
 	// literary / mythic figures a user's cognitive profile is *reminiscent of*:
 	// headline matches, constellation affinity, by-area ("different rooms"), and
-	// a resonance timeline (archetype evolution). See docs/CHARACTER-RESONANCE-DESIGN.md.
+	// a resonance timeline (archetype evolution). See the character-resonance design.
 	// Pure lib calls (deterministic, client-safe) over the 2,000-figure atlas.
 	// Hand-rolled markup (WKWebView-safe). Honesty: "reminiscent of", never "you are".
 	import {

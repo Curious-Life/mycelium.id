@@ -7,6 +7,8 @@
 
 import express from 'express';
 import { getModelState, startDownload, qwenVoiceCatalog, hasVoiceSample } from './tts/qwen3-tts-model.js';
+import { getQwenTtsHealth } from './tts/qwen3-tts-supervisor.js';
+import { normalizeHealth } from './system/service-state.js';
 
 // Qwen3-TTS (local, MLX) voice models — replaces Kokoro (removed). The two
 // benchmarked variants (design §2.1); consent-by-choosing (§3.10c): NOTHING
@@ -87,7 +89,13 @@ export function portalSettingsRouter({ db, userId }) {
         // Channel voice-reply policy: 'always' (default — voice on means replies are
         // spoken) | 'auto' (only when the inbound was a voice note) | 'off'.
         voiceReplies: (await getS('CHANNEL_VOICE_REPLIES')) || 'always',
-        qwen: { enabled: qwenEnabled, samplePending: qwenSamplePending, channelDeferred: QWEN_CHANNEL_DEFERRED, variant: (await getS('QWEN_TTS_VARIANT')) || model.variant, variants: QWEN_VARIANTS, model },
+        // `service` is the RUNNING voice engine's own state, mapped through the ONE
+        // taxonomy (src/system/service-state.js). getQwenTtsHealth() had zero
+        // consumers before this: the supervisor knew it was halted / out of runtime /
+        // holding a port conflict, and no surface could show it — so a terminally
+        // dead engine was indistinguishable from a warming one, and the operator was
+        // told "starting… try again shortly" forever (D-003 ↻2).
+        qwen: { enabled: qwenEnabled, samplePending: qwenSamplePending, channelDeferred: QWEN_CHANNEL_DEFERRED, variant: (await getS('QWEN_TTS_VARIANT')) || model.variant, variants: QWEN_VARIANTS, model, service: { ...normalizeHealth(getQwenTtsHealth()), remedy: getQwenTtsHealth()?.remedy || null } },
         openai: { hasKey: openaiHasKey, voice: (await getS('OPENAI_TTS_VOICE')) || 'onyx', model: (await getS('OPENAI_TTS_MODEL')) || 'tts-1-hd', voices: OPENAI_VOICES, models: OPENAI_MODELS },
         elevenlabs: { hasKey: elevenHasKey, voiceId: (await getS('ELEVENLABS_VOICE_ID')) || null, model: (await getS('ELEVENLABS_MODEL_ID')) || 'eleven_turbo_v2_5', models: ELEVENLABS_MODELS },
       });

@@ -1,7 +1,7 @@
 // spike:claude-cli — the LIVE-BINARY gate for enabling the Claude Code engine.
 //
 // Run this ONCE on a machine that has `claude` installed + logged in. It confirms the
-// two ⛔ seams the mock test can't (docs/HARNESS-CLI-DESIGN-2026-07-02.md):
+// two ⛔ seams the mock test can't (the harness-CLI design):
 //   (1) SECURITY — with `--strict-mcp-config` (ignore the operator's account MCP
 //       connectors) + `--tools "mcp__mycelium__*"` (restrict the AVAILABLE toolset) +
 //       `--allowedTools` (auto-approve), NO --dangerously-skip-permissions, the child

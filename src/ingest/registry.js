@@ -1,6 +1,6 @@
 // The import-source REGISTRY — one entry per source, the single source of truth
 // the detector, the generic route, and (via the API) the frontend read from.
-// Design: docs/UNIFIED-IMPORT-ARCHITECTURE-2026-07-03.md.
+// Design: the unified-import architecture.
 //
 // Before this, adding an import source meant editing ~8 places (detector +
 // allowlist + importer + route + two TS unions + a dispatch switch + a UI

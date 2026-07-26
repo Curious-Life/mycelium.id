@@ -1,5 +1,5 @@
 // verify:transcribe — the dedicated Whisper transcription path (design:
-// docs/WHISPER-TRANSCRIPTION-DESIGN-2026-06-11.md). Hermetic: a mock HTTP
+// the transcription design). Hermetic: a mock HTTP
 // service plays transcribe-service.py; no python, no model download.
 // Proves: (1) the supervisor is OPT-IN (no model → no start) and maps service
 // health states honestly; (2) the portal router validates models, persists the

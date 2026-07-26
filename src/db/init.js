@@ -12,7 +12,7 @@
 // initVaultStorage() fixes both: it holds a cross-process file lock around the
 // WHOLE critical section (schema + migrate), so exactly ONE process initializes
 // the vault while the others block then no-op; and ensureVaultSchema is now
-// key-aware. @see docs/AT-REST-MIGRATION-HARDENING-DESIGN-2026-06-18.md.
+// key-aware. @see the at-rest migration-hardening design.
 import { openSync, closeSync, writeSync, existsSync, readFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
@@ -171,7 +171,7 @@ export async function initVaultStorage({ dbPath, userHex, log = (m) => console.e
   const lockPath = join(dirname(dbPath), '.vault-init.lock');
   await acquireLock(lockPath);
   try {
-    // 0. Durable mind-root relocation (docs/MIND-ROOT-DURABILITY-MIGRATION-DESIGN-2026-07-20.md).
+    // 0. Durable mind-root relocation (the mind-root durability-migration design).
     //    Move any pre-existing legacy mind tree (<cwd>/data/mind/mind, historically
     //    INSIDE the update-replaceable app bundle) to the durable <dataDir>/mind.
     //    Byte-only (no key needed); runs here because this is the one exclusive
@@ -214,7 +214,7 @@ export async function initVaultStorage({ dbPath, userHex, log = (m) => console.e
     //    or at-rest is opted in. Null → plaintext open, unchanged.
     const outKey = resolveDbKeyHex(userHex, dbPath);
 
-    // 4. Search-index sidecar (docs/SEARCH-SIDECAR-DESIGN-2026-07-02.md). Under THIS
+    // 4. Search-index sidecar (the search-sidecar design). Under THIS
     //    cross-process lock (race-safe across the MCP + REST processes): detect + reset
     //    a corrupt regenerable index (mycelium.search.db) ONCE, before any process opens
     //    it — and DROP the stale in-vault index tables left by pre-sidecar builds. Both

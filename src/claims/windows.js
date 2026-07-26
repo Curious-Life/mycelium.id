@@ -4,7 +4,7 @@
 // of the current period = a stable snapshot key). Mirrors frequency_snapshots'
 // day/week/month bucketing and adds quarter.
 //
-// See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.5.
+// See the persona-claims design §3.5.
 const DAY = 86400000;
 
 export const CADENCES = ['day', 'week', 'month', 'quarter'];

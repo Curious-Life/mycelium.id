@@ -3,7 +3,7 @@
 // queries and asserts the namespace maps them to the documented shape:
 //   territories.{total,described←started,fullyDescribed←fully,avgPercent←avg_pct}
 //   themes/realms.{total,avgPercent}, overall.avgPercent = territory weighted avg.
-// Design: docs/COVERAGE-VISIBILITY-AND-DESCRIBE-MORE-DESIGN-2026-06-30.md
+// Design: the coverage-visibility design
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMindscapeNamespace } from '../src/db/mindscape.js';

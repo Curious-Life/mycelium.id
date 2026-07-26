@@ -23,7 +23,7 @@
  *
  * Spec: the canonical research note §2.2
  * field 7 (presentation contract) + §2.3 (CVP mandatory gate). Audit finding S1
- * in docs/METRICS-AUDIT-vs-LITERATURE-2026-06-19.md.
+ * in the metrics-vs-literature audit.
  */
 
 import {

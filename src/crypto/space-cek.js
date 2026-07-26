@@ -1,5 +1,5 @@
 // src/crypto/space-cek.js — E2E shared-spaces Content Encryption Key management (the
-// integration layer of the "Space Key Lockbox", docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md).
+// integration layer of the "Space Key Lockbox", the shared-spaces E2E design).
 //
 // Ties the two primitives together:
 //   • space-content.js — encrypt/decrypt a space item under a per-space CEK.

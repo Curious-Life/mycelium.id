@@ -23,7 +23,7 @@
  *
  * Tokens + transient OAuth (oauthState/pkceVerifier) do NOT live here — they stay
  * in the encrypted `secrets` table (store.js). See
- * docs/DESIGN-connectors-tier2-2026-06-04.md §3.
+ * the tier-2 connectors design §3.
  *
  * @typedef {object} ConnectorsNamespaceDeps
  * @property {(sql: string, params: any[]) => Promise<any>} d1Query

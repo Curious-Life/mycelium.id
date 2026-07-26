@@ -9,6 +9,15 @@
 //   C7 inbound text is UNTRUSTED-wrapped before the turn (banner + fences, not raw)
 //   C8 enabledTools is exactly ['reply']; no-model → {delivered:false, reason:'no-model'}
 //   C9 a throwing turn → 200 {delivered:false, reason:'turn-error'} (no auto-replay, no leak)
+//   C10-C14 the owner-write escalation + (D-040 ↻1) the destructive tier: `forget` is granted
+//     on the owner-trusted DM and the token-gated `ownerTrusted` flag rides with it — and it
+//     is NOT set on a group turn, a stranger's DM, or a forged owner claim.
+//
+// MUTATION-TESTED: `ownerTrusted` hardcoded to `true` in the runTheTurn call (channel-turn.js)
+//   → C11 + C12 + C14 RED (every untrusted shape gains destructive authority)
+// MUTATION-TESTED: the `ownerTrusted` property removed from that call entirely → C10 REDs
+//   (the grant names `forget` but the second condition never arrives, so it is never granted)
+// Both restored afterwards; the gate returns GREEN on the restored tree.
 import http from 'node:http';
 import express from 'express';
 import Database from 'better-sqlite3';
@@ -118,7 +127,13 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
   const et = lastOpts?.enabledTools || [];
   rec('C10 owner DM (write-enabled) → message verbatim (NOT untrusted-wrapped)', um === 'remember my dentist is on Tuesday' && !/UNTRUSTED MESSAGE/.test(um), JSON.stringify(um));
   rec('C10 owner DM → trimmed write grant (remember + saveDocument + reply)', et.includes('remember') && et.includes('saveDocument') && et.includes('reply') && et.length > 1, et.join(','));
-  rec('C10 owner DM → destructive mind-model tools EXCLUDED (red-team trim)', !et.includes('editMindFile') && !et.includes('writeMindFileWhole') && !et.includes('updateInternalModel') && !et.includes('forget'), et.join(','));
+  rec('C10 owner DM → destructive mind-model tools EXCLUDED (red-team trim)', !et.includes('editMindFile') && !et.includes('writeMindFileWhole') && !et.includes('updateInternalModel'), et.join(','));
+  // D-040 ↻1: `forget` WAS in that exclusion list, and that is why the operator watched the
+  // agent "forget" something that stayed. It is now granted on THIS turn only — and naming
+  // it is only half the grant: channel-turn must ALSO pass the token-gated ownerTrusted
+  // flag, or autonomyTools still refuses it (autonomy-tools.js OWNER_DESTRUCTIVE_TOOLS).
+  rec('C10 owner DM → forget IS granted (D-040 ↻1) and ownerTrusted rides with it',
+    et.includes('forget') && lastOpts?.ownerTrusted === true, `${et.join(',')} · ownerTrusted=${lastOpts?.ownerTrusted}`);
   rec('C10 owner DM → owner preamble w/ injection-defense note', typeof lastOpts?.systemExtra === 'string' && /OWNER/.test(lastOpts.systemExtra) && /forwarded/i.test(lastOpts.systemExtra));
   rec('C10 owner DM → history NOT flagged untrusted (owner-authored)', lastOpts?.historyUntrusted === false);
 }
@@ -130,12 +145,16 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
   const et = lastOpts?.enabledTools || [];
   rec('C11 owner-in-group → untrusted-wrapped (group context is never trusted)', /UNTRUSTED MESSAGE/.test(um));
   rec('C11 owner-in-group → reply-only (NO write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
+  // The second condition must fall with the first: a group turn carries no destructive
+  // authority even if some future grant change re-adds `forget` to the name list.
+  rec('C11 owner-in-group → ownerTrusted is NOT set (destructive tier unreachable)', lastOpts?.ownerTrusted !== true, `ownerTrusted=${lastOpts?.ownerTrusted}`);
 }
 // ── C12 non-owner DM → reply-only (a stranger messaging the bot cannot write) ──
 {
   await post({ userMessage: 'remember my fake fact', conversationId: CONV, source: 'telegram', group: false, senderRole: 'other' });
   const et = lastOpts?.enabledTools || [];
   rec('C12 non-owner DM → reply-only (no write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
+  rec('C12 non-owner DM → ownerTrusted is NOT set (a stranger can never destroy data)', lastOpts?.ownerTrusted !== true, `ownerTrusted=${lastOpts?.ownerTrusted}`);
 }
 // ── C13 DEFAULT-ON: owner 1:1 DM + valid token, NO env/setting → WRITES (personal-agent default) ──
 {
@@ -170,6 +189,7 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
   await post({ userMessage: 'remember my dentist is on Tuesday', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' });
   const um = lastOpts?.userMessage || ''; const et = lastOpts?.enabledTools || [];
   rec('C14 forged owner claim w/o daemon token → reply-only (loopback-forge defense)', et.length === 1 && et[0] === 'reply', et.join(','));
+  rec('C14 forged owner claim w/o daemon token → ownerTrusted NOT set (no destructive tier)', lastOpts?.ownerTrusted !== true, `ownerTrusted=${lastOpts?.ownerTrusted}`);
   rec('C14 forged owner claim w/o daemon token → untrusted-wrapped', /UNTRUSTED MESSAGE/.test(um));
   await post({ userMessage: 'remember x', conversationId: CONV, source: 'telegram', group: false, senderRole: 'owner' }, { 'x-mycelium-channel-turn-token': 'wrong-secret' });
   rec('C14 owner claim w/ WRONG token → reply-only', (lastOpts?.enabledTools || []).join(',') === 'reply', (lastOpts?.enabledTools || []).join(','));

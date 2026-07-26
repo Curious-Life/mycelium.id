@@ -5,7 +5,7 @@
 # (`cloudflared tunnel --url`) give a random *.trycloudflare.com URL AND do not
 # support SSE, which the Streamable-HTTP MCP transport needs (SSE keep-alive
 # within 100s or Cloudflare 524s the stream). A named tunnel gives a STABLE
-# hostname on your own domain + SSE. See docs/REMOTE-CONNECT-DESIGN + V1-SPEC §11.
+# hostname on your own domain + SSE. See the remote-connect design + the V1 build spec §11.
 #
 # Prereqs:
 #   - a Cloudflare account with your domain added to it

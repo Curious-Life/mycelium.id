@@ -1,5 +1,5 @@
 // src/portal-e2e.js — the box side of the E2E REST transport
-// (docs/E2E-REACHABILITY-DESIGN-2026-07-19.md §2.1/§2.2, Phase 2b).
+// (the E2E-reachability design §2.1/§2.2, Phase 2b).
 //
 // Two PUBLIC endpoints (the phone is unauthenticated at the HTTP layer — auth lives
 // INSIDE the session), mounted at root outside /api like the pairing claim/result:

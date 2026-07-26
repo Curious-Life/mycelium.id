@@ -1,6 +1,6 @@
 /**
  * Device sessions namespace — the ONE unified session mechanism for a second
- * client reaching the vault (docs/UNIFIED-AUTH-DESIGN-2026-07-24.md).
+ * client reaching the vault (the unified-auth design).
  *
  * A device session is an ambient COOKIE credential (`mycelium_device_session`)
  * bound to a device_tokens row. It exists because a browser / embedded WKWebView

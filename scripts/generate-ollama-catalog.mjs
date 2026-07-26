@@ -2,7 +2,7 @@
 // Ollama (maintainer/build-time, NOT the user's runtime). Network orchestration
 // only; all decision logic is the pure, hermetically-tested code in
 // src/hardware/catalog-gen.js + catalog-meta.js. See
-// docs/DYNAMIC-CATALOG-DESIGN-2026-06-05.md.
+// the dynamic-catalog design.
 //
 //   1. GET ollama.com/library          → parse x-test-* → official models
 //   2. filter (exclude embed/coder/r1/nsfw…) BEFORE any registry call

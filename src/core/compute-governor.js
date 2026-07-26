@@ -1,5 +1,5 @@
 // src/core/compute-governor.js — the ONE global heavy-compute broker (D-001, third attempt).
-// Design: docs/COMPUTE-GOVERNOR-DESIGN-2026-07-23.md. Sprint: QA7 U1.
+// Design: the compute-governor design. Sprint: QA7 U1.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════
 //  WHY THIS EXISTS — and the ONE invariant you must not "optimize" away
@@ -55,7 +55,7 @@
 // Deliberately in-process, dependency-light, and a process-wide singleton — exactly like
 // src/core/delete-lane.js, and for the same reason: V1 is single-user, single-process. It
 // CANNOT gate a second OS process (packages/channel-daemon, L13) — that is the largest
-// documented residual (design §5); see docs/COMPUTE-GOVERNOR-DESIGN §5/§6 and the PR.
+// documented residual (design §5); see the compute-governor design §5/§6 and the PR.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { memoryPressure, PRESSURE } from './memory-pressure.js';
@@ -346,10 +346,13 @@ export function admit({ lane, klass, estimateGb = 0, timeoutMs = 0, child = null
       // chronicle) — interactive is refused with a retry (design §3.4 "falls through to 503").
       if (!holder.preemptRequested) {
         holder.preemptRequested = true;
+        holder.preemptedBy = lane;
         _counters.preempted++;
         pushEvent('preempt', { lane, targetLane: holder.lane, ticketId: holder.id });
       }
-      return refuse('model-busy-preempting', YIELD_MS);
+      // Carry the target so a requester that GIVES UP can withdraw its own request
+      // (abandonPreempt below) instead of leaving the holder to abort its cycle for nobody.
+      return { ...refuse('model-busy-preempting', YIELD_MS), preemptedTicketId: holder.id };
     }
 
     // Plain RESIDENT (background). Refused while the model slot is full (count ≥ RESIDENT_MAX).
@@ -390,7 +393,7 @@ function grant(lane, klass, estimateGb, timeoutMs, child, unloadBaseUrl) {
   const ticket = {
     id, lane, klass, estimateGb: Number(estimateGb) || 0,
     admittedAt: _now(), lastBeatAt: _now(), timeoutMs: Number(timeoutMs) || 0,
-    preemptRequested: false, child: null, leaseTimer: null, unloadBaseUrl,
+    preemptRequested: false, preemptedBy: null, child: null, leaseTimer: null, unloadBaseUrl,
   };
   _tickets.set(id, ticket);
   _counters.admitted++;
@@ -419,6 +422,33 @@ function grant(lane, klass, estimateGb, timeoutMs, child, unloadBaseUrl) {
 export function withTicket(handle, fn) {
   if (!handle || !handle.ok) return fn();
   return _als.run(handle._ticket, fn);
+}
+
+/**
+ * WITHDRAW a preempt request whose requester has given up (QA9 review, HIGH-3).
+ *
+ * `preemptRequested` had no clearing path. An INTERACTIVE requester that is refused sets the
+ * holder's yield flag and then, after its bounded wait, gives up and goes elsewhere — but the flag
+ * stays set, so the holder still aborts its cycle at the next batch boundary and frees the slot
+ * FOR NOBODY. Under a stream of voice notes that degrades the drainer to ~one pass per cycle
+ * indefinitely while buying chat nothing.
+ *
+ * ⚠️ THIS CAN NEVER CAUSE A DOUBLE ADMIT, which is why it is safe on this surface: it only ever
+ * clears a flag that asks a holder to STOP EARLY. Clearing it lets the holder keep its ticket —
+ * strictly fewer slot handoffs, never more. It does not release, admit, or change any count.
+ *
+ * Idempotent and ownership-checked: a no-op if the ticket is gone (already released), or if the
+ * pending request belongs to a DIFFERENT lane (that requester may still be waiting for it).
+ */
+export function abandonPreempt(ticketId, lane) {
+  if (!ticketId) return false;
+  const t = _tickets.get(ticketId);
+  if (!t || !t.preemptRequested) return false;
+  if (lane && t.preemptedBy && t.preemptedBy !== lane) return false;
+  t.preemptRequested = false;
+  t.preemptedBy = null;
+  pushEvent('preempt-abandoned', { lane: lane || null, targetLane: t.lane, ticketId: t.id });
+  return true;
 }
 
 /** Observability snapshot for the activity feed + readiness (design §3.5 "readiness-visible"). */
@@ -451,4 +481,4 @@ export function _setMemProbe(fn) { _memProbe = fn; _pressureCache = null; _press
 export function _setNow(fn) { _now = fn; }
 export function _setBudgetGb(gb) { _budgetGb = gb; _budgetAt = _now(); }
 
-export default { admit, withTicket, governorStatus, isResidentBusy, CLASS };
+export default { admit, withTicket, governorStatus, isResidentBusy, abandonPreempt, CLASS };

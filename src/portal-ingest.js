@@ -8,7 +8,7 @@
 // is deliberately NOT a per-type side table; "tap into the stream" = one path.
 //
 // This is the authed-OWNER push companion to the (external, HMAC) webhook kind in
-// docs/STREAMS-INGESTION-MCP-DESIGN-2026-06-16.md. Owner-gated (loopback OR the
+// the streams-ingestion MCP design. Owner-gated (loopback OR the
 // owner's static Bearer) because it writes vault plaintext.
 import express from 'express';
 import { isCsrfDeny } from './http/require-vault-auth.js';

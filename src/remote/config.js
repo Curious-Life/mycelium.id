@@ -2,7 +2,7 @@
 // signing secret. The operational layer the OAuth server (src/server-http.js +
 // src/auth.js) needs to survive restarts without env vars.
 //
-// THREE stores, split by sensitivity (see docs/REMOTE-CONNECT-DESIGN-2026-06-02.md):
+// THREE stores, split by sensitivity (see the remote-connect design):
 //   1. remote.json (<dataDir>/remote.json) — NON-secret config: publicBaseUrl,
 //      remoteEnabled, operatorEmail. Plaintext JSON, mirroring the kcv.json
 //      precedent (paths.js). Safe to read/show; nothing here unlocks anything.

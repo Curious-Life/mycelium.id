@@ -7,7 +7,7 @@
 // — so a user's measured profile can resonate with the nearest figures by cosine
 // similarity in the shared dimension space.
 //
-// Source of truth for the human-readable list: docs/CHARACTER-RESONANCE-SEED-ROSTER.md
+// Source of truth for the human-readable list: the character-resonance seed roster
 // Source of the profiles: Ada (research-agent) historical-figure-profiles-batch1–4.
 // The raw data lives in ./characterResonanceSeed.json; this module is the typed
 // accessor over it (mirrors the metricsCatalog.ts single-source-of-truth pattern).

@@ -13,7 +13,7 @@
 // The Claude-Code identity constants below are a PRIVATE CONTRACT with Anthropic's
 // servers that can change without notice. Keeping them in exactly one place is
 // deliberate: the verify:claude-oauth canary watches this surface, and a break is
-// a one-line fix here. @see docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md
+// a one-line fix here. @see the Claude-subscription driver design
 // (Phase W unifies the wire; Phase S adds the subscription auth mode).
 
 export const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';

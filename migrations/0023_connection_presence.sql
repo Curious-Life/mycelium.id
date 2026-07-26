@@ -1,6 +1,6 @@
 -- 0023 — Connection presence indicator (online/offline dot).
 --
--- Design: docs/DESIGN-connection-presence-indicator-2026-06-18.md
+-- Design: the connection-presence design
 --
 -- presence_share: per-connection OUTBOUND grant — do I expose my online status to
 --   this peer? DEFAULT 1 = "share by default the moment a connection forms" (the

@@ -5,7 +5,7 @@
 // if 'cli' is chosen but ineligible (no binary / not a Claude subscription / the cli
 // engine isn't shipped yet), it returns the native loop with a `reason` the UI can
 // surface. Only the interactive chat uses this; the autonomous surfaces
-// (channels/scheduler/narration) stay native. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+// (channels/scheduler/narration) stay native. See the harness-CLI design.
 import { HARNESSES, isCliEngineReady } from './harnesses/index.js';
 import { resolveClaudeBin } from '../inference/claude-bin.js';
 import { claudeConfigDir, seedClaudeConfigDir, readClaudeConfigDirLiveToken, refreshClaudeConfigDirToken } from '../inference/claude-config-dir.js';

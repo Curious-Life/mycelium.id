@@ -1,9 +1,38 @@
 // scripts/verify-reflection-cycles.mjs — Context Engine L2 (Phase 1a) gate.
 //
-// Fully isolated (no vault, no boot): exercises the reflection-engine wiring as pure units —
+// Mostly pure units; §10 boots a real vault because grantability cannot be faked —
 //   1. cycle integrity (six cycles, shape, unique names, schedules parse)
 //   2. tool-rename guard: NO canonical-only tool name survives any body, AND every tool a body
-//      references / a cycle enables exists in the live src/tools/*.js registry
+//      references / a cycle enables exists in the live src/tools/*.js registry.
+//      NOTE: §2 is a source SCRAPE — presence in a file, nothing more. §10 is the teeth.
+//  10. GRANTABILITY (D-076): every cycle's enabledTools name survives a REAL autonomyTools()
+//      call over the REAL registry from a REAL boot. Registry presence ≠ the turn can call it.
+//
+// MUTATION-TESTED: removed 'recordReflection' from CYCLE_AUTONOMOUS_TOOLS (the literal D-076
+//   bug) → 10b REDs on all six cycles + 10c REDs (7 FAILs). Decisive detail: §2's "cycle X
+//   enables a real tool: recordReflection" stayed PASS on all six under that same mutation —
+//   §2 is exactly the check that let D-076 ship, and §10 is what catches it.
+// MUTATION-TESTED: made seed-cycles.js:51 write `c.enabledTools.filter(n => n !== 'recordReflection')`
+//   — i.e. the stored ROW diverges from the CYCLES source → 10c RED. This is the one that
+//   justifies reading enabled_tools back out of the DB: an earlier draft of this section read
+//   CYCLES directly and stayed GREEN under this exact mutation while every installed vault
+//   would have been broken. Found by an adversarial review of this change, not by me.
+// MUTATION-TESTED: deleted `isCycle,` from the scheduler's runAgentTurn call (the delivery path
+//   an earlier draft did not observe at all) → 10f RED. Also run separately at the other end of
+//   the same wire — run-turn passing `{ humanTriggered }` instead of `{ humanTriggered, isCycle }`
+//   → 10f RED.
+// MUTATION-TESTED: the FALSE-GREEN bypass an independent review demonstrated against an earlier
+//   free-floating version of 10f — reformat `const { isCycle, inferenceTask } = cycleTurnOpts()`
+//   as a multi-line destructure AND delete `isCycle,` from the runAgentTurn call. The old regex
+//   matched the destructure and stayed GREEN while all six cycles silently lost all five tools.
+//   Re-run against the anchored regex → 10f RED. A gate whose check can be satisfied by an
+//   unrelated line is not a gate.
+// MUTATION-TESTED: dropped the `&& isCycle === true` condition from the cycle branch of
+//   autonomyTools() → 10e RED, naming all five leaked tools. This is the NEW privilege boundary:
+//   without it a model-planted scheduled task would inherit the cycles' grant.
+// MUTATION-TESTED: loosened autonomyTools() to `else if (enabled.has(t.name))` (fail-OPEN — grant
+//   anything named) → 10e RED. This is what proves 10b is not vacuous: without it, 10b would
+//   pass trivially under a grant that hands over everything.
 //   3. routing: cycleTurnOpts injects the persona + 'reflection' task for a cycle task only
 //   4. NO_REPLY sentinel delivers nothing
 //   5. seedReflectionCycles is idempotent (2× = 6 rows, not 12) and stamps the cycle body/marker
@@ -204,6 +233,115 @@ function memMind(initial = {}) {
   ok(nf.ok === false && nf.error === 'block-not-found', 'absent block is rejected');
 }
 ok(isGrantableTool('removeFromMind'), 'removeFromMind is chat-grantable (mindfiles domain)');
+
+// ── 10. GRANTABILITY over the REAL registry (D-076) ─────────────────────────
+// §2 above scrapes `name: '...'` out of src/tools/*.js. That proves a name EXISTS IN A FILE —
+// it does NOT prove an autonomous turn can call it. D-076 shipped through exactly that gap: all
+// five of the cycles' tools were registry-present and in NO tier of autonomy-tools.js, so
+// autonomyTools() dropped them fail-closed, the cycles could not record a reflection on
+// v0.1.13, and this gate stayed green (the M-001 family — green for the wrong reason).
+//
+// So: boot a REAL vault, take the REAL registry boot hands the server, and call the REAL
+// autonomyTools(). A name only counts as enabled if it survives that.
+{
+  const Database = (await import('better-sqlite3')).default;
+  const { rmSync, mkdirSync } = await import('node:fs');
+  const crypto = (await import('node:crypto')).default;
+  const { boot } = await import('../src/index.js');
+  const { applyMigrations } = await import('../src/db/migrate.js');
+  const { autonomyTools } = await import('../src/agent/autonomy-tools.js');
+  const { cycleTurnOpts: realCycleTurnOpts } = await import('../src/agent/cycle-prompts.js');
+
+  const DB = 'data/verify-reflection-cycles.db', KCV = 'data/verify-reflection-cycles-kcv.json';
+  const scrub = () => { for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} } };
+  scrub();
+  mkdirSync('data', { recursive: true });
+  applyMigrations(new Database(DB));
+  const { db, tools, close } = await boot({
+    dbPath: DB, kcvPath: KCV,
+    userHex: crypto.randomBytes(32).toString('hex'), systemHex: crypto.randomBytes(32).toString('hex'),
+    embedder: null,
+  });
+  try {
+    const registry = new Set(tools.map((t) => t.name));
+    ok(tools.length > 20, '10a REAL registry from boot (not a source scrape)', `(${tools.length} tools)`);
+
+    // Seed for real, then read the tasks BACK OUT OF THE DATABASE. Deliberately not CYCLES:
+    // seeding is insert-only and nothing patches enabled_tools (seed-cycles.js:36, and no
+    // caller passes it to updateTask), so a REAL installed vault's grant is decided by the
+    // frozen ROW, not by today's source. A gate that reads CYCLES would stay green while a
+    // divergence between the two silently broke every existing install.
+    const U = 'local-user';
+    await seedReflectionCycles(db, U, { tz: 'UTC' });
+    const rows = (await db.harness.listTasks(U)).filter((t) => t.created_by === CYCLE_CREATED_BY);
+    ok(rows.length === CYCLES.length, '10a seeded cycle rows read back from the DB', `(${rows.length})`);
+
+    // The grant a fired cycle will actually hold: stored enabled_tools + the isCycle flag
+    // derived by the REAL cycleTurnOpts from the row's immutable created_by.
+    const grantFor = (row) => {
+      const { isCycle } = realCycleTurnOpts(row);
+      return new Set(autonomyTools(tools, row.enabled_tools || [], { isCycle }).map((t) => t.name));
+    };
+
+    // 10b — the teeth. Every name the STORED row declares must survive a real grant call.
+    for (const row of rows) {
+      const granted = grantFor(row);
+      for (const t of row.enabled_tools || []) {
+        ok(granted.has(t), `10b '${row.name}': '${t}' is GRANTABLE`, registry.has(t) ? '' : '(not even registry-present)');
+      }
+    }
+
+    // 10c/10d — named anchors for the exact names D-076 was about, so a future edit that drops
+    // one from its tier fails on a line that says why, not just on a generic loop.
+    ok(rows.length === 6 && rows.every((r) => grantFor(r).has('recordReflection')),
+      '10c D-076: recordReflection is grantable on ALL six seeded cycles');
+    const ig = grantFor(rows.find((r) => r.name === CYCLES.find((c) => c.id === 'integration').name));
+    ok(['snapshotMindFile', 'removeFromMind', 'listReflections', 'proposeClaim'].every((t) => ig.has(t)),
+      "10d D-076: the integration cycle's four extra tools are grantable");
+
+    // 10e — fail-closed controls, so 10b can never pass vacuously.
+    // (i) The NEW privilege boundary: a model-created task (schedule_task stamps created_by
+    //     'agent' — tools/schedule-tasks.js:84) naming the SAME tools gets NONE of them. This is
+    //     the check that keeps the cycle tier from being a back door for a planted task.
+    const cycleNames = ['recordReflection', 'listReflections', 'snapshotMindFile', 'removeFromMind', 'proposeClaim'];
+    const plantedId = await db.harness.createTask(U, {
+      name: 'planted', prompt: 'x', schedule: 'interval:30m', nextRun: new Date(Date.now() + 6e4).toISOString(),
+      outputTarget: 'none', enabledTools: cycleNames, status: 'active', triggerType: 'schedule', createdBy: 'agent',
+    });
+    const planted = await db.harness.getTask(U, plantedId);
+    const plantedGrant = grantFor(planted);
+    ok(realCycleTurnOpts(planted).isCycle === false, '10e control: a model-created task is NOT a cycle');
+    ok(cycleNames.every((n) => !plantedGrant.has(n)),
+      '10e control: a non-cycle task naming the cycle tools is granted NONE of them',
+      [...plantedGrant].filter((n) => cycleNames.includes(n)).join(',') || 'none leaked');
+    // (ii) A tool in NO tier is never granted even when named, cycle or not.
+    ok(registry.has('publishDocument'), '10e control: publishDocument is registry-present');
+    ok(!autonomyTools(tools, ['publishDocument'], { isCycle: true }).some((t) => t.name === 'publishDocument'),
+      '10e control: a tool in no tier is NOT granted even when named (fail-closed)');
+
+    // 10f — SOURCE-LEVEL check, and labelled as one because that is what it is. The grant now
+    // depends on the scheduler forwarding BOTH enabledTools and isCycle; drop either and every
+    // cycle silently loses its tools again — the exact D-076 failure mode. Driving the real
+    // scheduler→run-turn path needs a live model (createScheduler builds its own harness/loop
+    // internally and does not accept an injected one), so this asserts the wiring textually.
+    // Weaker than behaviour, and honest about it — NOT presented as proof the turn works.
+    const schedSrc = readFileSync(join(ROOT, 'src/agent/scheduler.js'), 'utf8');
+    const turnSrc = readFileSync(join(ROOT, 'src/agent/run-turn.js'), 'utf8');
+    // ANCHORED TO THE CALL, not merely present in the file. A free-floating /^\s*isCycle,$/m
+    // was demonstrated (review, 2026-07-26) to stay GREEN when `isCycle` was deleted from the
+    // options bag while an ordinary multi-line destructure elsewhere in the file still matched
+    // — a false green on exactly the regression this check exists to catch. Tolerant about
+    // SIBLING KEYS in the bag (D-063's `humanTriggered` legitimately joined it), strict about
+    // where the key appears.
+    ok(/enabledTools:\s*task\.enabled_tools/.test(schedSrc) && /runAgentTurn\([\s\S]{0,800}?^\s*isCycle,\s*$/m.test(schedSrc),
+      '10f [source] scheduler forwards BOTH enabled_tools and isCycle to the turn');
+    ok(/autonomyTools\(tools,\s*enabledTools,\s*\{[^}]*\bisCycle\b[^}]*\}\)/.test(turnSrc),
+      '10f [source] run-turn passes isCycle into the grant');
+  } finally {
+    try { await close?.(); } catch { /* best-effort */ }
+    scrub();
+  }
+}
 
 console.log(`\n${pass} pass · ${fail} fail`);
 if (fail === 0) { console.log('VERDICT: GO'); process.exit(0); }

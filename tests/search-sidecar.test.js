@@ -1,7 +1,7 @@
 // tests/search-sidecar.test.js — the search index lives in a SEPARATE, encrypted
 // sidecar file, and a CORRUPT sidecar self-heals (file-level rm + rebuild) instead
 // of becoming a fatal, un-DROPpable error. The reset NEVER touches the vault.
-// @see src/search/sqlite/sidecar.js, docs/SEARCH-SIDECAR-DESIGN-2026-07-02.md.
+// @see src/search/sqlite/sidecar.js, the search-sidecar design.
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

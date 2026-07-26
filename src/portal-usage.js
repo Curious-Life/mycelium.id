@@ -1,7 +1,7 @@
 // src/portal-usage.js — the token-usage transparency surface. One endpoint that
 // aggregates llm_usage into input/output totals categorized by area/source/
 // provider/model/day, plus a recent-events table. Backs the Settings → Usage pane.
-// @see src/db/llm-usage.js, docs/TEXT-GENERATION-ABSTRACTION-DESIGN-2026-06-15.md §12.
+// @see src/db/llm-usage.js, the text-generation abstraction design §12.
 //
 // SECURITY: loopback/authed like the rest of /portal. The data is counts +
 // dimensions ONLY — llm_usage never stores any prompt/completion text (§1).

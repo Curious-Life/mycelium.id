@@ -1,5 +1,5 @@
 // src/portal-intelligence.js — the first-run bundle orchestrator (Intelligence redesign
-// Part I, docs/INTELLIGENCE-SCREEN-REDESIGN-2026-07-17.md §4.3).
+// Part I, the Intelligence-screen redesign §4.3).
 //
 // Two routes, both COMPOSITION over shipped parts — no new catalog, no new write path,
 // no new download path (§3.10d):

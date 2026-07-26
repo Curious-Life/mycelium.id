@@ -4,7 +4,7 @@
 // candidates → PATH scan → null. "Latest version" is automatic — Claude Code
 // self-updates, so we never pin a version. Fail-soft: returns an absolute path or
 // null, and the harness resolver (src/agent/resolve-harness.js) falls back to the
-// native engine when this is null. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+// native engine when this is null. See the harness-CLI design.
 import { existsSync as nodeExistsSync } from 'node:fs';
 import { findExecutable, homeDir } from '../system/platform-env.js';
 

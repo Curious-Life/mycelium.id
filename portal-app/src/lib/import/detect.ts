@@ -129,13 +129,26 @@ export interface SweepProgress {
 	failed: number;
 	truncated?: boolean;
 	error?: string;
+	/** The selection the SERVER enforced for this job — echoed back so the UI can
+	 *  state what was actually allowed in, instead of what it hoped it asked for. */
+	categories?: string[];
 }
 const emptySweep: SweepProgress = { status: 'idle', total: 0, processed: 0, imported: 0, deduped: 0, skipped: 0, failed: 0 };
 const asSweep = (d: Partial<SweepProgress> | null | undefined): SweepProgress => ({ ...emptySweep, ...(d ?? {}) });
 
-/** Start (or re-attach to) the background sweep. Returns the initial progress. */
-export async function startLocalSweep(categories?: string[]): Promise<SweepProgress> {
-	const d = await apiPost<Partial<SweepProgress>>('/portal/import/local-files', categories?.length ? { categories } : {});
+/**
+ * Start (or re-attach to) the background sweep. Returns the initial progress.
+ *
+ * ⚠️ `categories` is the user's CONSENT and is ALWAYS sent verbatim — including
+ * when it is empty (D-070). The pre-fix line was
+ *   `categories?.length ? { categories } : {}`
+ * which silently dropped an all-deselected selection, and the server answered a
+ * missing selection with "import everything" — so switching every category off
+ * imported every photo, video and voice memo on the machine. An empty array now
+ * reaches the server, which rejects it. Never re-add a "send nothing" branch.
+ */
+export async function startLocalSweep(categories: string[]): Promise<SweepProgress> {
+	const d = await apiPost<Partial<SweepProgress>>('/portal/import/local-files', { categories: categories ?? [] });
 	return asSweep(d);
 }
 /** Poll the running/last sweep's progress. */

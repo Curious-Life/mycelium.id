@@ -103,7 +103,14 @@ export function createSendHandler(deps) {
     'render-produced-no-audio': 'the voice render produced no usable audio',
     'voice-too-large': 'the voice note exceeded the upload limit',
     'upload-failed': 'the voice note could not be uploaded',
-    'voice-disabled': 'voice replies are switched off',
+    'voice-disabled': 'voice replies are switched off in Settings → Voice',
+    // The SPECIFIC render reasons (D-003 ↻2). Each names a REMEDY the owner can
+    // execute — the QA6 bar. Before this they all read "the voice render failed",
+    // which told the owner nothing and told the next debugger nothing either.
+    'voice-runtime-missing': 'this Mac cannot run the on-device voice engine (Apple Silicon + mlx-audio required)',
+    'voice-model-unavailable': 'the on-device voice model could not be loaded — re-download it in Settings → Voice',
+    'voice-synth-failed': 'the on-device voice engine failed while speaking — re-record the voice sample if it repeats',
+    'voice-sample-unreadable': 'the saved voice sample could not be read — re-record it on the agent page',
   };
   // Fail-closed: a policy that throws (or is absent) means NO voice — never an
   // accidental spoken reply on a channel that never asked for one.

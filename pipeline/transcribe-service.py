@@ -298,6 +298,14 @@ class Handler(BaseHTTPRequestHandler):
                 req = json.loads(body or b"{}")
                 path = (req.get("path") or "").strip()
                 language = req.get("language") or None
+                # RESUME OFFSET (D-076). A partially transcribed recording finishes only its
+                # MISSING tail instead of re-decoding 30 minutes. Fail CLOSED on anything that is
+                # not a finite, non-negative number — a bad offset must never silently become 0
+                # (that would look like a completed full pass to the caller's resume negotiation).
+                start = req.get("start")
+                start = 0.0 if start is None else float(start)
+                if not (start >= 0) or start != start or start == float("inf"):
+                    return self._json(400, {"error": "bad start"})
             except Exception:
                 return self._json(400, {"error": "bad json"})
             import tempfile
@@ -318,15 +326,47 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             try:
-                segments, info = m.transcribe(real, beam_size=5, vad_filter=True, language=language)
+                # ── RESUME (D-076) ────────────────────────────────────────────────────────────
+                # `start > 0` means the caller already has the transcript up to that second and
+                # wants only the tail. faster-whisper accepts a decoded float32 array as well as a
+                # path, so the clip is a numpy slice — no ffmpeg, no second decoder. Timestamps are
+                # then RELATIVE to the clip, and `meta.offset` tells the caller what to add back.
+                # ⚠️ `offset` is also the RESUME HANDSHAKE: a service that predates this field never
+                # emits it, so the Node side sees offset=0, knows it got a full re-transcribe, and
+                # REPLACES rather than appends. Emitting it is what makes resume safe to rely on.
+                src = real
+                full_duration = None
+                offset = 0.0
+                if start > 0:
+                    from faster_whisper.audio import decode_audio
+                    sr = 16000
+                    audio_all = decode_audio(real, sampling_rate=sr)
+                    full_duration = round(len(audio_all) / float(sr), 2)
+                    begin = int(start * sr)
+                    if begin >= len(audio_all):
+                        # The caller's coverage already reaches the end of the audio. Nothing to do,
+                        # and saying so with a `done` is the honest answer (0 new segments).
+                        # Emit ONE zero-length segment at the offset so the caller's coverage cursor
+                        # reflects where the audio actually ends. Without it a completed row reports
+                        # "0 s of 0 s" in the portal (second adversarial review, LOW-9).
+                        emit({"type": "meta", "language": None, "duration": full_duration, "offset": round(start, 2)})
+                        emit({"type": "segment", "start": 0.0, "end": 0.0, "text": ""})
+                        emit({"type": "done", "segments": 0, "offset": round(start, 2)})
+                        return
+                    src = audio_all[begin:]
+                    offset = round(start, 2)
+                segments, info = m.transcribe(src, beam_size=5, vad_filter=True, language=language)
+                # `info.duration` describes the CLIP when resuming; the caller needs the WHOLE
+                # recording's duration for coverage, so prefer the measured full length.
                 emit({"type": "meta", "language": getattr(info, "language", None),
-                      "duration": getattr(info, "duration", None)})
+                      "duration": full_duration if full_duration is not None else getattr(info, "duration", None),
+                      "offset": offset})
                 n = 0
                 for s in segments:
                     n += 1
                     emit({"type": "segment", "start": round(float(s.start), 2),
                           "end": round(float(s.end), 2), "text": s.text.strip()})
-                emit({"type": "done", "segments": n})
+                emit({"type": "done", "segments": n, "offset": offset})
             except Exception as e:
                 try:
                     emit({"type": "error", "error": str(e)[:200]})

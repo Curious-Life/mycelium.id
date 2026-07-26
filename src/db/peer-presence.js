@@ -3,7 +3,7 @@
  * online/offline indicator. (Distinct from db.publicPresence, which counts
  * anonymous "reading-now" visitors on PUBLISHED documents — unrelated.)
  *
- * Design: docs/DESIGN-connection-presence-indicator-2026-06-18.md
+ * Design: the connection-presence design
  *
  * "Online" = a Mycelium client has been active within the active window. The
  * portal polls /portal/* every 5–15s while the app is open, so each authenticated

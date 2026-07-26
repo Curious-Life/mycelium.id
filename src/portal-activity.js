@@ -237,7 +237,7 @@ export async function embedProjection(db, userId) {
     // picked up and REACHES 0. It used to be the projection `total - embedded`, which
     // pinned this row at 'running' FOREVER on any vault holding a permanently
     // un-embeddable row — a stuck vault and a healthy one looked identical from here.
-    // @see docs/DATA-READINESS-DESIGN-2026-07-15.md §3.3; PIPELINE-INTEGRITY §P1.2.
+    // @see the data-readiness design §3.3; PIPELINE-INTEGRITY §P1.2.
     const { embedded, total, pending } = await db.messages.embedBacklogCached(userId); // polled @2.5s → cached (see embedBacklogCached)
     if (pending <= 0) return null;                       // nothing left to pick up → not active
     let health = 'unknown';
@@ -301,8 +301,16 @@ export async function embedProjection(db, userId) {
 // this projection. Not part of the route contract; do not call it from app code.
 export async function categorizeProjection(db, userId) {
   try {
-    const { tagged, total, pending } = await db.messages.categoriesBacklogCached(userId);
-    if (pending <= 0) return null;                       // caught up → not active
+    const { tagged, total, pending, blockedOnEmbed = 0 } = await db.messages.categoriesBacklogCached(userId);
+    // D-047 ↻1: `pending` is now the DRAIN predicate (untagged AND already embedded), because
+    // selectPendingCategories gained `AND embedding_768 IS NOT NULL` — the structural stage
+    // ordering. `blockedOnEmbed` is the untagged remainder still queued behind embedding. This row
+    // must key on the SUM: keying on `pending` alone would make the whole categorize row VANISH
+    // mid-import (pending 0, thousands untagged) — "caught up → not active" asserted over work
+    // that has not started. That is the invisible-stage bug this projection was written to end,
+    // re-introduced by the fix for a different one.
+    const remaining = pending + blockedOnEmbed;
+    if (remaining <= 0) return null;                     // caught up → not active
     const paused = (() => { try { return isCategorizePaused(); } catch { return false; } })();
     // The drainer's measured L1 throughput (banked per pass) — the rate source for the ETA below.
     const st = (() => { try { return getEnrichDrainerStatus(); } catch { return null; } })();
@@ -316,7 +324,14 @@ export async function categorizeProjection(db, userId) {
     // FREEZES at its last value and ticks a stable, plausible, WRONG countdown for the whole import
     // (the §3.9 plausible-wrong-number class the PR fixes for the pipeline slice — applied here too,
     // so the two surfaces stop contradicting each other). Absent flag ⇒ false (fail-soft to pre-QA6).
-    const waitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
+    // ⚠️ OR'd with the STANDING DATA FACT (D-047 ↻1): nothing is categorizable right now because
+    // every untagged row is still waiting for its vector. The drainer's flag is a per-cycle
+    // SCHEDULING decision, and it is FALSE in exactly the case that matters most — embed stalled or
+    // refused, where the drainer deliberately does NOT defer (that is the starvation release valve,
+    // and it is what let categorize outrun embed) but the stage is nonetheless blocked on embedding
+    // for every row it cannot see. Twin of readiness.js's second `waiting_embed` arm; the two
+    // surfaces must not disagree about the same vault.
+    const waitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed) || (pending <= 0 && blockedOnEmbed > 0);
     // D-001: deferred because the compute governor is holding the model slot for another resident
     // lane (a describe child, clustering, chat). SAME contract as waitingOnEmbed — a choice-free
     // scheduling `waiting`, ETA withdrawn — just a different immediate cause in the label.
@@ -347,14 +362,20 @@ export async function categorizeProjection(db, userId) {
       process: (noModel || waiting) ? null : PROCESS_LABELS.categorize,
       done: tagged,
       total,
-      remaining: pending,
+      // The HONEST remainder — everything still to label, including the rows queued behind
+      // embedding. `pending` alone would count down to 0 and then sit there while the corpus
+      // finished embedding (D-047 ↻1).
+      remaining,
       // R2-review (§3.9): a REAL L1 estimate from the drainer's measured throughput (41/min ⇒ ~31h
       // for a 76k import). Was hardcoded `null` with "per-second rate not measured in V1" — true
       // when written, but the June sweep had mislabeled L1's rate as embedding's, which is why this
       // never-measured stage sat unpriced for a year. WITHDRAWN (paused || waiting): a countdown to
       // a moment the loop is not working toward is the frozen-ETA lie above.
       // categorizeEta also nulls on no model / nothing tagged yet / no work / a stalled model.
-      etaSeconds: categorizeEta(st, pending, paused || waiting, noModel),
+      // Priced over `remaining`, not `pending`: the L1 rate is the same for a row waiting on its
+      // vector as for one ready now, so an ETA over the drainable subset alone would promise a
+      // finish line that is not the finish line (the §3.9 plausible-wrong-number class).
+      etaSeconds: categorizeEta(st, remaining, paused || waiting, noModel),
       // `paused` covers waiting-on-a-decision (stopped OR no model); `waiting` is the deferral —
       // NOT the owner's pause (they chose nothing) and NOT 'stalled' (nothing is broken). Never
       // 'running' while the loop is idle.

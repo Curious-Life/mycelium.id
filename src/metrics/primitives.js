@@ -4,7 +4,7 @@
  * Single source of truth for the operators the measurement stages need
  * (compute-vitality, topology-audit, compute-complexity, compute-territory-
  * neighbors, the criticality + coherence families). Imported, never
- * copy-pasted per stage — see docs/MEASUREMENT-LAYER-BUILDOUT-PLAN-2026-06-04.md
+ * copy-pasted per stage — see the measurement-layer buildout plan
  * (the modular-monolith principle: shared primitives live in exactly one place).
  *
  * PORTED VERBATIM from the canonical @mycelium/metrics/primitives.js

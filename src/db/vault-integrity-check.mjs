@@ -8,7 +8,7 @@
 // spawns this DETACHED + throttled (src/db/integrity.js) so the scan runs in the
 // background without touching request latency. READ-ONLY — it never writes the vault,
 // so it can never itself be the concurrent writer that a byte-copy would tear.
-// @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+// @see the vault-concurrency-fix design.
 //
 // Env: MYCELIUM_DB (required), USER_MASTER (required for the encrypted canonical vault;
 // omitted → plaintext open for fixtures). Prints one JSON line to stdout.

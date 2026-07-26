@@ -15,14 +15,30 @@
 //                       sensitive (kept out of proactive recall / never published).
 //
 // Local vault only — every call routes through the encrypting db namespaces.
+//
+// REFS (D-040 ↻1): the {type,id} handle is now the SHORT ref every read surface renders —
+// `[msg:3f9a1c2b8d4e]`, `[fact:…]`, `[ent:…]`, `[doc:<path>]` (src/core/item-ref.js). All
+// three ref-taking verbs resolve through resolveItemRef, so a listing that shows a short
+// ref can never create a dead end in one of them. An unresolvable ref is a LOUD failure,
+// never the old success-shaped "Nothing to forget: …".
+
+import { renderRef, resolveItemRef, parseRef, isSafeIdShape } from '../core/item-ref.js';
 
 const ITEM_TYPES = ['message', 'document', 'fact'];
 const ENTITY_TYPES = ['person', 'project', 'place', 'org'];
+// Everything addressable by a {type,id} ref (forget + mark). `link` targets ITEM_TYPES only.
+const REF_TYPES = ['message', 'document', 'fact', 'entity'];
 
 export function createCurateDomain({ db, userId, searchHelpers }) {
   const REF = {
     type: { type: 'string', enum: ['message', 'document', 'fact', 'entity'], description: 'What kind of item.' },
-    id: { type: 'string', description: 'The message id, document path, fact id, or entity id.' },
+    id: {
+      type: 'string',
+      description: 'The ref shown next to the item when you read it — e.g. [msg:3f9a1c2b8d4e], '
+        + '[fact:f47ac10b-58c], [ent:…], or [doc:<path>]. Paste it as shown (brackets optional). '
+        + 'Never invent one: if you do not have a ref, read the item first (searchMindscape / getDailyMessages). '
+        + 'Refs are internal handles — use them in tool calls, never show them to the user.',
+    },
   };
 
   const tools = [
@@ -115,6 +131,62 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
     } catch { /* best-effort */ }
   }
 
+  // A forget that destroyed NOTHING is an event too (CLAUDE.md §8): before this, a miss
+  // returned a calm sentence and left no trace anywhere, so "the agent said it forgot it
+  // and the data is still there" was invisible after the fact. The attempted id is
+  // recorded only when it is ID-SHAPED — a hallucinated id can be arbitrary text, and
+  // arbitrary text may be user content (§1), so anything else is logged as 'invalid'.
+  async function auditForgetMiss(type, rawId, reason) {
+    try {
+      // UNWRAP FIRST. The schema tells the model to paste the ref "as shown", i.e. the
+      // bracketed `[msg:…]` token — which is NOT id-shaped, so testing the raw argument
+      // audited 'invalid' for the single most common miss and left the trail blank exactly
+      // where it was needed (independent review, 2026-07-26).
+      const inner = parseRef(rawId).id;
+      await db.audit?.log?.({
+        action: 'forget-miss',
+        userId,
+        resourceType: type,
+        resourceId: isSafeIdShape(inner) ? inner.slice(0, 64) : 'invalid',
+        details: { reason, mode: 'redact' },
+      });
+    } catch { /* best-effort */ }
+  }
+
+  // The LOUD failure (D-040 ↻1 / QA6 "never report success from a non-throw"). Deliberately
+  // NOT a throw: both catch sites collapse a throw to a constant "tool execution failed"
+  // (src/mcp.js:293, src/agent/harness.js:624), so a throw carries LESS information than
+  // this does — and widening those redactions would weaken §1 for every other tool. The
+  // string is unmistakably a failure, tells the model what to do instead, and forbids the
+  // "I forgot it" report. It carries NO user content: only the type and a fixed reason.
+  const MISS_TEXT = {
+    missing: 'no id was given',
+    'type-mismatch': 'the ref you passed is for a different kind of item than the type you named',
+    'not-found': 'no {type} in this vault matches that ref',
+    ambiguous: 'that short ref matches more than one {type}',
+  };
+  function forgetFailed(type, reason, candidates) {
+    const why = (MISS_TEXT[reason] || MISS_TEXT['not-found']).replace('{type}', type);
+    // NEVER A DEAD END (QA6): "pass the full id" is useless advice when no read surface
+    // renders a full id — so an ambiguity hands back the actual candidates. They are opaque
+    // random ids belonging to this user, carrying no content (§1).
+    const fix = reason === 'ambiguous'
+      ? `Identify which one the user meant (re-read them), then pass its FULL id: ${(candidates || []).join(', ')}.`
+      : `Re-read the item (searchMindscape, getDailyMessages, or listDocuments) and pass the exact ref shown beside it, e.g. ${renderRef(type, type === 'document' ? 'folder/name.md' : 'a1b2c3d4e5f6')}.`;
+    return `FORGET FAILED — nothing was forgotten: ${why}. `
+      + `Do NOT tell the user this is forgotten; the data is still there. ${fix}`;
+  }
+
+  // Resolve a {type,id} ref for any of the three ref-taking verbs. Returns the real row id
+  // or null after auditing + reporting the miss (forget only — mark/link are non-destructive
+  // and just report).
+  async function resolveOrNull(verb, type, rawId) {
+    const r = await resolveItemRef(db, userId, type, rawId);
+    if (r.ok) return { id: r.id };
+    if (verb === 'forget') await auditForgetMiss(type, rawId, r.reason);
+    return { fail: verb === 'forget' ? forgetFailed(type, r.reason, r.candidates) : null, reason: r.reason };
+  }
+
   // Apply optional salience after a write so it is honored for new AND existing
   // rows (the upserts deliberately do not touch pinned/sensitive).
   async function applySalience(setSalience, id, args) {
@@ -173,21 +245,48 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
       if (!name) throw new Error('link: entity (name) is required');
       if (!type || !id) throw new Error('link: type and id (the item to link) are required');
       if (!ITEM_TYPES.includes(type)) throw new Error(`link: unknown item type "${type}" (expected message, document, or fact)`);
+      // Resolve the ref: the read surfaces now show SHORT refs, so `link` has to accept
+      // one too or a listing would hand the model an id that only `forget` understands.
+      // DELIBERATELY NON-STRICT: an unresolvable id still links, because `link` has always
+      // accepted an arbitrary refId and callers legitimately link ids this process cannot
+      // see. Tightening that into a refusal is a separate change with its own caller audit —
+      // not something to smuggle into a destructive-capability PR.
+      //
+      // But the fallback is parseRef(id).id, NOT the raw argument: the read surfaces now
+      // train the model to pass `[msg:…]`, so falling back to the raw string would persist
+      // that literal token as entity_links.ref_id — a permanently dangling edge that
+      // listEntities then re-renders as `[msg:[msg:…]`. (This is NOT "the pre-existing
+      // contract" as an earlier draft of this comment claimed: before the refs existed the
+      // model had no bracket syntax to pass. Independent review, 2026-07-26.)
+      const ref = await resolveOrNull('link', type, id);
+      // parseRef, not the raw string: the surfaces train the model to pass `[msg:…]`, and
+      // persisting that literal token as entity_links.ref_id would be a permanently dangling
+      // edge (independent review, 2026-07-26).
+      const refId = ref.id || parseRef(id).id;
       const { id: entityId } = await db.entities.upsert({ userId, type: entityType, name });
-      const { created } = await db.entities.link({ userId, entityId, refType: type, refId: id });
-      return `Linked ${entityType} "${name}" ${created ? 'to' : '(already linked to)'} ${type} ${id}.`;
+      const { created } = await db.entities.link({ userId, entityId, refType: type, refId });
+      return `Linked ${entityType} "${name}" ${created ? 'to' : '(already linked to)'} ${type} ${refId}.`;
     },
 
     forget: async (args = {}) => {
-      const { type, id } = args;
-      if (!type || !id) throw new Error('forget: type and id are required');
+      const { type } = args;
+      if (!type || !args.id) throw new Error('forget: type and id are required');
+      if (!REF_TYPES.includes(type)) {
+        throw new Error(`forget: unknown type "${type}" (expected message, document, fact, or entity)`);
+      }
+      // Resolve the agent-supplied ref BEFORE touching anything. A miss is LOUD + audited
+      // and returns here — it can never fall through into a "Nothing to forget" sentence
+      // the model reads as done.
+      const ref = await resolveOrNull('forget', type, args.id);
+      if (ref.fail) return ref.fail;
+      const id = ref.id;
 
       if (type === 'message') {
         // redact() now owns the FULL cascade (src/core/delete-cascade.js), including
         // search-sidecar eviction — fail-closed, so a throw here means "not forgotten"
         // and the user is told so rather than being told it worked.
         const res = await db.messages.redact(id, userId, { searchHelpers });
-        if (!res.found) return `Nothing to forget: no message with id ${id}.`;
+        if (!res.found) { await auditForgetMiss('message', id, 'not-found'); return forgetFailed('message', 'not-found'); }
         if (res.alreadyForgotten) return `Already forgotten: message ${id}.`;
         await auditForget('message', id, res);
         return `Forgotten: message ${id}. Content and embeddings destroyed, removed from search and clustering, tombstoned for audit. This cannot be undone.`;
@@ -195,7 +294,7 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
 
       if (type === 'document') {
         const res = await db.documents.redact(userId, id, { searchHelpers });
-        if (!res.found) return `Nothing to forget: no document at path ${id}.`;
+        if (!res.found) { await auditForgetMiss('document', id, 'not-found'); return forgetFailed('document', 'not-found'); }
         if (res.alreadyForgotten) return `Already forgotten: document ${id}.`;
         // The old comment here ("Documents aren't in the in-RAM index … no explicit
         // index eviction is needed") was FALSE: d1-loader indexes documents under the
@@ -207,7 +306,7 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
 
       if (type === 'fact') {
         const res = await db.facts.redact(id, userId);
-        if (!res.found) return `Nothing to forget: no fact with id ${id}.`;
+        if (!res.found) { await auditForgetMiss('fact', id, 'not-found'); return forgetFailed('fact', 'not-found'); }
         if (res.alreadyForgotten) return `Already forgotten: fact ${id}.`;
         await auditForget('fact', id, res);
         return `Forgotten: fact ${id}. Value destroyed, tombstoned for audit. This cannot be undone.`;
@@ -215,22 +314,29 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
 
       if (type === 'entity') {
         const res = await db.entities.redact(id, userId);
-        if (!res.found) return `Nothing to forget: no entity with id ${id}.`;
+        if (!res.found) { await auditForgetMiss('entity', id, 'not-found'); return forgetFailed('entity', 'not-found'); }
         if (res.alreadyForgotten) return `Already forgotten: entity ${id}.`;
         // Entity links carry no plaintext and are dropped by redact.
         await auditForget('entity', id, res);
         return `Forgotten: entity ${id}. Name and details destroyed, links removed, tombstoned for audit. This cannot be undone.`;
       }
 
-      throw new Error(`forget: unknown type "${type}" (expected message, document, fact, or entity)`);
+      // (no trailing throw: REF_TYPES is validated at the top of this handler, so every
+      // reachable `type` is handled above. A dead throw here would read as a live guard.)
     },
 
     mark: async (args = {}) => {
-      const { type, id, pinned, sensitive } = args;
-      if (!type || !id) throw new Error('mark: type and id are required');
+      const { type, pinned, sensitive } = args;
+      if (!type || !args.id) throw new Error('mark: type and id are required');
+      if (!REF_TYPES.includes(type)) throw new Error(`mark: unknown type "${type}" (expected message, document, fact, or entity)`);
       if (pinned === undefined && sensitive === undefined) {
         throw new Error('mark: provide pinned and/or sensitive');
       }
+      // Same reason as `link`: the listings render short refs, so `mark` must resolve them.
+      // Non-strict for the same reason — an unresolvable id falls through to setSalience,
+      // which already reports "No live <type> found for <id>" (not success-shaped).
+      const ref = await resolveOrNull('mark', type, args.id);
+      const id = ref.id || parseRef(args.id).id;   // never the raw bracketed token
       const flags = {};
       if (pinned !== undefined) flags.pinned = pinned;
       if (sensitive !== undefined) flags.sensitive = sensitive;
@@ -239,8 +345,7 @@ export function createCurateDomain({ db, userId, searchHelpers }) {
       if (type === 'message') res = await db.messages.setSalience(id, userId, flags);
       else if (type === 'document') res = await db.documents.setSalience(userId, id, flags);
       else if (type === 'fact') res = await db.facts.setSalience(id, userId, flags);
-      else if (type === 'entity') res = await db.entities.setSalience(id, userId, flags);
-      else throw new Error(`mark: unknown type "${type}" (expected message, document, fact, or entity)`);
+      else res = await db.entities.setSalience(id, userId, flags);   // REF_TYPES-validated above
 
       if (!res.found) return `No live ${type} found for ${id} (it may not exist, or be forgotten).`;
       const parts = [];

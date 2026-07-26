@@ -1,6 +1,6 @@
 // pipeline/vault-bridge.js — long-running Python→Node loopback DB bridge (V1 local).
 //
-// At-rest blindness (A′, docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md): the vault is
+// At-rest blindness (A′, the at-rest blindness design): the vault is
 // whole-file SQLCipher and ONLY Node opens the cipher. Stock Python `sqlite3` cannot
 // read a SQLCipher file, so the pipeline stages reach the vault through THIS service
 // instead of `sqlite3.connect`. It promotes the old spawn-per-call local-write-bridge

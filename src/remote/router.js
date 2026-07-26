@@ -145,7 +145,7 @@ export function remoteRouter({ getDb = () => null, getUserId = () => null } = {}
   // helper renders a ready-to-paste .mcp.json (Claude Code / Claude Desktop) from
   // these. Surfaces the ACTUAL keychain account names + data dir THIS server uses
   // so the pasted config opens the SAME vault — a mismatched MYCELIUM_DATA_DIR or
-  // KC account is the #1 "connected but no data" gotcha (docs/MCP-CONNECT-AND-TEST.md).
+  // KC account is the #1 "connected but no data" gotcha (the MCP connect-and-test notes).
   // No secrets — only paths + non-secret service names.
   router.get('/local-config', (_req, res) => {
     const home = process.env.MYCELIUM_HOME || process.cwd();

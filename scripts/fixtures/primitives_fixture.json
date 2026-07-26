@@ -1,7 +1,7 @@
 {
   "_metadata": {
     "generator": "scripts/tests/generate_primitives_fixture.py",
-    "spec": "docs/MEASUREMENT-LAYER-BUILDOUT-PLAN-2026-06-04.md (F1)",
+    "spec": "the measurement-layer buildout plan (F1)",
     "tolerance": 1e-12,
     "generated_at": "2026-05-06T09:34:45+00:00",
     "python_version": "3.12.6",

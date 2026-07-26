@@ -145,7 +145,7 @@ If you're tempted to compress this into "let me sweep and then write the doc" wi
 ## Mycelium-specific reminders
 
 - This codebase is a cognitive vault. Security non-negotiable (see CLAUDE.md §1-13). Sweep cycles must explicitly address: data exposure surface, fail-closed guarantees, encryption boundary, audit trail, cross-tenant isolation, encryption-at-rest invariants.
-- The egress-provenance refactor (Phases 0-7) is the canonical example of this protocol in practice. Read docs/EGRESS-PROVENANCE-PHASE2-DESIGN-2026-05-06.md for the format the verification-table + revision-history + sweep-findings sections should follow.
+- The egress-provenance refactor (Phases 0-7) is the canonical example of this protocol in practice. Read the egress-provenance phase-2 design for the format the verification-table + revision-history + sweep-findings sections should follow.
 - The `Explore` agent type is the right tool for sweeps. The `Plan` agent type can be used after sweeps for the design-doc structure if helpful, but `Plan` should never run before `Explore` for this codebase.
 - Sub-agents have isolated runtimes. The sweep prompts must be self-contained; agents do not see your conversation context.
 - Lane serialization in the agent-server (`enqueue` keyed by `agent:${AGENT_ID}`) is a recurring assumption that DOES hold — but only for `/chat`, not for `/chat/stream`, `/portal/chat/stream`, `/triage`, `/think`, or scheduler runs. Always verify which lane an endpoint runs in before assuming.

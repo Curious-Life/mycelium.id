@@ -18,7 +18,7 @@
  * refusal_mode + the window's `notes` field to decide which state to
  * render.
  *
- * @see docs/WORKSTREAM-C-PORTAL-DESIGN-2026-05-08.md §"Honesty rendering"
+ * @see the portal workstream design §"Honesty rendering"
  */
 
 import type { PresentationContract, WindowResponse } from './client';
@@ -42,7 +42,7 @@ export const LOW_SAMPLE_THRESHOLD = 5;
  * which invents a specific reason ("baseline") from a generic signal.
  * The honest fix is server-side: populate `notes` at compute time with the
  * actual reason, so this client classifier renders the server's truth
- * instead of guessing. See docs/COGNITIVE-METRICS-SPEC-HANDOFF-2026-05-07.md
+ * instead of guessing. See the cognitive-metrics spec handoff
  * §"Honesty-banner gap" for the 3-part fix (copy / hoist / server-notes).
  * Trigger: land alongside Phase 6.2 calibration design, or when compute
  * is being touched anyway.

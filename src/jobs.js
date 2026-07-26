@@ -153,7 +153,7 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   // Fail-closed disk guard: a re-cluster + its children write heavily; on a near-full
   // disk the write storm hits ENOSPC (WAL bloat + torn state — a corruption co-factor).
   // Refuse rather than risk the vault. Measure-only is exempt (small metric-table writes,
-  // no cluster.py). @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+  // no cluster.py). @see the vault-concurrency-fix design.
   if (!measureOnly) {
     try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
     catch (e) {
@@ -438,7 +438,7 @@ export function startBackfillJob({ db, dbPath, columns } = {}) {
       //    server is a concurrent writer on this same file, so a byte copy tears
       //    ("database disk image is malformed"). safeVaultCopy uses VACUUM INTO — a
       //    transactionally-consistent, same-key-encrypted snapshot, torn-proof under
-      //    the live writer. @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+      //    the live writer. @see the vault-concurrency-fix design.
       state.stageLabel = 'backup';
       backupPath = `${path0}.pre-backfill-${startedAt}`;
       safeVaultCopy(rawDb, backupPath);
@@ -636,7 +636,7 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
   // Fail-closed disk guard: describe-chronicles opens the vault RW and writes narration;
   // on a near-full disk that risks the ENOSPC storm. This is the path "describe more"
   // spawns → return a structured disk_low so the UI can say "free N GB" instead of the
-  // old silent stuck-"Describing…". @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+  // old silent stuck-"Describing…". @see the vault-concurrency-fix design.
   try { assertVaultDiskHeadroom(dbPath || resolveDbPath()); }
   catch (e) { if (e.code === 'DISK_LOW') return { pid: null, status: 'disk_low', detail: e.detail }; throw e; }
   // COMPUTE GOVERNOR (D-001): describe-chronicles loads an Ollama model — a RESIDENT lane. Reserve

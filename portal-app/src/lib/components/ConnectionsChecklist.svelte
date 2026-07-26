@@ -12,7 +12,7 @@
 	// AI state
 	// Default to the API-key path. The Claude *subscription* path is now supported
 	// (opt-in): it imports the user's existing Claude Code login via /auth/claude/import
-	// — see AISettings + docs/CLAUDE-SUBSCRIPTION-DRIVER-DESIGN-2026-06-26.md.
+	// — see AISettings + the Claude-subscription driver design.
 	let aiProvider: 'claude' | 'api' = $state('api');
 	let aiSubProvider: 'anthropic' | 'openai' = $state('anthropic');
 	let aiKeyInput = $state('');

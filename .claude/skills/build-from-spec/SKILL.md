@@ -103,4 +103,4 @@ The spec is done only when **every** unit is either landed-green or explicitly p
 
 ## Relationship to the other drivers
 
-`docs/AUTONOMOUS-ROUTINE.md` names three drivers, one policy. This is a fourth *entry shape* into the same policy: **spec-in, shipped-or-parked-out**, single-spec, human-gated at the security boundary. The REVIEW and LAND gates are identical to the routine's; what this skill adds is (a) the readiness precondition, (b) the multi-audit REVIEW amplification, and (c) the explicit STOP taxonomy so an unattended run parks honestly instead of over-claiming.
+the autonomous routine names three drivers, one policy. This is a fourth *entry shape* into the same policy: **spec-in, shipped-or-parked-out**, single-spec, human-gated at the security boundary. The REVIEW and LAND gates are identical to the routine's; what this skill adds is (a) the readiness precondition, (b) the multi-audit REVIEW amplification, and (c) the explicit STOP taxonomy so an unattended run parks honestly instead of over-claiming.

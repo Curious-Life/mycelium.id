@@ -22,6 +22,7 @@
  */
 
 import { attachmentLineResolver, TRANSCRIPT_BUDGET_DAILY } from '../agent/attachment-context.js';
+import { renderRef } from '../core/item-ref.js';
 
 export function createMessagesDomain(deps) {
   if (!deps) throw new TypeError('createMessagesDomain: deps required');
@@ -93,7 +94,9 @@ export function createMessagesDomain(deps) {
         const src = m.source || 'unknown';
         const label = m.role === 'user' ? 'Human' : (agentLabels[m.agent_id] || m.agent_id || 'Assistant');
         const att = lineFor(m);
-        return `[${time}] (${src}) ${label}: ${m.content}${att ? `\n${att}` : ''}`;
+        // D-040 ↻1: a day review printed no id at all, so nothing the agent read here was
+        // forgettable. The ref leads the line (compact form — 30 rows per page).
+        return `${renderRef('message', m.id)} [${time}] (${src}) ${label}: ${m.content}${att ? `\n${att}` : ''}`;
       }).join('\n\n');
 
       const remaining = result.total - offset - result.messages.length;

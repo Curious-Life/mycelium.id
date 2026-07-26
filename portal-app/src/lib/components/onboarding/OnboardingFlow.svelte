@@ -125,7 +125,12 @@
 			const d = await res.json().catch(() => ({}));
 			if (d?.sent === true) {
 				await chatMessages.loadHistory(true);   // pull the just-persisted greeting
-				navigationState.setChatOpen(true);       // open chat so it's the first thing seen
+				// D-073 — open the WHOLE chat, not just the input bar. `setChatOpen(true)` was
+				// not enough: ChatFloat auto-expands its message area only for an EMPTY thread,
+				// and the loadHistory above has already put the greeting in it, so the chat
+				// opened collapsed and the agent's introduction was invisible until the operator
+				// clicked into the input. openChatExpanded() is a one-shot expansion request.
+				navigationState.openChatExpanded();
 			}
 		} catch { /* best-effort — chat is still reachable from the header toggle */ }
 	}

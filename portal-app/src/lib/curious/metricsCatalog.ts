@@ -1,5 +1,5 @@
 // Single source of truth for the "What we measure" glossary on the Curious Life
-// page AND the human-readable reference doc (docs/CURIOUS-LIFE-METRICS-CATALOG.md).
+// page AND the human-readable reference doc (the metrics catalog).
 // Keep them in sync: edit here, then mirror into the doc.
 //
 // Honesty is the contract (CLAUDE.md §"honest by construction" + src/metrics/

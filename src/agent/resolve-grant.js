@@ -22,10 +22,32 @@
 //     prerequisites shipped: per-boot token (RT1), write-audit (RT2-H2), overwrite
 //     recoverability (RT2-H1) — so default-on is safe.
 //   • Destructive mind-model rewriters (editMindFile / writeMindFileWhole /
-//     updateInternalModel), forget, and publish are EXCLUDED from the channel set even when
+//     updateInternalModel) and publish are EXCLUDED from the channel set even when
 //     enabled — they belong to the deliberate consolidation cycle, not a phone DM, and are
 //     the deepest, hardest-to-recover surfaces. The remaining writes are additive or
 //     document-scoped (and any overwrite is recoverable via document/fact/entity versions).
+//   • `forget` WAS excluded here for the same reason, and that exclusion was the primary
+//     cause of D-040 ↻1 — "the agent tried to forget data and it didn't disappear." It could
+//     not: the tool was not on the turn at all. The owner asking their own agent, in their
+//     own 1:1 DM, to forget their own data is the SAME act as asking in-app, where `forget`
+//     has always been granted (tool-domains.js `memory`); the gap was an asymmetry, not a
+//     policy. It is now granted HERE ONLY, through its own destructive tier
+//     (autonomy-tools.js OWNER_DESTRUCTIVE_TOOLS) which additionally requires the
+//     token-proved `ownerTrusted` flag — so a fired scheduled task or a reflection cycle can
+//     never reach it even by naming it. See the forget-reachability design.
+//     Irreversibility is mitigated, not ignored: no bulk form (one {type,id} per call); a
+//     guessed id fails LOUDLY and is audited (src/tools/curate.js), and the resolver's minimum
+//     prefix length makes it un-guessable in practice (src/core/item-ref.js SAFE_ID); the
+//     always-on getContext preamble deliberately renders NO refs, so attacker-authored vault
+//     content replayed into the system prompt never arrives with deletion handles for its
+//     neighbours (see the block comment in src/tools/context.js); and OWNER_SYSTEM forbids
+//     acting on forwarded content.
+//
+//     HONEST LIMIT — do not read more into this than is enforced. There is NO code-level check
+//     that the id came from a read the USER asked for. An injection that gets the agent to
+//     retrieve an item (searchMindscape / getDailyMessages) and then forget it is stopped only
+//     by the OWNER_SYSTEM prose + the fact that the owner sees the reply. That is the residual
+//     risk this grant accepts; the ref-less preamble is what keeps it from being one-shot.
 //
 // The grant is a list of opt-in tool NAMES handed to autonomyTools(), which stays the
 // single fail-closed chokepoint: read-safe always; gated/write ONLY when named.
@@ -52,11 +74,16 @@ export function ownerWriteEnabled(storedSetting) {
 // cycle's job, not a DM's).
 const OWNER_GATED_TOOLS = ['reply', 'schedule_task', 'list_my_schedules', 'cancel_task'];
 // Owner-trusted DM write tools — TRIMMED: additive + document-scoped only. No mind-model
-// rewriters (editMindFile/writeMindFileWhole/updateInternalModel), no forget, no publish.
+// rewriters (editMindFile/writeMindFileWhole/updateInternalModel), no publish.
 const OWNER_WRITE_TOOLS = ['remember', 'link', 'mark', 'saveDocument', 'updateDocument', 'captureMessage', 'createTask', 'flagForDiscussion'];
+// Owner-trusted DM DESTRUCTIVE tools. Kept in their own list, not folded into
+// OWNER_WRITE_TOOLS, because naming one is only HALF the grant: autonomyTools also requires
+// `ownerTrusted === true` for anything in OWNER_DESTRUCTIVE_TOOLS. See the header note and
+// autonomy-tools.js. `forget` is here; nothing else destroys user data by id.
+const OWNER_DESTRUCTIVE = ['forget'];
 
 // Full owner-trusted grant (names handed to autonomyTools as enabledNames).
-export const OWNER_CHANNEL_TOOLS = Object.freeze([...OWNER_GATED_TOOLS, ...OWNER_WRITE_TOOLS]);
+export const OWNER_CHANNEL_TOOLS = Object.freeze([...OWNER_GATED_TOOLS, ...OWNER_WRITE_TOOLS, ...OWNER_DESTRUCTIVE]);
 // Untrusted (any non-owner sender, any group, or owner-write disabled) → reply only.
 export const UNTRUSTED_CHANNEL_TOOLS = Object.freeze(['reply']);
 

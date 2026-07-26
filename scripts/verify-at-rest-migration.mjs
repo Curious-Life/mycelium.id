@@ -4,7 +4,7 @@
 // dual-boot migration RACE, the unkeyed ensureVaultSchema, broken new-user
 // born-encrypted). Exercises the REAL initVaultStorage path (not boot() directly,
 // which is what let the old gate miss all of it) + TRUE cross-process concurrency.
-// @see docs/AT-REST-MIGRATION-HARDENING-DESIGN-2026-06-18.md
+// @see the at-rest migration-hardening design
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';

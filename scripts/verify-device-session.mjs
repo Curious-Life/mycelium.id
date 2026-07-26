@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// verify-device-session.mjs — U7 gate (docs/UNIFIED-AUTH-DESIGN-2026-07-24.md +
-// docs/WEBVIEW-SESSION-EXCHANGE-DESIGN-2026-07-22.md).
+// verify-device-session.mjs — U7 gate (the unified-auth design +
+// the webview session-exchange design).
 //
 // Exercises the REAL migrations (0052/0057 device_tokens, 0056 device_sessions) +
 // the REAL device-sessions/device-tokens namespaces + the REAL auth gate functions

@@ -9,6 +9,14 @@
 //   P5 reply is NOT in the autonomy grant when absent from the registry (AGENT_URL unset)
 //   P6 list_my_schedules never reveals the prompt; cancel_task → status cancelled
 //   P7 'once' without scheduled_at → error
+//
+// MUTATION-TESTED: re-added 'listReflections' to SAFE_AUTONOMOUS_TOOLS while it remained in
+//   CYCLE_AUTONOMOUS_TOOLS → 'P2 all FOUR autonomy tiers are pairwise disjoint' REDs, naming the
+//   overlap. This is the shadowing case: autonomyTools() checks SAFE first, so the duplicate
+//   would have been granted UNCONDITIONALLY — to every untrusted channel turn holding `reply` —
+//   while the cycle tier's isCycle requirement looked intact. The pre-existing three-tier
+//   disjointness row above stayed GREEN under that same mutation, which is why the check was
+//   widened to four (D-076; found by independent review of that change).
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
@@ -16,7 +24,7 @@ import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { buildDomains, collectTools } from '../src/mcp.js';
 import { toolsForDomains, ALL_DOMAIN_KEYS } from '../src/agent/tool-domains.js';
-import { autonomyTools, SAFE_AUTONOMOUS_TOOLS, AUTONOMY_TOOLS, WRITE_AUTONOMOUS_TOOLS } from '../src/agent/autonomy-tools.js';
+import { autonomyTools, SAFE_AUTONOMOUS_TOOLS, AUTONOMY_TOOLS, WRITE_AUTONOMOUS_TOOLS, CYCLE_AUTONOMOUS_TOOLS } from '../src/agent/autonomy-tools.js';
 
 const DB = 'data/verify-harness-tools.db', KCV = 'data/verify-harness-tools-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -51,8 +59,14 @@ const SCHED_TOOLS = ['schedule_task', 'list_my_schedules', 'cancel_task'];
   const none = autonomyTools(tools, []);
   rec('P2 read-safe tools granted with no opt-in (getContext, searchMindscape)', has(none, 'getContext') && has(none, 'searchMindscape'));
   rec('P2 gated schedule_task NOT granted without opt-in', !has(none, 'schedule_task'));
-  const opted = autonomyTools(tools, ['schedule_task']);
-  rec('P2 schedule_task granted when explicitly enabled', has(opted, 'schedule_task') && has(opted, 'getContext'));
+  // D-063 turn-taking: schedule_task is SELF-ARMING (it creates the agent's next turn), so
+  // the grant now also requires the turn to have been started by a human. Both polarities
+  // are asserted — the capability still exists for owner DMs, and is gone for the scheduler.
+  const opted = autonomyTools(tools, ['schedule_task'], { humanTriggered: true });
+  rec('P2 schedule_task granted when explicitly enabled on a HUMAN-triggered turn', has(opted, 'schedule_task') && has(opted, 'getContext'));
+  const autoOpted = autonomyTools(tools, ['schedule_task']);
+  rec('P2 schedule_task STRIPPED on a turn no human started, even when named (D-063)',
+    !has(autoOpted, 'schedule_task') && has(autoOpted, 'getContext'));
   // W3: vault-write tools are a gated set — granted ONLY when explicitly named (owner DMs).
   rec('P2 write tool (saveDocument) NOT granted without opt-in', !has(none, 'saveDocument'));
   rec('P2 write tool (saveDocument) granted when explicitly enabled (W3 owner grant)', has(autonomyTools(tools, ['saveDocument']), 'saveDocument'));
@@ -61,6 +75,22 @@ const SCHED_TOOLS = ['schedule_task', 'list_my_schedules', 'cancel_task'];
   rec('P2 a truly non-listed tool is never granted, even if named (fail-closed)', !has(autonomyTools(tools, ['publishDocument']), 'publishDocument'));
   rec('P2 sets are disjoint + cover the gated names', !SCHED_TOOLS.some((n) => SAFE_AUTONOMOUS_TOOLS.has(n)) && SCHED_TOOLS.every((n) => AUTONOMY_TOOLS.has(n))
     && ![...WRITE_AUTONOMOUS_TOOLS].some((n) => SAFE_AUTONOMOUS_TOOLS.has(n) || AUTONOMY_TOOLS.has(n)));
+  // The tiers are checked in order inside autonomyTools(), so a name in TWO tiers silently
+  // takes whichever is checked first — SAFE wins over everything, CYCLE wins over WRITE. That
+  // is a shadowing bug in either direction (a CYCLE tool re-added to SAFE becomes
+  // unconditional; a CYCLE tool also in WRITE loses its isCycle requirement's visibility).
+  // Disjointness is the invariant that makes the ordering irrelevant, so assert it over ALL
+  // FOUR tiers rather than three — the fourth was added by D-076 and was not covered.
+  {
+    const tiers = [['SAFE', SAFE_AUTONOMOUS_TOOLS], ['AUTONOMY', AUTONOMY_TOOLS], ['WRITE', WRITE_AUTONOMOUS_TOOLS], ['CYCLE', CYCLE_AUTONOMOUS_TOOLS]];
+    const overlaps = [];
+    for (let i = 0; i < tiers.length; i++) {
+      for (let j = i + 1; j < tiers.length; j++) {
+        for (const n of tiers[i][1]) if (tiers[j][1].has(n)) overlaps.push(`${n} in ${tiers[i][0]}+${tiers[j][0]}`);
+      }
+    }
+    rec('P2 all FOUR autonomy tiers are pairwise disjoint (no shadowing)', overlaps.length === 0, overlaps.join(', ') || 'disjoint');
+  }
 }
 
 // ── P3 invalid DSL → error, no write ──

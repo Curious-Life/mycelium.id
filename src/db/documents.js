@@ -157,7 +157,7 @@ export function createDocumentsNamespace(deps) {
       // `created_at`: created_at is the row's birth time — IMMUTABLE after first
       // insert. Including it let a re-import (e.g. a re-export with a fresh file
       // mtime) clobber the original creation date — the documents-timestamp bug
-      // (docs/DESIGN-import-system-robustness-2026-06-19.md, Fix A). It is still
+      // (the import-robustness design, Fix A). It is still
       // written on the initial INSERT (stays in `cols`/`placeholders`); only the
       // UPDATE branch leaves it untouched. `updated_at` stays mutable so an edit /
       // re-import still bumps it. Deliberate lowering of created_at is a separate
@@ -619,7 +619,7 @@ export function createDocumentsNamespace(deps) {
      * Atomically rename a document's `path` (its slug / ?doc= URL id) and cascade
      * every FK-less reference so nothing orphans. The row `id` is preserved, so
      * document_versions / embeddings / FTS linkage stay intact (FTS self-heals by
-     * rowid on the UPDATE). See docs/DOCUMENT-SLUG-RENAME-DESIGN-2026-06-29.md.
+     * rowid on the UPDATE). See the document slug-rename design.
      *
      * Atomic + plaintext-only: every cascade column is a plaintext path, so the raw
      * sync withTransaction (no async auto-encrypt) is correct — the {tables} dev

@@ -10,7 +10,7 @@
 //         verifiedHost fallback is NOT honored for spaces, and a missing did fails closed.
 //
 // Adversarial coverage: #2 revoked-grant, #3 deleted-space (the HIGH regression),
-// #6 did/handle spoof — from docs/SHARED-SPACES-DESIGN-2026-06-30.md §6.
+// #6 did/handle spoof — from the shared-spaces design §6.
 
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';

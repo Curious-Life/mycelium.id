@@ -6,7 +6,7 @@
 // "database disk image is malformed". When such a torn copy is later promoted to the
 // live vault (recovery / migration / restore-a-snapshot) the vault is corrupt. This
 // was the reproduced root cause of the 2026-06/07 vault corruptions (6/6 malformed
-// via the copy-race repro). @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+// via the copy-race repro). @see the vault-concurrency-fix design.
 //
 // HOW: `VACUUM INTO` runs inside a read transaction on the source connection, so it
 // snapshots a transactionally-consistent view even while other connections write

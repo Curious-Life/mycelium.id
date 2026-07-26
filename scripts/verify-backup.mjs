@@ -1,6 +1,6 @@
 // scripts/verify-backup.mjs — vault backup (.myvault) + restore-from-backup, and
 // the data-loss footgun fix (a bare /restore with no vault must NOT create an
-// empty one). Design: docs/VAULT-BACKUP-AND-REMOTE-ACCESS-DESIGN-2026-06-08.md.
+// empty one). Design: the vault-backup and remote-access design.
 //
 // Fully ISOLATED: ephemeral data dirs (explicit dbPath/kcvPath so ensureDataDir
 // never runs), ephemeral Keychain service names, OS-assigned ports. The keychain

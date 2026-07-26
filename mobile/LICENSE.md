@@ -3,7 +3,7 @@
 ⚠️ **Decision required before distribution.** The repository root is **AGPL-3.0**.
 Distributing AGPL software on Apple's App Store conflicts with Apple's Terms
 (the VLC/GNU precedent). The intended posture (see the repo `MEMORY.md` licensing
-entry and `docs/MOBILE-DEVELOPMENT-PLAN-2026-06-05.md` → "Repo & licensing") is:
+entry and the mobile development plan → "Repo & licensing") is:
 
 - The **server + portal stay AGPL-3.0** (open source).
 - This **mobile shell ships under a separate, App-Store-compatible license**

@@ -20,7 +20,7 @@ import { createClaudeCliLoop } from '../loop-claude-cli.js';
 // two confinement layers: --strict-mcp-config + --tools) and a human reviewed the raw
 // transcript. When true, a user who (a) has a Claude subscription connected and (b) has
 // `claude` installed can select the Claude Code engine in Settings → Intelligence; it
-// still fails safe to native whenever ineligible. See docs/HARNESS-CLI-DESIGN-2026-07-02.md.
+// still fails safe to native whenever ineligible. See the harness-CLI design.
 export const CLI_ENGINE_ENABLED = true;
 
 export const HARNESSES = {

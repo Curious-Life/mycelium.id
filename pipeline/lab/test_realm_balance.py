@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """verify:realm-balance — the clustering-quality gate for the realm level.
 
-Guards the realm-k fix (docs/REALM-K-CLUSTERING-FIX-DESIGN-2026-06-17.md): on
+Guards the realm-k fix (the realm-k clustering-fix design): on
 anisotropic embeddings, the old cosine-silhouette realm selector collapsed to
 k=2 with one realm holding ~78% of points. The fix targets a √n number of realms
 via mass-weighted Ward (cluster.centroids_to_groups), like themes/territories.

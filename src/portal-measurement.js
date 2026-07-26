@@ -1028,7 +1028,7 @@ export function portalMeasurementRouter({ db, userId, authenticatePortalRequest 
   // territories per week. Built ONLY from robust counts/shares of the activation
   // trajectory (a single clustering run) — it does NOT lean on Fisher velocity
   // (temporal-amnesia risk). Realm-level naming is currently inconsistent (see
-  // docs/FINDING-clustering-run-inconsistency-...md) so this rides the TERRITORY
+  // a clustering-run-inconsistency finding) so this rides the TERRITORY
   // altitude, which reconciles (311/372 ids name-resolvable). Two novelty
   // overlays: text (gzip compression) + path (rolling LZ76 of the topic route).
   // ──────────────────────────────────────────────────────────────────────────

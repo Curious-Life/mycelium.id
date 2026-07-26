@@ -1,5 +1,5 @@
 -- 0018 — Native agent harness state (Phase 5).
--- Backs docs/NATIVE-AGENT-HARNESS-SPEC-2026-06-17.md §6. Three tables:
+-- Backs the native-agent harness spec §6. Three tables:
 --   scheduled_tasks       — autonomous wake-cycles / scheduled work (the executor D5 dropped)
 --   harness_runs          — per-turn run lifecycle + recovery sentinel + dedup + token counts
 --   conversation_summaries — auto-compaction summaries keyed on messages.conversation_id

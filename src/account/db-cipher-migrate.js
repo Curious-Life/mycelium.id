@@ -4,7 +4,7 @@
 // Runs at boot AFTER unlock (needs USER_MASTER → deriveDbKey) and BEFORE the keyed
 // schema apply / getDb open. Mirrors the safety posture of ensureDataDir
 // (src/server-rest.js): a boot file op that preserves the original bytes and never
-// runs twice. @see docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md §7.
+// runs twice. @see the at-rest blindness design §7.
 //
 // Recipe (spike-verified — sqlcipher_export() is NOT available in
 // better-sqlite3-multiple-ciphers; in-place rekey works but mutates the original,
@@ -68,7 +68,7 @@ export function ensureVaultEncrypted({ dbPath, dbKeyHex, log = () => {} }) {
   //    a byte copy of a vault another process is writing tears ("database disk image
   //    is malformed") — and this copy becomes the encrypted vault, so a torn tmp would
   //    pass the row-count parity check yet be born malformed.
-  //    @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+  //    @see the vault-concurrency-fix design.
   let srcCounts;
   {
     const src = new Database(dbPath);

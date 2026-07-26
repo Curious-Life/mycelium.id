@@ -49,7 +49,7 @@ const ED25519_MULTICODEC = Buffer.from([0xed, 0x01]);
 // Kept SEPARATE from the Ed25519 SIGNING key: the box derives an independent X25519
 // keypair (HKDF info "mycelium-keyagreement-v1") rather than the Ed25519↔X25519
 // birational conversion the W3C did:key spec warns against (key separation). Used
-// by the E2E shared-spaces "Space Key Lockbox" (docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md).
+// by the E2E shared-spaces "Space Key Lockbox" (the shared-spaces E2E design).
 const X25519_MULTICODEC = Buffer.from([0xec, 0x01]);
 
 export function b58encode(bytes) {

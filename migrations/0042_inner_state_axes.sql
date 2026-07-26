@@ -3,7 +3,7 @@
 -- BIPOLAR axes scored as a signed lean:
 --     lean_<axis> = mean over window of ( cos(msg, +pole) − cos(msg, −pole) )
 -- the generalization of §4.13 affective_volatility's cos_pos − cos_neg. Design +
--- evidence: docs/DESIGN-inner-states-engine-2026-06-24.md (3 sweep cycles + spikes).
+-- evidence: the inner-states engine design (3 sweep cycles + spikes).
 --
 -- (1) Per-window axis leans on cognitive_metrics_anchor (one REAL column per axis;
 --     ENCRYPTED at write via stage_crypto.enc, like the existing anchor metrics).

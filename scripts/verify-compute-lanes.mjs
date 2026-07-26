@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * verify:compute-lanes — the D-001 crash gate (QA7 U1). Design: docs/COMPUTE-GOVERNOR-DESIGN-2026-07-23.md §4.
+ * verify:compute-lanes — the D-001 crash gate (QA7 U1). Design: the compute-governor design §4.
  *
  * WHAT THIS PROVES: a second heavy lane is REFUSED while one holds admission — and it proves it
  * against the PRODUCT's real admission call sites (the real jobs.js spawners, the real drainer
@@ -54,6 +54,60 @@
 //   RED (a user-initiated Generate refused behind a background chronicle pass would silently never
 //   run — the D-004 map-rebuild control breaks, verify:portal-mindscape S4)
 // All restored; the suite returns GREEN on the restored tree.
+// ── QA9 additions (D-047 ↻1 + the chat-priority defect) ───────────────────────────────────────
+// Every record below was RE-RUN on the FINAL tree, after two independent adversarial reviews
+// changed both the code and several assertions. An earlier set of records was accurate for an
+// earlier draft and is deliberately not carried forward — /gate-teeth: "never trust an existing
+// comment that claims a mutation."
+//
+// ORDERING INVARIANT (D-047 ↻1)
+// MUTATION-TESTED: `AND embedding_768 IS NOT NULL` removed from selectPendingCategories
+//   (src/db/messages.js) → C16, C16b, C17 RED. C17's failure line is the operator's own defect,
+//   reproduced verbatim: `embedded=10 tagged=40`.
+// MUTATION-TESTED: `_computeCategoriesBacklog`'s `pending` left WITHOUT that clause so the count
+//   and the drain predicate disagree → C16b RED (`pending=4 selected=2`) — a pending that counts
+//   rows the drain will never select can never reach 0, the stuck-forever bug messages.js warns of.
+// MUTATION-TESTED: `blockedOnEmbed` forced to 0 in _computeCategoriesBacklog → C16b RED
+//   (`blockedOnEmbed=0 sum=4` vs total 5) — a mid-import vault would report `pending: 0` with
+//   thousands untagged, i.e. the categorize stage renders `done` over work that has not started.
+// MUTATION-TESTED: the blank-skip exclusion `AND NOT (nlp_processed = 1 AND embedding_768 IS NULL)`
+//   removed from _computeCategoriesBacklog → C16b RED (`total=6 sum=5`) — the blank row re-enters
+//   `total` while staying unselectable, a progress bar that can never reach its own total.
+// MUTATION-TESTED: the categorize reset (`categories_processed = 0`, …) removed from updateContent
+//   (src/db/messages.js) → C17b RED (`after(tagged=1,embedded=0)`) — a content re-sync manufactures
+//   `tagged > embedded` in the DAL with no scheduler involved, and the drain-query invariant cannot
+//   see it because the row is already tagged.
+// MUTATION-TESTED: the enrichment strip removed from restoreTable's `messages` branch
+//   (src/ingest/vault-import.js) → C17c RED (`nlp_processed=2 categories_processed=1
+//   embedding_768=null` ⇒ `tagged=1 embedded=0`) — the third restore path, which passes NO
+//   overrides, lands tagged-but-unembedded rows that also never re-embed.
+//
+// CHAT PRIORITY
+// MUTATION-TESTED: admitTranscribe forced to always-BULK (`return bulk()` first line,
+//   src/enrich/transcribe-attachment.js) → C18 RED (`preempted=false takesTheOneSlot=false`),
+//   C18b RED (`askedToYield=false ranGoverned=false`), C19 RED and C20b RED — the reported defect
+//   restored end to end.
+// MUTATION-TESTED: admitTranscribe forced to always-INTERACTIVE (`if (false) return bulk()`) →
+//   C18 RED on its SECOND arm specifically (`importIsBulk=false`): an IMPORT transcription preempts
+//   a background describe pass, the D-001 thrash the live-vs-import distinction exists to prevent.
+//   The two mutations are MIRROR IMAGES, which is what proves C18 tests the DISTINCTION rather than
+//   merely "interactive exists".
+// MUTATION-TESTED: the `abandonPreempt(...)` call removed from admitTranscribe's give-up path →
+//   C18 RED (`preemptWithdrawn=false`) — the holder still aborts its cycle for a requester that has
+//   already fallen back to BULK.
+// MUTATION-TESTED: the `interactive: true` admit replaced by a fake always-ok handle in the
+//   /internal/attachment-context audio branch (src/internal-router.js) → C18b RED
+//   (`askedToYield=false ranGoverned=false lane=null residentHeld=0`) — the live voice-note decode
+//   runs ungoverned beside a held resident model.
+// MUTATION-TESTED: `signal` + `onProgress` removed from that same call → C20a RED
+//   (`sawSignal=false sawHeartbeat=false`) — the decode becomes unbounded, and then NO lease is
+//   safe (this is the load-bearing half: C20b's arithmetic is only meaningful with the bound).
+// MUTATION-TESTED: INTERACTIVE_LEASE_MS set below the worst-case hold (60_000) → C20b RED
+//   (`leaseCoversHold=false`) — the lease would reclaim under a live decode and the drainer would
+//   load a SECOND resident model beside it.
+// MUTATION-TESTED: RESIDENT_MAX raised 1 → 2 → C19 RED (`held=0 bgRefused=false`) plus C1, C2, C3,
+//   C4, C5, C7, C9, C6b, C15, C18, C18b, C20b — the headline mutation, now red across the suite.
+// All restored; the suite returns GREEN (27/27) on the restored tree.
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, relative } from 'node:path';
@@ -61,6 +115,18 @@ import { EventEmitter } from 'node:events';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRATCH = process.env.MYCELIUM_TMP || '/tmp';
+// Shrink ONLY the preempt WAIT BUDGET so C18/C18b do not each sleep the production 45 s. What the
+// checks assert — the classes, the preempt, the BULK fallback, the withdrawal — is untouched. Set
+// before the module is imported, because it reads the env once at load.
+// ⚠️ KEEP THIS NAME IN SYNC with transcribe-attachment.js. It was `MYCELIUM_TRANSCRIBE_PREEMPT_MS`
+// against an earlier draft; when the constant was renamed the override silently stopped applying and
+// the suite ran 90 s of real sleeps — a stale test override is the quiet kind of rot.
+process.env.MYCELIUM_TRANSCRIBE_PREEMPT_BUDGET_MS = process.env.MYCELIUM_TRANSCRIBE_PREEMPT_BUDGET_MS || '30';
+process.env.MYCELIUM_GOV_YIELD_MS = process.env.MYCELIUM_GOV_YIELD_MS || '5';
+// C17 drives the REAL enrichment service, which fails CLOSED without a master key ("refusing to
+// write"). A throwaway gate key so the drain actually writes; the fixture vault is :memory: and
+// its namespace has no crypto adapter, so nothing here is a real secret.
+process.env.ENCRYPTION_MASTER_KEY = process.env.ENCRYPTION_MASTER_KEY || 'c'.repeat(64);
 
 const results = [];
 const rec = (id, pass, detail = '') => { results.push({ id, pass }); console.log(`${pass ? 'PASS' : 'FAIL'}  ${id}${detail ? `\n      ${detail}` : ''}`); };
@@ -80,6 +146,10 @@ function fakeChild() { const c = new EventEmitter(); c.stderr = new EventEmitter
 
 const gov = await import('../src/core/compute-governor.js');
 const { admit, CLASS, governorStatus, isResidentBusy, queueForResident, _resetGovernor, _setMemProbe } = gov;
+const { default: Database } = await import('better-sqlite3');
+const { applyMigrations } = await import('../src/db/migrate.js');
+const { createMessagesNamespace } = await import('../src/db/messages.js');
+const { admitTranscribe } = await import('../src/enrich/transcribe-attachment.js');
 const { memoryPressure, PRESSURE, _resetSwapinBaseline } = await import('../src/core/memory-pressure.js');
 const jobs = await import('../src/jobs.js');
 const { startEnrichDrainer } = await import('../src/enrich/drainer.js');
@@ -450,6 +520,347 @@ const TMP_DB = join(SCRATCH, 'compute-lanes-gate.db');
   rec('C15 a QUEUE lane refused behind a holder is enqueued (coalesced, not dropped) and LAUNCHES when the slot frees — the D-004 rebuild control completes (portal-mindscape S4)',
     queuedNotRun && coalesced && ranWhenFree,
     `queuedNotRun=${queuedNotRun} coalesced=${coalesced} ranWhenFree=${ranWhenFree}`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+//  QA9 — D-047 ↻1: EMBED BEFORE CATEGORIZE IS A STRUCTURAL INVARIANT, NOT A SCHEDULE
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// #329 shipped the ordering as a per-cycle heuristic in the drainer (deferCategorizeForEmbed) and
+// it did not hold: EVERY way embedding can fail to move — unhealthy service, a throw, a governor
+// refusal, a no-progress break — RELEASES categorize over the whole corpus (the anti-deadlock
+// valve). On the operator's shipped-v0.1.13 5.5K import, drainOnce's outage signature tripped the
+// no-progress break at 445 embedded and Qwen then tagged 772. C16/C17 pin the invariant where it
+// is now enforced: in the DRAIN QUERY, as set inclusion.
+function freshVault() {
+  const raw = new Database(':memory:');
+  applyMigrations(raw);
+  const d1Query = async (sql, params = []) => {
+    const stmt = raw.prepare(sql);
+    if (/^\s*(insert|update|delete)/i.test(sql) && !/returning/i.test(sql)) {
+      const info = stmt.run(...params);
+      return { results: [], meta: { changes: info.changes } };
+    }
+    return { results: stmt.all(...params) };
+  };
+  const d1Batch = async (stmts) => { for (const s of stmts) await d1Query(s.sql, s.params); return []; };
+  const messages = createMessagesNamespace({ d1Query, d1Batch, firstRow: (r) => (r?.results || [])[0] || null });
+  return { raw, db: { rawQuery: d1Query, messages }, messages };
+}
+const GU = 'gate-user';
+let gseq = 0;
+function addMsg(raw, { content, nlp = 0, vec = null, cats = 0 }) {
+  const id = `g${++gseq}`;
+  raw.prepare(
+    `INSERT INTO messages (id, user_id, role, content, nlp_processed, embedding_768, categories_processed, created_at)
+     VALUES (?, ?, 'user', ?, ?, ?, ?, ?)`,
+  ).run(id, GU, content, nlp, vec, cats, `2026-07-26T00:${String(Math.floor(gseq / 60)).padStart(2, '0')}:${String(gseq % 60).padStart(2, '0')}.000Z`);
+  return id;
+}
+const counts = (raw) => raw.prepare(
+  `SELECT COALESCE(SUM(CASE WHEN embedding_768 IS NOT NULL THEN 1 ELSE 0 END), 0) AS embedded,
+          COALESCE(SUM(CASE WHEN categories_processed = 1 THEN 1 ELSE 0 END), 0) AS tagged
+     FROM messages WHERE user_id = ?`,
+).get(GU);
+
+// ── C16 — the drain query CANNOT hand back an un-embedded row ─────────────────────────────────
+{
+  const { raw, messages } = freshVault();
+  const embedded = addMsg(raw, { content: 'this one has a vector', nlp: 2, vec: Buffer.alloc(4) });
+  addMsg(raw, { content: 'this one is still waiting to embed', nlp: 0, vec: null });
+  addMsg(raw, { content: 'this one was blank-skipped and will never embed', nlp: 1, vec: null });
+  const rows = await messages.selectPendingCategories(GU, { limit: 100 });
+  const onlyEmbedded = rows.length === 1 && rows[0].id === embedded;
+  rec('C16 stage ordering is STRUCTURAL — selectPendingCategories returns ONLY rows that already have an embedding (tagged ⊆ embedded by construction, D-047 ↻1)',
+    onlyEmbedded, onlyEmbedded ? '' : `returned ${rows.length} row(s): ${JSON.stringify(rows.map((r) => r.id))} (expected exactly [${embedded}])`);
+}
+
+// ── C16b — the COUNT mirrors the DRAIN PREDICATE, and the held-back rows are still reported ────
+// messages.js's own warning: a `pending` that counts rows the drain will never select can never
+// reach 0. And a `pending` that silently drops them makes a mid-import vault read as "done".
+{
+  const { raw, messages } = freshVault();
+  addMsg(raw, { content: 'embedded, untagged — drainable now', nlp: 2, vec: Buffer.alloc(4) });
+  addMsg(raw, { content: 'embedded, untagged — drainable now too', nlp: 2, vec: Buffer.alloc(4) });
+  addMsg(raw, { content: 'no vector, still queued for embedding', nlp: 0, vec: null });
+  addMsg(raw, { content: 'no vector, embed stage TERMINAL (attempt-capped)', nlp: -1, vec: null });
+  addMsg(raw, { content: 'already tagged', nlp: 2, vec: Buffer.alloc(4), cats: 1 });
+  // A whitespace-only row: passes `content != ''`, blank-skipped by the embed stage to
+  // nlp_processed = 1 with no vector, and therefore never selectable for labeling. It must be
+  // excluded from total/tagged/pending CONSISTENTLY (the TRIM clause) or the progress bar can
+  // never reach its own total — so it must move NONE of the buckets below.
+  addMsg(raw, { content: '   ', nlp: 1, vec: null });
+  const b = await messages.categoriesBacklogCached(GU);   // fresh namespace ⇒ no cache ⇒ a real compute
+  const drainable = await messages.selectPendingCategories(GU, { limit: 1000 });
+  // The anti-drift assertion: the COUNT and the SELECT must agree exactly, row for row.
+  const mirrors = b.pending === drainable.length && b.pending === 2;
+  // …and the rows the clause holds back are REPORTED, split by whether they can ever clear.
+  const reported = b.blockedOnEmbed === 1 && b.unembeddable === 1 && b.tagged === 1;
+  // …and the whitespace-only row moves NOTHING: excluded from total AND from every bucket, so
+  // `tagged + pending + blockedOnEmbed + unembeddable === total` still closes and the bar can fill.
+  const blankExcluded = b.total === 5 && (b.tagged + b.pending + b.blockedOnEmbed + b.unembeddable) === b.total;
+  rec('C16b the categorize backlog COUNT mirrors the drain predicate exactly (pending === selectPendingCategories().length), reports the held-back rows (blockedOnEmbed / unembeddable) so a mid-import vault never reads as done, and excludes blanks CONSISTENTLY so the buckets sum to total',
+    mirrors && reported && blankExcluded,
+    `pending=${b.pending} selected=${drainable.length} blockedOnEmbed=${b.blockedOnEmbed} unembeddable=${b.unembeddable} tagged=${b.tagged} total=${b.total} sum=${b.tagged + b.pending + b.blockedOnEmbed + b.unembeddable}`);
+}
+
+// ── C17 — DRIVE THE REAL DRAINER: `tagged > embedded` is unreachable even when embed STALLS ────
+// This is the operator's run, in miniature. The embedder embeds the 10 oldest rows and then
+// returns null for everything else, which is drainOnce's OUTAGE SIGNATURE: a pass with several
+// candidates and zero embeds writes NOTHING and returns all-zero counters, so the drainer's
+// `moved === 0` no-progress break fires (`embedStalledOut`) and deferCategorizeForEmbed RELEASES
+// categorize — exactly as it did on v0.1.13. Categorize then runs at full rate. The check is that
+// it can only ever chew through the 10 rows that DID embed.
+{
+  _resetGovernor(); _setMemProbe(OK_PROBE);
+  setSessionKeys({ userHex: 'a'.repeat(64), systemHex: 'b'.repeat(64) });
+  const { raw, db } = freshVault();
+  const EMBEDDABLE = 10, STUCK = 30;
+  for (let i = 0; i < EMBEDDABLE; i++) addMsg(raw, { content: `ok row ${i} about minds and forests` });
+  for (let i = 0; i < STUCK; i++) addMsg(raw, { content: `stuck row ${i} the embedder cannot vectorise` });
+
+  const VEC = () => Array.from({ length: 768 }, () => 0.01);
+  const embed = {
+    health: async () => ({ status: 'ok', loaded: true, dim: 768 }),
+    embed: async (content) => (/^ok row/.test(String(content)) ? VEC() : null),
+    embedBatch: async (contents) => contents.map((c) => (/^ok row/.test(String(c)) ? VEC() : null)),
+  };
+  db.users = { getSettings: async () => ({ taskModels: { categorize: { model: 'test-label' } } }) };
+  const daemon = { ensureUp: async () => {}, getBaseUrl: () => 'http://127.0.0.1:11434' };
+  const ollama = { listInstalled: async () => ['test-label'], pullModel: async () => {} };
+  // A classifier that ALWAYS succeeds — categorize is deliberately given every advantage, so the
+  // only thing that can stop it outrunning embed is the drain-query invariant itself.
+  const classify = async () => ({ domain: 'personal', register: 'reflective', subregister: null });
+
+  const drainer = startEnrichDrainer({ db, userId: GU, intervalMs: 3600000, embed, daemon, ollama, classify, log: () => {} });
+  for (let i = 0; i < 4; i++) await settle(drainer);   // several full cycles, embed stalled throughout
+  const c = counts(raw);
+  drainer.stop(); clearSessionKeys(); _resetGovernor();
+  // `tagged <= embedded` is the operator's metric verbatim ("more categorized items than
+  // embedded"). The second clause proves the run was REAL — categorize genuinely ran and tagged
+  // the embedded rows, so a green here is not "nothing happened".
+  const orderingHeld = c.tagged <= c.embedded;
+  const actuallyRan = c.tagged > 0 && c.embedded === EMBEDDABLE;
+  rec('C17 REAL drainer, embed STALLED mid-corpus: categorize never outruns embedding — tagged <= embedded (the operator\'s 445-embedded/772-categorized report is unreachable)',
+    orderingHeld && actuallyRan,
+    `embedded=${c.embedded} tagged=${c.tagged} (expected tagged<=embedded, embedded=${EMBEDDABLE}, tagged>0)`);
+}
+
+// ── C17b — a content RE-SYNC cannot manufacture `tagged > embedded` either ────────────────────
+// The drain-query invariant is blind to this path: the row is ALREADY tagged, so it is never
+// re-selected. updateContent nulls the vector and resets the embed stage; before this it left
+// categories_processed at 1, minting a tagged-but-unembedded row on every content change.
+{
+  const { raw, messages } = freshVault();
+  const id = addMsg(raw, { content: 'original body', nlp: 2, vec: Buffer.alloc(4), cats: 1 });
+  const before = counts(raw);
+  await messages.updateContent(GU, id, { content: 'the upstream body changed', contentHash: 'h2' });
+  const after = counts(raw);
+  const row = raw.prepare('SELECT nlp_processed, embedding_768, categories_processed FROM messages WHERE id = ?').get(id);
+  const reEnriched = row.embedding_768 === null && row.nlp_processed === 0 && row.categories_processed === 0;
+  const invariantHeld = after.tagged <= after.embedded;
+  rec('C17b updateContent resets the CATEGORIZE stage with the embed stage — a content re-sync cannot leave a row counted as tagged with no vector (tagged <= embedded survives a re-sync)',
+    reEnriched && invariantHeld,
+    `before(tagged=${before.tagged},embedded=${before.embedded}) after(tagged=${after.tagged},embedded=${after.embedded}) row=${JSON.stringify(row)}`);
+}
+
+// ── C17c — a RESTORE cannot land tagged-but-unembedded rows (QA9 review, F1) ───────────────────
+// The third message-restore path. `restoreTable` NULLs `embedding_768` for every table that has the
+// column, unconditionally — so any caller restoring messages WITHOUT the enrichment overrides lands
+// rows with no vector but the exporting vault's `categories_processed` intact: `tagged > embedded`
+// straight out of an import, and permanently (a row left at nlp_processed 1|2 also never re-embeds).
+// `src/ingest/restore-core.js` was exactly that caller — reachable in production via the
+// `recent-export` import route — and the drain-query invariant is blind to an already-tagged row.
+// Driving restoreTable with NO overrides is the point: the strip must live IN it, not in the caller.
+{
+  const { restoreTable } = await import('../src/ingest/vault-import.js');
+  const { raw, db } = freshVault();
+  const r = await restoreTable(db, 'messages', [{
+    id: 'restored-1', user_id: 'someone-else', role: 'user', content: 'a restored message about minds',
+    created_at: '2026-01-01T00:00:00.000Z',
+    // What a real bundle carries from a vault that had already enriched it:
+    nlp_processed: 2, categories_processed: 1, categorized_at: '2026-01-01T00:00:00.000Z',
+    categories_model: 'qwen3.5:4b', domain: 'personal', register: 'reflective',
+    embedding_768: Buffer.alloc(4),
+  }], { userId: GU });            // ⚠️ NO `overrides` — the restore-core.js call shape
+  const row = raw.prepare('SELECT nlp_processed, categories_processed, embedding_768, domain FROM messages WHERE id = ?').get('restored-1');
+  const c = counts(raw);
+  const landed = (r?.inserted ?? 0) === 1;
+  const stripped = row && row.embedding_768 === null && row.nlp_processed === 0 && row.categories_processed === 0 && row.domain === null;
+  const invariantHeld = c.tagged <= c.embedded;
+  rec('C17c a RESTORE strips the categorize stage inside restoreTable itself — a caller that passes NO overrides still cannot land a row counted as tagged with no vector, and the row is left re-embeddable (nlp_processed = 0)',
+    landed && stripped && invariantHeld,
+    `landed=${landed} row=${JSON.stringify(row)} tagged=${c.tagged} embedded=${c.embedded}`);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+//  QA9 — CHAT IS PRIMARY: a LIVE-turn transcription preempts; an IMPORT transcription does not
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// ── C18 — the class comes from the CALL SITE, and both arms matter ────────────────────────────
+{
+  _resetGovernor(); _setMemProbe(OK_PROBE);
+  // (a) LIVE turn, background holder present → INTERACTIVE ⇒ it PREEMPTS (sets the holder's yield
+  //     flag). The fixture holder never yields, so it does NOT get the model slot — but it must
+  //     still DECODE, on a BULK ticket. ⚠️ AN EARLIER DRAFT ASSERTED `!live.ok` HERE, i.e. it
+  //     encoded the operator's own complaint ("the voice message got stopped") as the pass
+  //     condition (QA9 review, F6). Three things must hold at once: the holder was ASKED to yield,
+  //     the decode is NOT refused, and it is NOT a second resident model.
+  const bg = admit({ lane: 'embed-drain-categorize', klass: CLASS.RESIDENT });
+  const live = await admitTranscribe({ interactive: true });
+  const preempted = governorStatus().counters.preempted >= 1;
+  const notASecondModel = live.ok && live.klass === CLASS.BULK && governorStatus().resident.held === 1;
+  // …and the abandoned preempt is WITHDRAWN, so the holder does not abort its cycle for a requester
+  // that has already gone to BULK (QA9 review, HIGH-3).
+  const preemptWithdrawn = bg.shouldYield() === false;
+  if (live.ok) live.release();
+
+  // (b) IMPORT, same conditions → BULK ⇒ it does NOT preempt and does NOT touch the model slot.
+  const preemptsBefore = governorStatus().counters.preempted;
+  const bulk = await admitTranscribe({ interactive: false });
+  const importIsBulk = bulk.ok && governorStatus().bulk.held === 1 && governorStatus().resident.held === 1
+    && governorStatus().counters.preempted === preemptsBefore;
+  if (bulk.ok) bulk.release();
+  bg.release();
+
+  // (c) …and once the slot is free, the live transcription takes it AS the single model holder.
+  const live2 = await admitTranscribe({ interactive: true });
+  const st2 = governorStatus();
+  const takesTheOneSlot = live2.ok && live2.klass === CLASS.INTERACTIVE && st2.resident.held === 1 && st2.resident.lane === 'transcribe-live';
+  if (live2.ok) live2.release();
+  _resetGovernor();
+  rec('C18 live-chat transcription is INTERACTIVE and PREEMPTS a background resident holder (falling back to BULK, never refused, never a 2nd resident, preempt withdrawn on give-up), while an IMPORT transcription stays BULK and preempts nothing',
+    preempted && notASecondModel && preemptWithdrawn && importIsBulk && takesTheOneSlot,
+    `preempted=${preempted} notASecondModel=${notASecondModel} preemptWithdrawn=${preemptWithdrawn} importIsBulk=${importIsBulk} takesTheOneSlot=${takesTheOneSlot}`);
+}
+
+// ── C18b — the REAL live-turn route, not the module: /internal/attachment-context audio ────────
+// The channel daemon's media stage awaits this route BEFORE the reply turn, so it IS the live-turn
+// boundary. Until now it called transcribeAudio() with NO ticket at all — a ~1-3 GB whisper decode
+// beside a resident model, on the one path where a human is waiting, and invisible to the C10
+// anti-rot scan (it reaches whisper over HTTP, not via spawn/localInfer).
+{
+  _resetGovernor(); _setMemProbe(OK_PROBE);
+  const { internalRouter } = await import('../src/internal-router.js');
+  const express = (await import('express')).default;
+
+  let decodes = 0; let laneDuringDecode = null; let residentDuringDecode = null;
+  // C20's SECOND ARM lives here, in the real route: the bound must be APPLIED, not merely sized.
+  // The lease arithmetic below is only safe because the decode carries an AbortSignal; without one
+  // the true hold is transcribe-long.js's 2 h default × withRetry's 2 attempts, and no lease is
+  // safe. Capture what the route actually passes.
+  let sawSignal = false; let sawHeartbeat = false;
+  const db = {
+    attachments: {
+      getById: async () => ({ id: 'a1', user_id: 'u', file_type: 'audio/ogg', file_name: 'note.ogg', local_path: '/x.ogg' }),
+      update: async () => {},
+    },
+    secrets: { get: async () => null, set: async () => {} },   // internalRouter's pairing store
+  };
+  const enrich = {
+    getBlob: async () => Buffer.from('audio'),
+    transcribeAudio: async (args) => {
+      decodes++;
+      if (args?.signal && typeof args.signal.aborted === 'boolean') sawSignal = true;
+      if (typeof args?.onProgress === 'function') sawHeartbeat = true;
+      const s = governorStatus();
+      laneDuringDecode = s.resident.lane; residentDuringDecode = s.resident.held;
+      return 'the transcript';
+    },
+  };
+  const app = express();
+  app.use(internalRouter({ db, userId: 'u', enrich }));
+  const server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
+  const port = server.address().port;
+  const post = async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/v1/internal/attachment-context`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ attachmentId: 'a1', kind: 'audio' }),
+    });
+    return res.json();
+  };
+
+  // A background describe pass holds the model slot. The live decode must PREEMPT it — and then,
+  // because the fixture holder never yields, must still DECODE on a BULK ticket rather than be
+  // dropped. ⚠️ THE EARLIER DRAFT ASSERTED `decodes === 0` AND `reason === 'compute-busy'` HERE,
+  // which made the gate's green the operator's complaint (QA9 review, F6) — and worse, it would
+  // have been a REGRESSION on main, where this route took no ticket and always decoded.
+  const held = admit({ lane: 'describe-chronicles', klass: CLASS.RESIDENT });
+  const busy = await post();
+  const decodedNotDropped = decodes === 1 && busy?.contextText === 'the transcript';
+  const askedToYield = governorStatus().counters.preempted >= 1;
+  // …and it did NOT become a second resident model while the describe pass held the slot.
+  const neverTwoResident = residentDuringDecode === 1 && laneDuringDecode === 'describe-chronicles';
+  held.release();
+
+  // Slot free → the decode runs, and it runs AS the single resident-class holder on the
+  // `transcribe-live` lane. That is what proves the ticket is INTERACTIVE and not ungoverned.
+  const okRes = await post();
+  const ranGoverned = decodes === 2 && okRes?.contextText === 'the transcript'
+    && laneDuringDecode === 'transcribe-live' && residentDuringDecode === 1;
+  // The ticket is RELEASED after the decode — a leaked model slot would wedge every resident lane.
+  const released = governorStatus().resident.held === 0;
+  await new Promise((r) => server.close(r));
+  _resetGovernor();
+  rec('C18b the LIVE channel voice-note route (/internal/attachment-context, audio) decodes UNDER a governor ticket — it PREEMPTS a describe pass and falls back to BULK rather than being dropped (never a 2nd resident), takes the single slot on lane `transcribe-live` once free, and releases it',
+    decodedNotDropped && askedToYield && neverTwoResident && ranGoverned && released,
+    `decodedNotDropped=${decodedNotDropped} askedToYield=${askedToYield} neverTwoResident=${neverTwoResident} ranGoverned=${ranGoverned} released=${released} decodes=${decodes} lane=${laneDuringDecode} residentHeld=${residentDuringDecode}`);
+
+  // C20a — the BOUND IS APPLIED at the real call site. This is the load-bearing half of C20: the
+  // lease arithmetic (C20b) is only safe because the decode carries an AbortSignal. Drop the signal
+  // and the true hold becomes transcribe-long.js's 2 h × 2 attempts, which NO lease covers.
+  rec('C20a the live route BOUNDS the decode it holds the model slot for — it passes an AbortSignal (the hold-time cap the lease is derived from) and an onProgress heartbeat (so a genuinely-advancing decode re-arms its own lease)',
+    sawSignal && sawHeartbeat, `sawSignal=${sawSignal} sawHeartbeat=${sawHeartbeat}`);
+}
+
+// ── C19 — RESIDENT_MAX is STILL 1, and the new interactive lane does not stack a second model ──
+// C1/C9 pin the cap for the background lanes. This pins it for the lane QA9 ADDED — the one that
+// is allowed to preempt, i.e. the one most likely to be "optimised" into an exemption.
+{
+  _resetGovernor(); _setMemProbe(OK_PROBE);
+  const live = await admitTranscribe({ interactive: true });
+  const st = governorStatus();
+  const capIsOne = st.resident.max === 1 && st.resident.held === 1;
+  // Every resident-class lane must now be refused — including a SECOND interactive one.
+  const bgRefused = !admit({ lane: 'describe-chronicles', klass: CLASS.RESIDENT }).ok;
+  const secondLiveRefused = !admit({ lane: 'transcribe-live', klass: CLASS.INTERACTIVE }).ok;
+  const neverTwo = governorStatus().resident.held === 1;
+  if (live.ok) live.release();
+  _resetGovernor();
+  rec('C19 RESIDENT_MAX is still 1 — an INTERACTIVE transcription takes the ONE model slot by preempting and no path (background resident, or a second interactive) admits a second resident-class model alongside it',
+    live.ok && capIsOne && bgRefused && secondLiveRefused && neverTwo,
+    `admitted=${live.ok} max=${st.resident.max} held=${st.resident.held} bgRefused=${bgRefused} secondLiveRefused=${secondLiveRefused} neverTwo=${neverTwo}`);
+}
+
+// ── C20 — the INTERACTIVE lease can NEVER reclaim under a live decode (QA9 review, CRITICAL-1) ──
+// The lease is the ONLY release backstop for this lane (whisper is HTTP — there is no ChildProcess
+// to bind), and reclaiming while the decode is still running frees the model slot so the drainer
+// loads a SECOND resident model beside it. That is a self-inflicted double admit: D-001.
+// The first draft hard-coded 25 min and justified it against the channel daemon's 660 s CLIENT
+// abort — which does not stop an express handler. The real hold is transcribe-long.js's 2 h default
+// × internal-router's `withRetry` 2 attempts ≈ 4 h. So the fix is from both ends: the decode is
+// BOUNDED by an AbortSignal (LIVE_DECODE_BUDGET_MS) and the lease is DERIVED from that bound.
+{
+  const { LIVE_DECODE_BUDGET_MS, INTERACTIVE_LEASE_MS } = await import('../src/enrich/transcribe-attachment.js');
+  // (1) ARITHMETIC: the lease must exceed the worst-case hold (budget × the route's 2 attempts).
+  const WORST_HOLD_MS = LIVE_DECODE_BUDGET_MS * 2;
+  const leaseCoversHold = INTERACTIVE_LEASE_MS > WORST_HOLD_MS;
+
+  // (2) FUNCTIONAL: hold an interactive ticket, advance the governor's clock to just past the
+  //     worst-case hold, and assert it has NOT been reclaimed and the slot is still occupied.
+  _resetGovernor(); _setMemProbe(OK_PROBE);
+  let clock = 1_000_000;
+  gov._setNow(() => clock);
+  const live = await admitTranscribe({ interactive: true });
+  clock += WORST_HOLD_MS + 1000;                 // the longest a live decode can possibly run
+  await sleep(30);                               // let any armed lease timer fire
+  const stillHeld = governorStatus().counters.reclaimed === 0 && governorStatus().resident.held === 1;
+  // …and a background resident lane is STILL refused — i.e. no double-admit window opened.
+  const noDoubleAdmit = !admit({ lane: 'embed-drain-categorize', klass: CLASS.RESIDENT }).ok;
+  if (live.ok) live.release();
+  gov._setNow(() => Date.now());
+  _resetGovernor();
+  rec('C20b the INTERACTIVE transcribe lease is DERIVED from the bounded live-decode budget and cannot reclaim under a running decode — no self-inflicted double admit (D-001)',
+    leaseCoversHold && live.ok && stillHeld && noDoubleAdmit,
+    `lease=${INTERACTIVE_LEASE_MS}ms worstHold=${WORST_HOLD_MS}ms leaseCoversHold=${leaseCoversHold} stillHeld=${stillHeld} noDoubleAdmit=${noDoubleAdmit}`);
 }
 
 const passed = results.filter((r) => r.pass).length;

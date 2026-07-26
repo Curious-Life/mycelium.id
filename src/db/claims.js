@@ -17,7 +17,7 @@
  *   - embedding_768 is a vector envelope (NEVER_AUTO_DECRYPT) — caller manages it.
  *
  * Local SQLite vault — single user. @see migrations/0011_persona_claims.sql,
- * docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+ * the persona-claims design.
  *
  * @typedef {object} ClaimsNamespaceDeps
  * @property {(sql: string, params: any[]) => Promise<any>} d1Query

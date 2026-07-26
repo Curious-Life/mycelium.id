@@ -19,6 +19,13 @@ import { createCategoryClassifier, DEFAULT_LABEL_MODEL } from './categories.js';
 import { createMessageEnricher } from './enricher.js';
 import { admit, CLASS } from '../core/compute-governor.js';
 
+// Wall-clock budget for ONE cycle's L1+L2 (categorize + enrich) block. See the long note at its
+// use site: cycle() is single-flight and the embed drain runs above the block, so an unbounded
+// block (L2 alone can be ~50 min) freezes embedding for that whole time. 90 s is generous next to
+// the 15 s tick — several L1 passes, or one L2 pass — while capping how long the embed drain can
+// be locked out. Env-overridable for ops/tests only; the default is the contract.
+const CATEGORIZE_CYCLE_BUDGET_MS = Number(process.env.MYCELIUM_CATEGORIZE_BUDGET_MS) || 90_000;
+
 // ── Accurate, actionable copy per fault kind (OLLAMA_FAULT) ──────────────────
 // The health surface used to hardcode "The local model runtime is not reachable." for EVERY
 // pull/list fault — a lie on a fresh box where Ollama is up but the download failed for another
@@ -165,6 +172,35 @@ export function nudgeEnrichDrainer() { try { _current?.nudge(); } catch { /* bes
  *          embedDrained:boolean, embedStalledOut:boolean}} o
  * @returns {boolean} true ⇒ defer categorize + enrich this cycle
  */
+// ⚠️ 2026-07-26 (D-047 ↻1) — THIS FUNCTION IS NO LONGER THE ORDERING GUARANTEE. It shipped as
+// #329's answer to D-047 and it was the ONLY thing keeping embed ahead of categorize; on the
+// operator's shipped-v0.1.13 5.5K import it did not hold, and here is precisely why.
+//
+// Read the `progressing` half again: EVERY way embedding can fail to move — the service is
+// unhealthy (`embedOk` false), the drain THREW (a locked vault, SQLITE_BUSY), the governor refused
+// the BULK ticket (`embedMoved` stays 0), or the loop broke on no-progress (`embedStalledOut`) —
+// evaluates to "do NOT defer", i.e. RELEASES categorize over the whole corpus. That is deliberate
+// and it is still correct as an anti-deadlock rule (see the starvation-guard note above): a
+// categorize stage held hostage by an embed stage that will never finish is worse than disorder.
+// But it means the ordering held only while embedding was SUCCEEDING, which is the one case where
+// nobody needed it.
+//
+// The live trigger was `drainOnce`'s OUTAGE SIGNATURE (enrich/service.js): a pass with several
+// candidates and zero embeds writes NOTHING — no counter, no state — and returns
+// `{scanned:50, embedded:0, failed:0, skipped:0}`. The drainer reads `moved === 0`, sets
+// `embedStalledOut`, and this rule hands the box to categorize. Qwen then tagged 772 rows past a
+// stalled embed count of 445: `tagged > embedded`, the reported symptom. The compute governor
+// could not have caught it either — embed takes a BULK ticket and categorize a RESIDENT one, which
+// are ORTHOGONAL gates; the governor serializes MEMORY, never STAGES.
+//
+// So the guarantee moved to where it is a fact instead of a schedule: `selectPendingCategories`
+// (src/db/messages.js) now requires `embedding_768 IS NOT NULL`, making the tagged set a subset of
+// the embedded set by construction, at every entry point.
+//
+// THIS RULE STAYS, DEMOTED TO WHAT IT ACTUALLY IS: a MEMORY policy. Deferring the L1+L2 block while
+// embedding is actively draining keeps Ollama's weights off the box while the ONNX drain has it —
+// the D-001 concern — and that is worth keeping. It is no longer load-bearing for CORRECTNESS, so
+// its release valves are no longer holes. Do not delete it; do not promote it back.
 export function deferCategorizeForEmbed(o) {
   const progressing = Boolean(o?.embedOk) && !o?.embedPaused && !o?.embedThrew && Number(o?.embedMoved || 0) > 0;
   const backlogRemains = !o?.embedDrained && !o?.embedStalledOut;
@@ -1444,6 +1480,25 @@ export function startEnrichDrainer({
         }
       }
       if (catAdm && catAdm.ok) {
+       // ── THE L1+L2 BLOCK MUST HAND THE CYCLE BACK (D-047 ↻1, the "embeddings are stuck" half) ──
+       // cycle() is SINGLE-FLIGHT (`running`), and the embed drain runs ABOVE this block. So for as
+       // long as this block runs, THE EMBED DRAIN CANNOT EVEN ATTEMPT. Unbounded, that is a long
+       // time: L2 alone is 8 passes x batchSize 50 = 400 rows, which at the measured 8/min is
+       // ~50 MINUTES in ONE cycle, with L1 on top. During the operator's 5.5K import that is
+       // exactly what "embeddings appear stuck / not moving" looks like from the outside — not a
+       // hung embedder, a stage that never got the box back.
+       //
+       // The row-level ordering invariant (selectPendingCategories' `embedding_768 IS NOT NULL`)
+       // bounds the DAMAGE — categorize can only ever chew through rows that are already embedded,
+       // so it can never outrun embedding again — but it does not bound the TIME. This does: the
+       // block stops starting new passes past the budget and returns, the 15s tick fires, and the
+       // embed drain gets its turn. Nothing is lost: both loops re-select their pending set every
+       // cycle (the same resumable-by-construction property the pause relies on).
+       //
+       // Checked BETWEEN passes only, never mid-pass — the same insertion point as the pause and
+       // the §3.4 yield, and for the same reason: a half-written label is worse than a slow one.
+       const catDeadline = Date.now() + CATEGORIZE_CYCLE_BUDGET_MS;
+       const outOfBudget = () => Date.now() > catDeadline;
        try {
         // WAKE THE ON-BOX MODEL FIRST. The Ollama daemon is lazy and the enrich path is the one
         // consumer that nothing else starts it for — so without this, a vault whose owner never
@@ -1487,6 +1542,7 @@ export function startEnrichDrainer({
           for (let i = 0; i < 8; i++) {
             if (isCategorizePaused()) break;   // same rule as the embed loop: honor it mid-run
             if (catAdm.shouldYield()) break;   // an interactive chat turn is preempting — yield the slot between batches (§3.4)
+            if (i > 0 && outOfBudget()) break; // hand the cycle back so the embed drain can run (see the budget note above)
             // BANK PER PASS, exactly like the embed loop (§3.9/R1). enrichCategoriesOnce returns
             // { scanned, enriched, failed } (service.js:194 — NO `skipped` field), so the three
             // cases are read from THOSE fields, not embed's:
@@ -1542,6 +1598,20 @@ export function startEnrichDrainer({
             // makes that sentence true (independent review HIGH-6, 2026-07-17).
             if (isCategorizePaused()) break;
             if (catAdm.shouldYield()) break;   // interactive preemption — yield the model slot between batches (§3.4)
+            // ⚠️ `i > 0` — L2 IS GUARANTEED ITS FIRST PASS, and reversing this was a real
+            // regression the review caught (QA9, MEDIUM-4). The first draft omitted the exemption
+            // here on the reasoning that L1 runs first and may legitimately consume the budget, so
+            // L2 should be allowed zero passes. The arithmetic says zero is not *allowed*, it is
+            // the ONLY outcome: L1's three passes already overshoot the 90 s budget (~110 s), so
+            // `outOfBudget()` is ALWAYS true by the time L2 reaches i=0. That would stop L2 running
+            // at all for the entire duration of any L1 backlog — turning a slow stage into a dead
+            // one, and leaving its ETA with no samples to withdraw. Every loop in this cycle gets
+            // its first pass; the budget only caps how many FURTHER passes it takes.
+            // HONEST RESIDUAL: one L2 pass is batchSize 50 @ ~8/min ≈ 6 min, so a cycle can still
+            // hold the embed drain out for that long. Bounding it properly needs a SMALLER L2 batch
+            // (enrichNlpOnce takes batchSize), which is a throughput change with its own gate —
+            // recorded, not smuggled in here.
+            if (i > 0 && outOfBudget()) break;
             // BANK PER PASS, same discipline as L1 and embed. enrichNlpOnce returns
             // { scanned, enriched, failed } (service.js:227). L2 has NO blank/skip path — every
             // scanned row either enriches (nlp_processed = 1) or is isolated to nlp_processed = -1

@@ -274,18 +274,76 @@
 		finally { voiceBusy = false; }
 	}
 
+	// ── Honest audition errors (D-003 ↻2) ────────────────────────────────────
+	// This used to map EVERY 503 to "Voice engine is starting (or needs Apple
+	// Silicon). Try again shortly." — a transient-sounding sentence over a condition
+	// that, on the operator's box, never changed. Three QA cycles in a row the
+	// answer to "how long is shortly?" was "forever".
+	//
+	// So: the reason token decides the sentence, and `terminal` decides whether
+	// "try again" is even offered. A named remedy always comes with it (the QA6 bar:
+	// every break has a remedy the user can execute). The server's `detail` is
+	// already sanitized (src/tts/voice-render.js) and is appended so the operator's
+	// smoke captures the true cause instead of a generic 500.
+	const VOICE_REASON_TEXT: Record<string, string> = {
+		'voice-sample-pending': 'No voice sample yet — record and freeze one above.',
+		'voice-runtime-missing':
+			'This Mac cannot run the on-device voice engine — it needs Apple Silicon with mlx-audio. Reinstall the voice runtime in Settings → Voice.',
+		'model-unavailable':
+			'The voice model could not be loaded. Re-download it in Settings → Voice.',
+		'synth-failed':
+			'The voice engine failed while speaking. Try again; if it repeats, re-record the voice sample above.',
+		'bad-ref-audio': 'That voice sample couldn’t be read — re-record and freeze it again.',
+		'bad-length': 'That voice sample is too large — record a shorter clip (under ~30s) and freeze it again.',
+		'render-service-unreachable':
+			'The on-device voice engine isn’t answering yet. If this doesn’t clear, check Settings → Voice.',
+		'non-loopback-render-url': 'The voice engine address is misconfigured — it must stay on this machine.',
+		'rate-limited': 'Too many auditions in a row — wait a moment.',
+	};
+
+	// Reasons decided BEFORE any network call. These are about THIS request, not about
+	// the engine, so they must beat the supervisor's verdict — otherwise "record a voice
+	// sample first" (a ten-second fix, decided in voice-render.js before a socket is
+	// opened) gets overwritten by "reinstall the voice runtime" whenever the engine
+	// happens to be unhealthy. Sending the owner to the wrong remedy is how a defect
+	// survives a QA cycle.
+	const REQUEST_LOCAL_REASONS = new Set([
+		'voice-sample-pending',
+		'bad-ref-audio',
+		'bad-length',
+		'non-loopback-render-url',
+		'rate-limited',
+	]);
+
+	function previewErrorText(j: any, status: number): string {
+		const code = typeof j?.error === 'string' ? j.error : '';
+		if (REQUEST_LOCAL_REASONS.has(code) && VOICE_REASON_TEXT[code]) return VOICE_REASON_TEXT[code];
+		// Otherwise the SUPERVISOR's verdict wins when it is terminal: it knows things a
+		// single render attempt cannot (halted after a crash-loop, port held, runtime
+		// absent), and it carries the remedy.
+		const svc = j?.service;
+		if (svc?.state === 'failed' || svc?.state === 'degraded') {
+			if (svc.remedy) return String(svc.remedy);
+		}
+		let msg = VOICE_REASON_TEXT[code];
+		if (!msg) {
+			msg = j?.terminal
+				? 'The voice engine cannot render right now.'
+				: status === 503
+					? 'The on-device voice engine isn’t ready yet.'
+					: 'Voice render failed.';
+		}
+		const detail = typeof j?.detail === 'string' && j.detail ? ` (${j.detail})` : '';
+		return `${msg}${detail}`;
+	}
+
 	async function hear() {
 		previewBusy = true; previewError = null;
 		try {
 			const res = await api('/portal/character/voice/preview', { method: 'POST', body: JSON.stringify({ text: 'This is my voice.' }) });
 			if (!res.ok) {
 				const j = await res.json().catch(() => ({}));
-				if (res.status === 503) throw new Error('Voice engine is starting (or needs Apple Silicon). Try again shortly.');
-				if (res.status === 501) throw new Error('Freeze a voice sample first.');
-				if (res.status === 413) throw new Error('That voice sample is too large — record a shorter clip (under ~30s) and freeze it again.');
-				if (res.status === 422) throw new Error('That voice sample couldn’t be read — re-record and freeze it again.');
-				if (res.status === 500) throw new Error('Voice render failed. Try again, or re-record the sample if it keeps happening.');
-				throw new Error(String(j.error || `HTTP ${res.status}`));
+				throw new Error(previewErrorText(j, res.status));
 			}
 			const buf = await res.arrayBuffer();
 			const url = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));

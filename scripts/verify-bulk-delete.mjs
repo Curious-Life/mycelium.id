@@ -1,4 +1,4 @@
-// verify:bulk-delete — hard delete-by-source/type cascade (docs/DATA-DELETION-DESIGN-2026-07-03.md).
+// verify:bulk-delete — hard delete-by-source/type cascade (the data-deletion design).
 //
 //   B1  delete-by-source removes the source's messages + documents (user-scoped)
 //   B2  a DIFFERENT source's rows are UNTOUCHED

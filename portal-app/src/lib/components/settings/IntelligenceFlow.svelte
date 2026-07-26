@@ -1,5 +1,5 @@
 <!--
-	The Intelligence pane as a FLOW (docs/INTELLIGENCE-SCREEN-REDESIGN-2026-07-17.md Part I).
+	The Intelligence pane as a FLOW (the Intelligence-screen redesign Part I).
 
 	Two top states, chosen by one fact with opposite polarity (§4.0 / A5):
 	  STATE A (first run)  — no on-box approval AND no provider: one pre-suggested bundle,

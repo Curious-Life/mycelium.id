@@ -161,8 +161,8 @@ function mapRowToConfig(row) {
   // credentials carrying a claudeOAuthToken (sk-ant-oat…). Routed through the same
   // anthropicAdapter, but anthropic-wire swaps in Bearer + Claude-Code identity
   // headers + the "You are Claude Code" preamble (anthropicAuthFromCfg keys on this
-  // field). US jurisdiction like any Anthropic provider. See docs/CLAUDE-SUBSCRIPTION-
-  // DRIVER-DESIGN-2026-06-26.md (Phase S).
+  // field). US jurisdiction like any Anthropic provider. See the Claude-subscription
+  // driver design (Phase S).
   // Prefer the current key; fall back to older shapes an earlier build may have stored
   // (raw `accessToken`, or the nested `claudeAiOauth.accessToken` from ~/.claude/.credentials.json)
   // so a subscription connected on an old build still resolves instead of failing to null.
@@ -189,12 +189,15 @@ function mapRowToConfig(row) {
 }
 
 export async function resolveInferenceConfig(db, userId) {
+  // The try/catch is the FAIL-SOFT boundary, and it must stay OUTSIDE the arming steps.
+  // resolveEffectiveAssignment guards its own reads, but applySensitiveExempt and
+  // withFreshSubscriptionToken are outside it — a throw in either (a keychain read, a settings
+  // read) must degrade to "no cloud provider" the way it always has, not propagate into every
+  // caller of the resolver. An earlier draft of this refactor narrowed the boundary to the
+  // lookup only (independent review, LOW).
   try {
-    const active = await db?.providers?.getActive?.(userId); // most-recently-used active row, or null
-    if (active) {
-      const cfg = mapRowToConfig(active);
-      if (cfg) { await applySensitiveExempt(db, userId, cfg); return withFreshSubscriptionToken(cfg); }
-    }
+    const eff = await resolveEffectiveAssignment(db, userId, null);
+    if (eff.cfg) { await applySensitiveExempt(db, userId, eff.cfg); return withFreshSubscriptionToken(eff.cfg); }
   } catch { /* fail-soft: fall back to env/local */ }
   return {}; // router reads env (ANTHROPIC_API_KEY / OPENAI_API_KEY) when unset
 }
@@ -261,25 +264,100 @@ export { SENSITIVE_TASKS, isSensitiveTask } from './sensitivity.js';
  */
 export async function resolveInferenceConfigForTask(db, userId, task) {
   try {
-    const settings = await db?.users?.getSettings?.(userId);
-    const a = settings?.taskModels?.[task];
-    if (a && a.providerId != null) {
-      let row = await db?.providers?.get?.(a.providerId, userId);
-      if (row) {
-        if (a.model) row = { ...row, model_preference: a.model }; // per-task model override
-        const cfg = mapRowToConfig(row);
-        // §4g exemption on THIS branch too. It was applied only by resolveInferenceConfig
-        // (the fallback below), so a subscription assigned to a task explicitly — Settings →
-        // Intelligence → narrate → Claude — never got marked exempt, while the SAME provider
-        // reached as the "active" one did. Harmless while nothing gated the primary; the
-        // moment §4g covers narrate (2026-07-16) it would refuse an opt-in the user had
-        // actually given. The exemption is a property of the PROVIDER + the setting, never of
-        // the lookup path that found it.
-        if (cfg) { await applySensitiveExempt(db, userId, cfg); return withFreshSubscriptionToken(cfg); }
+    return await _forTask(db, userId, task);
+  } catch { return {}; }   // same fail-soft boundary as resolveInferenceConfig (see its note)
+}
+async function _forTask(db, userId, task) {
+  const eff = await resolveEffectiveAssignment(db, userId, task);
+  // §4g exemption on EVERY branch. It used to be applied only by resolveInferenceConfig (the
+  // active-provider fallback), so a subscription assigned to a task explicitly — Settings →
+  // Intelligence → narrate → Claude — never got marked exempt, while the SAME provider reached
+  // as the "active" one did. Harmless while nothing gated the primary; the moment §4g covers
+  // narrate (2026-07-16) it would refuse an opt-in the user had actually given. The exemption
+  // is a property of the PROVIDER + the setting, never of the lookup path that found it.
+  // Folding both branches into resolveEffectiveAssignment makes that structural.
+  if (eff.cfg) { await applySensitiveExempt(db, userId, eff.cfg); return withFreshSubscriptionToken(eff.cfg); }
+  return {};
+}
+
+// ── THE selection rule — one implementation, two consumers (D-075) ──────────────────────────
+//
+// WHAT WENT WRONG. The runtime resolved a task's provider here (explicit
+// `settings.taskModels[task].providerId`, else `providers.getActive`), while Settings →
+// Intelligence decided what to HIGHLIGHT from `taskModels` ALONE
+// (IntelligenceScreen.svelte's `class:on={taskModels[f.tasks[0]]?.providerId === p.id}`).
+// Those two rules agree only when an explicit assignment exists. After #360 (D-029) a
+// connected subscription AUTO-SELECTS as the active provider WITHOUT writing taskModels — so
+// the runtime ran Claude for chat + narration while Settings showed nothing selected at all.
+// The operator read that as "the system picked a model but the UI doesn't know".
+//
+// The fix is not "make the screen also check getActive" — that is a SECOND copy of the rule,
+// and a second copy is what produced the divergence. Both the runtime and the display now come
+// out of THIS function.
+//
+// ⚠️ `cfg` CARRIES CREDENTIALS (the row's apiKey / OAuth token, via mapRowToConfig). It is for
+// in-process callers only. Anything that crosses an HTTP boundary must go through
+// `effectiveSelection()` below, which projects the three UI-safe fields and nothing else.
+/**
+ * Which provider row will ACTUALLY serve `task`, and why.
+ * @param {object} db
+ * @param {string} userId
+ * @param {string|null} task  a task name, or null for "the plain active-provider resolution"
+ * @returns {Promise<{source:'explicit'|'active'|'none', providerId:number|null, model:string|null, cfg:object|null}>}
+ *   source 'explicit' → the user assigned this provider to this task in Settings.
+ *   source 'active'   → nothing assigned; it falls back to the vault's active provider.
+ *   source 'none'     → nothing resolvable (the router then reads env, else local Ollama).
+ */
+export async function resolveEffectiveAssignment(db, userId, task) {
+  if (task != null) {
+    try {
+      const settings = await db?.users?.getSettings?.(userId);
+      const a = settings?.taskModels?.[task];
+      if (a && a.providerId != null) {
+        let row = await db?.providers?.get?.(a.providerId, userId);
+        if (row) {
+          if (a.model) row = { ...row, model_preference: a.model }; // per-task model override
+          const cfg = mapRowToConfig(row);
+          // An UNRESOLVABLE explicit assignment (row deleted, or 'pending') falls through to
+          // the active provider — exactly what the runtime has always done. Reporting it as
+          // 'explicit' here would make Settings highlight a provider the runtime refuses.
+          if (cfg) return { source: 'explicit', providerId: row.id ?? a.providerId, model: row.model_preference || null, cfg };
+        }
       }
+    } catch { /* fail-soft → active provider */ }
+  }
+  try {
+    const active = await db?.providers?.getActive?.(userId); // most-recently-used active row, or null
+    if (active) {
+      const cfg = mapRowToConfig(active);
+      if (cfg) return { source: 'active', providerId: active.id, model: active.model_preference || null, cfg };
     }
-  } catch { /* fail-soft → active provider */ }
-  return resolveInferenceConfig(db, userId);
+  } catch { /* fail-soft: fall back to env/local */ }
+  return { source: 'none', providerId: null, model: null, cfg: null };
+}
+
+/**
+ * The UI-SAFE projection of resolveEffectiveAssignment — what Settings renders.
+ * Deliberately a separate function rather than "remember not to serialize cfg": the credential
+ * lives on `cfg`, so the only field-list that ever reaches a client is written down once, here.
+ * READ-ONLY by construction — it resolves, it never writes settings, so displaying the
+ * effective model can never overwrite (or manufacture) the user's explicit choice.
+ *
+ * ⚠️ KNOWN LIMITATION — it reports the provider the ASSIGNMENT resolves to, which is not always
+ * the provider a given REQUEST will egress to. §4g can still refuse a resolved provider at call
+ * time: resolveProviderChain drops every us-* provider for a `sensitive: true` request unless the
+ * subscription opt-in is on. Today that is inert for this surface — SENSITIVE_TASKS is empty of
+ * anything this screen assigns (narrate left it on 2026-07-19; only the explicit claims path
+ * passes sensitive:true, and it is not an assignable function) — so the reported selection and
+ * the served one coincide. If a task this screen assigns ever rejoins SENSITIVE_TASKS, this
+ * projection would report a provider §4g then refuses, and Settings would be confidently wrong
+ * again in the other direction. Whoever makes that change must extend this to carry the refusal
+ * (independent review ×2, LOW).
+ * @returns {Promise<{task:string|null, source:'explicit'|'active'|'none', providerId:number|null, model:string|null}>}
+ */
+export async function effectiveSelection(db, userId, task) {
+  const e = await resolveEffectiveAssignment(db, userId, task);
+  return { task: task ?? null, source: e.source, providerId: e.providerId, model: e.model };
 }
 
 // §4g cascade priority (operator decision): EU-sovereign ZDR → frontier (US) →

@@ -12,7 +12,7 @@ name: desktop-release
 #
 # Builds on a runner of the target arch: the bundled Node/Python + native wheels
 # + better_sqlite3.node are arch-specific and do NOT cross-compile
-# (docs/DESIGN-macos-signed-distribution-2026-06-17.md). macos-14 = Apple Silicon.
+# (the macOS signed-distribution design). macos-14 = Apple Silicon.
 #
 # Signing is OURS, not Tauri's: `cargo tauri build` runs ad-hoc (no APPLE_* in
 # its env, so it does not auto-notarize and does not hit the externalBin

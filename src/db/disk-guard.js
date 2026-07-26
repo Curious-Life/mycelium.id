@@ -5,7 +5,7 @@
 // repro) and the pipeline children catch-and-return-0 (the silent "describe-more did
 // nothing / stuck Describing…" symptom). A 2 GB backup copy or a Generate run on a
 // near-full disk is exactly what tips it over. Nothing guarded disk space before this
-// (only RAM, in src/hardware/detect.js). @see docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+// (only RAM, in src/hardware/detect.js). @see the vault-concurrency-fix design.
 //
 // POLICY (fail-closed, CLAUDE.md §3): refuse a large vault write/backup unless free
 // space on the vault's volume >= max(factor * vaultSize, floorGb). factor=2 covers a

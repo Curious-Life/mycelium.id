@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
-import { categoryOf, isManagedPackageDir, FILE_CATEGORIES } from './file-categories.js';
+import { categoryOf, FILE_CATEGORIES, SWEEP_MAX_DEPTH, isSkippedSweepDir } from './file-categories.js';
 
 const statSafe = (p) => { try { return fs.statSync(p); } catch { return null; } };
 
@@ -137,7 +137,19 @@ export function localSweepRoots(home) {
 }
 // Single-pass categorizing count (no content read): tallies files per category
 // and the date span, bounded by depth + a file cap so a huge home stays fast.
-function countByCategory(root, { maxDepth = 5, cap = 40000 } = {}) {
+//
+// ⚠️ THE WALK SHAPE IS SHARED WITH THE IMPORTER, ON PURPOSE (D-070). This used to
+// count at maxDepth 5 and prune only dotdirs + managed packages, while
+// local-files-import.js walked maxDepth 8 and also pruned node_modules/Caches/
+// Library. The number the user consented to was therefore not the number that got
+// imported — measured pre-fix, a documents-only run enrolled 9 where the chip
+// advertised 7 — and against an all-category progress denominator that reads as
+// "it imported everything anyway", the reported symptom. Both walks now take
+// SWEEP_MAX_DEPTH + isSkippedSweepDir from file-categories.js. Do not re-localise
+// either bound here: a count that overstates or understates the import is a
+// consent defect, not a cosmetic one. Exported so verify:import-consent S5 can
+// assert the agreement directly.
+export function countByCategory(root, { maxDepth = SWEEP_MAX_DEPTH, cap = 40000 } = {}) {
   const tally = {}; // cat → { count, minMs, maxMs }
   let seen = 0;
   const bump = (cat, ms) => { const t = tally[cat] || (tally[cat] = { count: 0, minMs: Infinity, maxMs: 0 }); t.count++; if (Number.isFinite(ms)) { t.minMs = Math.min(t.minMs, ms); t.maxMs = Math.max(t.maxMs, ms); } };
@@ -147,7 +159,7 @@ function countByCategory(root, { maxDepth = 5, cap = 40000 } = {}) {
     for (const e of ents) {
       if (seen >= cap) return;
       if (e.isSymbolicLink()) continue;
-      if (e.isDirectory()) { if (e.name.startsWith('.') || isManagedPackageDir(e.name)) continue; walk(path.join(dir, e.name), depth + 1); continue; }
+      if (e.isDirectory()) { if (isSkippedSweepDir(e.name)) continue; walk(path.join(dir, e.name), depth + 1); continue; }
       const cat = categoryOf(e.name);
       if (!cat) continue;
       seen++;

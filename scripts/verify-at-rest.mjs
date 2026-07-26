@@ -1,5 +1,5 @@
 // scripts/verify-at-rest.mjs — verify:at-rest gate (A1–A7) for whole-file SQLCipher
-// blindness (A′). @see docs/AT-REST-BLINDNESS-DESIGN-2026-06-11.md §8.
+// blindness (A′). @see the at-rest blindness design §8.
 //
 // Proves end-to-end, against a real temp vault:
 //   A1  encrypted vault opaque at rest (no magic header, no plaintext markers)

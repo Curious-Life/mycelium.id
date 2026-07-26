@@ -87,7 +87,7 @@ export function createAuth(opts = {}) {
     // better-auth rejects auth POSTs whose Origin is not trusted (CSRF guard).
     // Claude's connector callbacks originate from claude.ai / claude.com, so
     // trust them alongside our own base URL (validated end-to-end in the Phase-4
-    // smoke — see docs/REMOTE-CONNECT-DESIGN-2026-06-02.md).
+    // smoke — see the remote-connect design).
     trustedOrigins: [baseURL, 'https://claude.ai', 'https://claude.com'],
     plugins: [
       // The mcp() plugin's discovery hardcodes jwks_uri = <baseURL>/api/auth/mcp/jwks

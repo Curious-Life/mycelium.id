@@ -18,7 +18,7 @@
     - disable-library-validation                    → python3 dlopen()s wheel .so /
       .dylib (faiss, onnxruntime, …) not signed by our Team ID
 
-  See docs/DESIGN-macos-signed-distribution-2026-06-17.md §2-3.
+  See the macOS signed-distribution design §2-3.
 -->
 <plist version="1.0">
 <dict>

@@ -2,7 +2,7 @@
  * Reply MCP tool — agent-explicit egress with default-to-inbound resolution.
  *
  * Phase 2 of EGRESS-PROVENANCE.
- * See docs/EGRESS-PROVENANCE-PHASE2-DESIGN-2026-05-06.md.
+ * See the egress-provenance phase-2 design.
  *
  * The tool resolves the target by HTTP-callback to the agent-server's
  * /internal/inbound-context/current endpoint (Step 2). The active-turn
@@ -194,7 +194,15 @@ export function createReplyDomain(deps) {
       platform,
       channelId: turn.channelId,
       text,
-      voice: !!args?.voice && platform === 'telegram',
+      // TRI-STATE — must stay `undefined` when the agent said nothing (D-003 ↻2).
+      // `!!args?.voice` coerced that to a hard `false`, which buildSendBody then put
+      // ON THE WIRE (it forwards any boolean), so the chokepoint read an EXPLICIT
+      // "do not speak" on every reply and its reply-time toggle consult — the whole
+      // point of the QA6-VOICE fix — could never fire. verify:channel-egress V1
+      // proved the chokepoint half by POSTing /telegram/send with no `voice` field,
+      // so it stayed green while the real producer defeated it (an M-001-class
+      // false green: the gate never drove createReplyDomain).
+      voice: (platform === 'telegram' && typeof args?.voice === 'boolean') ? args.voice : undefined,
       // Reply-tagging is the AGENT'S CHOICE (quote: true), never automatic —
       // auto-tagging every reply reads as quote-spam in a 1:1 chat. The
       // inbound id stays available from the active turn when the agent asks.

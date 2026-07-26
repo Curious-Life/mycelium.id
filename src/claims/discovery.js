@@ -12,7 +12,7 @@
 // SECURITY: the proposal `infer` call carries plaintext evidence and MUST be
 // sensitive:true (on-box local only). v1 identity-match uses content_hash +
 // lexical similarity over DECRYPTED claim text (no embedding decryption needed);
-// embedding_768 is reserved for retrieval. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md §3.5.
+// embedding_768 is reserved for retrieval. See the persona-claims design §3.5.
 import { createHash } from 'node:crypto';
 import { update as updateConfidence, fromConfidence, toConfidence } from './confidence.js';
 import { cosine } from '../search/ann/cosine.js';
@@ -33,7 +33,7 @@ const L_NEW = fromConfidence(0.6); // a fresh single-window claim starts modestl
 // too small: a big evidence prompt crowds out generation so the JSON reply gets
 // truncated → 0 claims. We bound the evidence we feed (filling up to a budget,
 // not a fixed message count), reserve room for the reply, and size num_ctx to
-// hold BOTH. All tunable via env. See docs/PERSONA-CLAIMS-DESIGN-2026-06-06.md.
+// hold BOTH. All tunable via env. See the persona-claims design.
 const INPUT_TOKEN_BUDGET = Number(process.env.MYCELIUM_CLAIMS_INPUT_TOKENS || 6000); // evidence prompt
 const PROPOSAL_OUTPUT_TOKENS = Number(process.env.MYCELIUM_CLAIMS_OUTPUT_TOKENS || 1500); // reply room
 const CTX_MAX = Number(process.env.MYCELIUM_CLAIMS_CTX_MAX || 16384); // upper bound on num_ctx

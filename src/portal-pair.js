@@ -1,5 +1,5 @@
 // src/portal-pair.js — QR device-pairing handshake router
-// (docs/PHONE-QR-PAIRING-DESIGN-2026-07-19.md §3.1/§3.4, Unit B).
+// (the phone QR-pairing design §3.1/§3.4, Unit B).
 //
 // The ceremony is the TRUST ROOT, so start/pending/approve/deny/devices/revoke are
 // LOOPBACK-ONLY (owner physically at the Mac; a paired phone's device token can USE

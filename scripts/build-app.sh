@@ -54,7 +54,7 @@ fi
 # ── npm deps + the canonical SvelteKit UI (idempotent) ────────────────────────
 # npm ci (NOT npm install): install EXACTLY the committed package-lock.json so every
 # build ships identical native SQLite/sqlite-vec — a mismatched better-sqlite3/vec
-# reading an existing on-disk index is a corruption vector (P-C, docs/SEARCH-SIDECAR-DESIGN).
+# reading an existing on-disk index is a corruption vector (P-C, the search-sidecar design).
 [ -d "$REPO/node_modules" ] || { echo "[mycelium] installing npm deps (npm ci)…"; ( cd "$REPO" && npm ci ); }
 # Build portal-app/build now so it's present for `cargo tauri dev` too (build
 # uses build-app-bundle.sh's beforeBuildCommand, but dev has no such hook).

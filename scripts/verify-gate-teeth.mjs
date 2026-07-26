@@ -4,7 +4,7 @@
  *
  * WHY THIS GATE EXISTS
  * --------------------
- * `M-001` in `docs/QA-DEFECT-LEDGER.md`: three gates were found green **for the wrong reason** in
+ * `M-001` in the QA defect ledger: three gates were found green **for the wrong reason** in
  * a single session — one of them inside the very PR that was fixing the previous instance of that
  * pattern. `verify:provider-import` P13 asserted `!('taskModels' in settings)`, which held only
  * because the import had *destroyed* the vault's own value: it passed by observing the bug it was
@@ -108,5 +108,5 @@ console.log(fails.length
     + '        retired for.\n'
     + '        NOT PROVEN: that any recorded mutation was actually executed, or that it RED for the\n'
     + '        stated reason. This gate forces the claim to be written where a reviewer will see it;\n'
-    + '        it cannot verify the claim. See M-001 in docs/QA-DEFECT-LEDGER.md.');
+    + '        it cannot verify the claim. See M-001 in the QA defect ledger.');
 process.exit(fails.length ? 1 : 0);

@@ -21,7 +21,7 @@
  * read as plaintext UTF-8. This survives partial migration during
  * rollout. A follow-up "PR-cleanup" will flip this to log-and-return-null
  * once all hosts are confirmed migrated. See
- * docs/MIND-FILES-ENCRYPTION-DESIGN-2026-05-08.md open question #6.
+ * the mind-files encryption design open question #6.
  *
  * Returns a family of small async helpers bound to a particular
  * AGENT_ROOT + agent identity. When AGENT_ROOT is unset, reads return

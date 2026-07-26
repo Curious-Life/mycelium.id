@@ -1,5 +1,5 @@
 // src/crypto/space-content.js — E2E shared-spaces content encryption (the SpaceCrypto
-// content layer of the "Space Key Lockbox", docs/SHARED-SPACES-E2E-DESIGN-2026-06-30.md).
+// content layer of the "Space Key Lockbox", the shared-spaces E2E design).
 //
 // A space item (document body / knowledge note / oplog payload) is encrypted under the
 // per-space Content Encryption Key (CEK_g), so ONLY members holding CEK_g can read it —

@@ -1,7 +1,7 @@
 // src/hardware/catalog-gen.js — PURE catalog-assembly logic (no I/O), shared by
 // the generator script and its hermetic test. The network orchestration lives in
 // scripts/generate-ollama-catalog.mjs; everything decision-bearing lives here so
-// it's unit-testable with fixtures. See docs/DYNAMIC-CATALOG-DESIGN-2026-06-05.md.
+// it's unit-testable with fixtures. See the dynamic-catalog design.
 
 import { isExcluded, companionQuality, bestFor, familyOf, eqFamilyBonus, MIN_COMMUNITY_PULLS, clamp } from './catalog-meta.js';
 

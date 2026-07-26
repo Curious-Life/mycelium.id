@@ -38,17 +38,23 @@ const src = readFileSync(KEYSTORE, 'utf8');
 rec(!/'-w',\s*normalizeKey\(/.test(src) && !/'-w',\s*key\b/.test(src),
   'S1. Keychain: no secret value passed after the `-w` flag in argv',
   "guards against `['... , '-w', <key>]`");
+// The former `op`-CLI save path was REMOVED (D-027). S2 stays as a REGRESSION
+// GUARD: if anyone reintroduces an `op item create` save, its secret must still
+// never land in argv as `password=<key>`. It must also stay absent entirely —
+// asserted by S8 below.
 rec(!/`password=\$\{/.test(src) && !/'password='\s*\+/.test(src),
   'S2. 1Password: no `password=<key>` assignment in argv',
   'guards against the op `password=${key}` argv element');
 
-// And both helpers must feed the secret via stdin (`input:`).
+// The Keychain helper must feed the secret via stdin (`input:`), never argv.
 const kcFn = src.match(/export function saveRecoveryKeyToKeychain[\s\S]*?\n}/)?.[0] ?? '';
-const opFn = src.match(/export function saveRecoveryKeyTo1Password[\s\S]*?\n}/)?.[0] ?? '';
 rec(/input:\s*`\$\{key\}/.test(kcFn) && /'-w'\s*\]/.test(kcFn),
   'S3. Keychain: secret travels via `input:` stdin, `-w` flag carries no value', `len=${kcFn.length}`);
-rec(/input:\s*template/.test(opFn) && /'--template',\s*'-'/.test(opFn),
-  'S4. 1Password: secret travels via stdin JSON template (`--template -`)', `len=${opFn.length}`);
+// S4 (op stdin-template form) was retired with the `op` save path (D-027).
+// MUTATION-TESTED: re-added `export function onePasswordSignInState(){…}` to keystore.js → S8 RED (restored → GREEN)
+rec(!/saveRecoveryKeyTo1Password|onePasswordSignInState/.test(src),
+  'S8. the removed `op`-CLI save path stays removed (no re-introduction)',
+  'D-027: a GUI app cannot satisfy 1Password per-process CLI authorization');
 
 // Core key-write path (kcWrite/kcBackup) — same discipline: the master keys must
 // reach `security` on stdin, never argv. (Generalises the #17 helper fix.)

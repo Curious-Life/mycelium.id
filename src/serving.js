@@ -9,7 +9,7 @@
 // compression middleware — so the WebView downloaded the full 4.2 MB on every
 // cold open, and (because hashed chunks carried no Cache-Control) revalidated
 // ~100 chunks on every warm open. Over Tailscale/LAN that is the multi-second
-// "seconds before a page even opens". See docs/PORTAL-PERF-CONSOLIDATED-PLAN.
+// "seconds before a page even opens". See the portal-performance plan.
 //
 // SECURITY (CLAUDE.md §1, BREACH/CRIME): Mycelium serves a single owner over
 // loopback (desktop) or Tailscale+Bearer (native app) — no untrusted

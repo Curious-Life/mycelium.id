@@ -1295,14 +1295,21 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   // (resume → nudge, or trigger). Progress also shows in the unified activity feed
   // ('Sorting your messages · N / M'); this is the explicit control surface.
   router.get('/enrichment/categorize/status', async (_req, res) => {
-    const { tagged, total, pending, gaveUp = 0 } = await db.messages.categoriesBacklogCached(userId);
+    const { tagged, total, pending, gaveUp = 0, blockedOnEmbed = 0, unembeddable = 0 } = await db.messages.categoriesBacklogCached(userId);
     ok(res, {
       // `gaveUp` — rows terminally skipped for labeling after LABEL_MAX_ATTEMPTS
       // counted failures against a working model (categories_processed = -1). A
       // count only; recoverable via POST /portal/enrichment/retry-failed.
-      messages: { total, tagged, pending, gaveUp },
+      // `blockedOnEmbed` / `unembeddable` — D-047 ↻1. `pending` is now the DRAIN predicate
+      // (untagged AND embedded), so these carry the untagged rows the drain cannot select yet
+      // (still in the embed queue) and the ones it never will (embed terminal, no vector —
+      // recoverable by the same retry-failed route). Reported so `pending: 0` on a mid-import
+      // vault can never read as "labeling is done".
+      messages: { total, tagged, pending, gaveUp, blockedOnEmbed, unembeddable },
       paused: isCategorizePaused(),
-      status: isCategorizePaused() ? 'paused' : (pending > 0 ? 'running' : 'idle'),
+      // `waiting` is a SCHEDULING state, not idle and not running: there is labeling to do and
+      // none of it is selectable until embedding catches up.
+      status: isCategorizePaused() ? 'paused' : (pending > 0 ? 'running' : (blockedOnEmbed > 0 ? 'waiting' : 'idle')),
       stageLabel: `Sorting: ${tagged.toLocaleString()} / ${total.toLocaleString()}`,
     });
   });

@@ -23,7 +23,7 @@
 	 * D-026 — "the mindscape points need to be bigger, can we increase their size by 3x?"
 	 * (operator, v0.1.12 QA).
 	 *
-	 * Read `docs/MINDSCAPE-POINT-SIZING-DESIGN-2026-07-20.md` before touching these.
+	 * Read the mindscape point-sizing design before touching these.
 	 * That doc designs a COUNT-ADAPTIVE factor (§2: base × f(N), log-lerp, clamped) and
 	 * is explicitly HELD — "do not build until the operator reviews this doc". It was
 	 * never built: the uniform below is still a bare constant, so nothing here conflicts
@@ -98,6 +98,22 @@
 	let resizeObserver: ResizeObserver;
 	let contactPositions: Map<string, THREE.Vector3> = new Map();
 	let coordScale = SCENE_SCALE; // updated by createPointCloud based on data range
+	// D-072 — WHERE THE DATA ACTUALLY IS, in scene space.
+	// The UMAP coordinates the pipeline writes (pipeline/cluster.py `reducer_3d.fit_transform`)
+	// are NOT origin-centred: their offset is an artefact of the spectral init, and it is
+	// routinely the same order of magnitude as the cloud's own extent. createPointCloud scales
+	// the cloud about the world origin (`position3d.* * coordScale`) and deliberately DISCARDS
+	// the bounds' `min`, so the rendered cloud is bodily translated tens of units away from
+	// (0,0,0). Meanwhile the camera starts at a hardcoded (80,50,80) and OrbitControls.target
+	// defaults to (0,0,0) — so the first frame is off-centre and, because OrbitControls orbits
+	// its target, ROTATION SWINGS AROUND A POINT OUTSIDE THE DATA. That is the operator's
+	// "doesn't load centered / rotating feels skewed", and they are one bug.
+	// ⚠️ The fix is to move the CAMERA to the data, never to recentre the geometry: the
+	// `x, z, y → scene` mapping times coordScale is duplicated in nine other places (territory
+	// markers, co-fire lines, connection lines, the territory-centroid cloud, the social layer
+	// and both camera-framing helpers). Subtracting a centre in createPointCloud alone would
+	// leave every overlay floating at the old offset.
+	let sceneCenter = new THREE.Vector3(0, 0, 0);
 	let showPoints = $state(true);
 	// Layer-controls panel: collapsed to a tiny pill by default (per app-UI feedback)
 	// so it doesn't crowd the mindscape; click to reveal the Points/Contacts toggles.
@@ -1508,6 +1524,18 @@
 		const scale = 60 / maxSpan;
 		coordScale = scale;
 
+		// D-072: the cloud's centroid in SCENE space (note the x, z, y axis swap the position
+		// loop below uses — the centre must live in the same frame as the points, or the pivot
+		// would be wrong on two axes instead of three). Recorded here, applied by
+		// frameCameraOnData(); the geometry itself is untouched.
+		let sumX = 0, sumY = 0, sumZ = 0;
+		for (const p of nodes) {
+			sumX += p.data.position3d.x * scale;
+			sumY += p.data.position3d.z * scale;
+			sumZ += p.data.position3d.y * scale;
+		}
+		sceneCenter.set(sumX / nodes.length, sumY / nodes.length, sumZ / nodes.length);
+
 		const positions = new Float32Array(nodes.length * 3);
 		const colors = new Float32Array(nodes.length * 3);
 		const alphas = new Float32Array(nodes.length);
@@ -2004,6 +2032,23 @@
 		animate();
 	}
 
+	// ── D-072: frame the camera on the data, at mount, before any animation ────────────────────
+	// The intro animation already ends in a correctly-framed state — but it is reached only via
+	// the `dataChanged && !introPlayed` $effect, which returns early while `scene` is still
+	// undefined (the effect is declared before onMount) and therefore depends on a LATER store
+	// update landing after the lazy import of this component has mounted. That is a race, and
+	// losing it left the camera at the hardcoded (80,50,80) looking at (0,0,0) forever — which is
+	// why the operator sees it "sometimes". This makes the PRE-INTRO state correct, so the intro
+	// becomes a flourish rather than the only thing that centres the view.
+	// Idempotent and animation-free: safe to call after every createPointCloud().
+	function frameCameraOnData() {
+		if (!camera || !controls) return;
+		const offset = camera.position.clone().sub(controls.target);
+		controls.target.copy(sceneCenter);
+		camera.position.copy(sceneCenter).add(offset);
+		controls.update();
+	}
+
 	let introCancelled = false;
 
 	function cancelIntro() { introCancelled = true; }
@@ -2056,7 +2101,27 @@
 		const duration = 2500;
 
 		function animate() {
-			if (introCancelled) { cleanup(); return; }
+			if (introCancelled) {
+				// D-072: cancelling the intro must stop the CAMERA DRIFT, not strand the PIVOT.
+				// Pre-fix, the target was mid-lerp between (0,0,0) and the centroid and this path
+				// returned without finishing it — so a user who grabbed the canvas inside the
+				// first 2.5s ended up orbiting a point that was neither the origin nor the data.
+				//
+				// ⚠️ HONEST SCOPE (independent review L-5): with frameCameraOnData() now running
+				// immediately before animateIntro() is scheduled, `startTarget === endTarget` on
+				// the normal path, so the lerp cannot strand anything and this snap is a no-op.
+				// It still earns its place for the ONE case that survives: a second streamed batch
+				// moves `sceneCenter` inside the 100ms before the intro starts, so start ≠ end
+				// again. Keep it as the invariant ("the pivot is the centroid whenever the intro
+				// stops"), not as the fix for the shipped symptom — that is the mount-time framing.
+				// The camera moves with the target so the abort is a settle, not a view jump.
+				const camOffset = camera.position.clone().sub(controls.target);
+				controls.target.copy(endTarget);
+				camera.position.copy(endTarget).add(camOffset);
+				controls.update();
+				cleanup();
+				return;
+			}
 			const elapsed = performance.now() - startTime;
 			const t = Math.min(1, elapsed / duration);
 			const ease = 1 - Math.pow(1 - t, 4);
@@ -2404,6 +2469,12 @@
 				createGlowLayer();
 			}
 			if (dataChanged && !introPlayed && visiblePoints.length > 0) {
+				// D-072: the cloud was just rebuilt, so `sceneCenter` (and `coordScale`) moved.
+				// Re-frame BEFORE the intro so the intro starts from a centred pose instead of
+				// drifting in from the origin — and so a lost intro race still leaves it centred.
+				// Guarded by `!introPlayed`: once the intro has run, the camera is the USER'S,
+				// and a later streamed batch must never yank it out from under them.
+				frameCameraOnData();
 				introPlayed = true;
 				setTimeout(() => animateIntro(), 100);
 			} else if (isNavChange) {
@@ -2502,6 +2573,8 @@
 		initThree();
 		if (!webglReady) return; // WebGL unavailable → fallback shown; skip the 3D setup
 		createPointCloud();
+		// D-072: the very first frame is centred on the data, not on the world origin.
+		frameCameraOnData();
 		renderLoop();
 	});
 

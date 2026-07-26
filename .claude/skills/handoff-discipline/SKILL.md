@@ -56,9 +56,9 @@ A handoff with nothing to put in these buckets is suspicious — either the sess
 ## Step 2 — Locate the right handoff target
 
 The Mycelium convention: `docs/<TOPIC>-HANDOFF-<YYYY-MM-DD>.md`. Examples canonical to this codebase:
-- `docs/EGRESS-PROVENANCE-HANDOFF-2026-05-06.md`
-- `docs/CLAUDE-SUBSCRIPTION-HANDOFF-2026-05-05.md`
-- `docs/D1-COST-HANDOFF-2026-05-06.md`
+- the egress-provenance handoff
+- the Claude-subscription handoff
+- the D1-cost handoff
 
 **Update an existing handoff** when the session continued the same work thread. Add a session-summary section dated to today; preserve prior content untouched. The doc grows over time; treat it as append-mostly with structural updates only when status materially shifts.
 
@@ -205,9 +205,9 @@ If any row fails — fix it before considering the handoff complete. A handoff w
 
 Read these to calibrate your output:
 
-- **docs/CLAUDE-SUBSCRIPTION-HANDOFF-2026-05-05.md** — multi-PR work with clear phase tracking, gotchas with dates, pickup protocol up front.
-- **docs/EGRESS-PROVENANCE-HANDOFF-2026-05-06.md** — multi-phase + multi-session; dated session summaries appended; operator's directional calls preserved.
-- **docs/D1-COST-HANDOFF-2026-05-06.md** — investigation-style handoff with specific findings + change-by-change ledger.
+- **the Claude-subscription handoff** — multi-PR work with clear phase tracking, gotchas with dates, pickup protocol up front.
+- **the egress-provenance handoff** — multi-phase + multi-session; dated session summaries appended; operator's directional calls preserved.
+- **the D1-cost handoff** — investigation-style handoff with specific findings + change-by-change ledger.
 
 ## Cadence — write the handoff INCREMENTALLY, not at session end
 

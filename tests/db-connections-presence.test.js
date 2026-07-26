@@ -1,7 +1,7 @@
 // tests/db-connections-presence.test.js — outbound presence querier (queryPresence):
 // the full sign-request / verify-signed-reply path and the render mapping incl. the
 // load-bearing "unreachable → grey if last-known-shared, else no dot" (gate V7).
-// Design: docs/DESIGN-connection-presence-indicator-2026-06-18.md
+// Design: the connection-presence design
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 

@@ -89,7 +89,14 @@ const DENY = new Set([
 export { DENY as __denyForTest };
 // Reset enrichment products on imported messages; the 768-d pass flips
 // nlp_processed→1 for any message whose vector we re-encrypt (search works now).
-const MESSAGE_OVERRIDES = { nlp_processed: 0, nlp_processed_at: null, nlp_error: null, entities: null, relations: null, entity_summary: null };
+// ⛔ `categories_processed: 0` IS PART OF THE STRIP (D-047 ↻1) — same reason as vault-import's
+// override: without it a restore lands rows counted as TAGGED while their vector is either absent
+// or not yet re-written by vectorPass below, i.e. `tagged > embedded` straight out of the import.
+// The vector pass restores embeddings for the rows it has; every row is re-categorized after it.
+const MESSAGE_OVERRIDES = {
+  nlp_processed: 0, nlp_processed_at: null, nlp_error: null, entities: null, relations: null, entity_summary: null,
+  categories_processed: 0, categorized_at: null, categories_model: null, domain: null, register: null, subregister: null,
+};
 
 const TEXT_EXT = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.csv']);
 const AGENT_SKIP = /(^|\/)(node_modules|\.next|\.git|dist|build|\.cache|\.turbo|coverage)(\/|$)/;

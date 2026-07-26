@@ -49,7 +49,7 @@ export const ROLE_RECOMMENDATIONS = Object.freeze({
   // Qwen3-TTS won a LIVE listening test on the operator's own hardware (2026-07-15), replacing
   // Kokoro — which the operator judged "quite bad" and which sits BELOW OpenAI TTS-1 on the arena
   // (LOCAL-TTS-EVAL §1). Runs LOCAL via the MLX runtime (Apple Silicon) — zero egress, the point.
-  // See docs/AGENT-CHARACTER-AND-VOICE-DESIGN-2026-07-15.md §0 (V1) + §2 (the evidence).
+  // See the agent character-and-voice design §0 (V1) + §2 (the evidence).
   // `model` is the recommended MLX variant; its size/RTF live in src/tts/qwen3-tts-model.js's
   // catalog, single-sourced FROM HERE so the "Recommended for voice" badge and the actual default
   // can never drift (verify:tts-voice pins them equal — the LOCAL-TTS-EVAL §6.2 requirement).

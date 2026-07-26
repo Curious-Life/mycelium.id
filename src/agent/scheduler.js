@@ -28,6 +28,7 @@ import { runAgentTurn } from './run-turn.js';
 import { cycleTurnOpts, cycleByName } from './cycle-prompts.js';
 import { finalizeCycleOutput, cycleDeliveryId } from './cycle-output.js';
 import { hasEnoughActivity } from './cycle-activity.js';
+import { holdProactiveDelivery, proactiveTargetsPerson, selfArmingDenyGuard } from './turn-taking.js';
 import { resolveTaskCapability } from '../inference/capability.js';
 import { resolvePersona } from '../skills/store.js';
 import { createEgressAuditSink } from '../inference/egress.js';
@@ -75,9 +76,14 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
   let timer = null;
   let stopped = false;
 
-  // Runtime tool guard (G1): defense-in-depth under the grant-time allowlist; opt-in via
-  // MYCELIUM_AUTONOMOUS_TOOL_DENY (unset ⇒ undefined ⇒ unchanged).
-  const hooks = createAgentHooks({ db, userId, source: 'scheduler', toolGuard: autonomousToolGuard() });
+  // Runtime tool guard (G1): defense-in-depth under the grant-time allowlist.
+  // TURN-TAKING (D-063) — RULE 1 (no self-arming), layer 2: selfArmingDenyGuard ALWAYS blocks the self-arming tools
+  // (schedule_task) on this surface — a scheduler turn is a turn no human started, so it
+  // must not be able to arm the agent's next turn even if a future grant bug lets the def
+  // through (rule-1 layer 1 is autonomyTools' humanTriggered strip). It composes the opt-in
+  // MYCELIUM_AUTONOMOUS_TOOL_DENY denylist rather than replacing it, and unlike
+  // autonomousToolGuard() it always returns a function, so this layer is always wired.
+  const hooks = createAgentHooks({ db, userId, source: 'scheduler', toolGuard: selfArmingDenyGuard(autonomousToolGuard()) });
   const harness = createAgentHarness({
     onEgress: createEgressAuditSink(db, userId),
     onUsage: createUsageSink(db, userId, { source: 'scheduler' }),
@@ -128,6 +134,10 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
         userMessage: task.prompt || '',
         systemExtra,
         enabledTools: task.enabled_tools || [],
+        // D-076: unlocks CYCLE_AUTONOMOUS_TOOLS for an ENGINE-OWNED cycle only. Same source as
+        // systemExtra + inferenceTask above (cycleTurnOpts → the row's immutable created_by), so
+        // a model-created task — which schedule_task stamps 'agent' — can never claim it.
+        isCycle,
         inferenceTask,
       },
     );
@@ -154,6 +164,32 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
     if (!nextRun && isOnce) { try { await db.harness.setTaskStatus(tUser, task.id, 'completed'); } catch { /* non-fatal */ } }
   }
 
+  // How far out a HELD one-off fire is re-armed before the floor is re-evaluated.
+  const HOLD_DEFER_MS = Number(process.env.MYCELIUM_HOLD_DEFER_MS) || 15 * 60_000;
+
+  /**
+   * Record a fire that the turn-taking floor HELD — without CONSUMING it.
+   *
+   * ⚠️ advance() is wrong for this on its own. It computes the next natural fire and, when a
+   * 'once' schedule has none left, marks the task COMPLETED (see :154). So holding a one-off
+   * reminder — "remind me at 15:00 to call the clinic", the exact thing schedule_task exists
+   * for — would DESTROY it: status completed, nothing ever delivered, never retried
+   * (independent review, 2026-07-26). A recurring cadence may lose one fire; that is already
+   * what the quiet-day gate does, and it is the right trade (a morning check-in must not
+   * arrive at 14:00). A one-off is a promise to the person, so it is DEFERRED and re-evaluated
+   * instead. The deferral is bounded: the hold itself expires (turn-taking DEFAULT_HOLD_MS) or
+   * the person replies, and then the reminder fires.
+   */
+  async function holdFire(task, status) {
+    const tUser = task.user_id || userId;
+    let parsed = null;
+    try { parsed = parseSchedule(task.schedule); } catch { parsed = null; }
+    const isOnce = !parsed || parsed.type === 'once';
+    if (!isOnce) { await advance(task, status); return; }
+    const nextRun = new Date(Date.now() + HOLD_DEFER_MS).toISOString();
+    await db.harness.markTaskRun(tUser, task.id, { nextRun, lastStatus: status, lastError: null });
+  }
+
   async function runTask(task) {
     const tUser = task.user_id || userId;
     const hash = promptHash(task);
@@ -175,6 +211,29 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
         } catch { /* fail-open */ }
       }
 
+      // ── TURN-TAKING (D-063) — RULE 2 (yield the floor), layer 1: PRE-TURN ─────────────────────────────
+      // A scheduled task is the one agent turn no human started, and the only path that
+      // can put an agent-INITIATED message into the person's chat. If the last thing the
+      // agent said on that surface was a question the person has not answered yet, sending
+      // another message advances the conversation past it — exactly the reported defect
+      // ("it doesn't leave room for the person to respond in time"). Skip BEFORE openRun so
+      // no tokens and no run row are spent, and here in runTask (not buildAndRunTurn) so
+      // the `runTurn` test seam cannot bypass it.
+      // Only for tasks that actually reach the person: 'none' writes nothing and 'channel:*'
+      // is dropped by schedulerDeliver, so neither can talk over anyone.
+      // The hold is question-gated and time-bounded (turn-taking.js DEFAULT_HOLD_MS) and is
+      // released by ANY inbound human message — a silent person can never permanently mute
+      // their agent.
+      if (proactiveTargetsPerson(task)) {
+        const floor = await holdProactiveDelivery(db, tUser);
+        if (floor.hold) {
+          logger(`scheduler: floor held — ${floor.status} for ${task.id}`);
+          retries.delete(task.id);   // a hold is not a failure — don't carry retry state forward
+          await holdFire(task, floor.status);
+          return;
+        }
+      }
+
       runId = await db.harness.openRun({ userId: tUser, trigger: 'schedule', taskId: task.id, promptHash: hash });
 
       const r = await (runTurnOverride || buildAndRunTurn)(task);
@@ -186,6 +245,24 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
       // incapable, quiet day) carry their own status through unchanged.
       const decision = finalizeCycleOutput(r, task);
       if (decision.action === 'deliver') {
+        // ── TURN-TAKING (D-063) — RULE 2 (yield the floor), layer 2: PRE-DELIVER ────────────────────────────
+        // Not redundant with the pre-turn check — it closes a REAL RACE. This turn may have
+        // run for tens of seconds; the person can finish onboarding (which persists the
+        // agent's intro + "who are you?" — src/portal-chat.js:270) or the agent can ask
+        // something on another thread in that window. Checked here, immediately before the
+        // one call that makes a message reach a human, so what the invariant protects is the
+        // delivery itself and not merely the decision to attempt it.
+        // Same target filter as the pre-turn layer — finalizeCycleOutput says 'deliver' for a
+        // 'channel:*' target that schedulerDeliver then DROPS, so without this the hold
+        // would suppress a delivery that reaches nobody (caught by verify F6).
+        const floor = proactiveTargetsPerson(task) ? await holdProactiveDelivery(db, tUser) : { hold: false };
+        if (floor.hold) {
+          logger(`scheduler: floor held at delivery — ${floor.status} for ${task.id}`);
+          await db.harness.finishRun(runId, { status: floor.status });
+          retries.delete(task.id);
+          await holdFire(task, floor.status);   // DEFER a one-off; never complete it unsent
+          return;
+        }
         try {
           await deliverFn(task, decision.text, { model: r?.model || null, id: cycleDeliveryId(task) });
         } catch (e) {
@@ -265,7 +342,12 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
     try { ctrl.abort(); } catch { /* */ }
   }
 
-  return { start, stop, tick, tickOnce, _lane: lane };
+  // `_hooks` is a test seam alongside the existing `_lane`: verify:agent-turn-taking fires
+  // the REAL hook bag this scheduler built, so the turn-taking runtime guard is pinned to the
+  // WIRING and not merely to the guard function. An independent review proved the difference:
+  // with the gate asserting only a locally-constructed guard, unwiring it here left the gate
+  // fully GREEN — the M-001 pattern (2026-07-26).
+  return { start, stop, tick, tickOnce, _lane: lane, _hooks: hooks };
 }
 
 export default createScheduler;

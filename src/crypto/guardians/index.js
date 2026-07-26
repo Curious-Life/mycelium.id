@@ -1,7 +1,7 @@
 /**
  * @mycelium/core/guardians — named enforcement points at trust boundaries.
  *
- * See docs/history/GUARDIANS-DESIGN.md for the full design.
+ * See the guardians design for the full rationale.
  *
  * Quick start:
  *   import { guardians, GuardianKind } from '@mycelium/core/guardians';

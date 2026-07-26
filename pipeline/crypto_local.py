@@ -342,7 +342,7 @@ def encrypt_vector(vec, scope: str, master_key: bytes,
 # Vectors live as RAW little-endian float32 BYTES inside the whole-file-encrypted
 # vault — no inner AES-GCM envelope, no base64. Same layout as the JS
 # encodeVectorRaw / decodeStoredVector, so either side decodes the other.
-# @see docs/DESIGN-sqlcipher-stageA-vectors-2026-06-19.md
+# @see the SQLCipher stage-A vectors design
 
 
 def encode_vector_raw(vec) -> bytes:

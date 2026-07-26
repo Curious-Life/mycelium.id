@@ -23,9 +23,9 @@ window per granularity:
 per design v3 Pivot E (cross-band signal alignment is structurally
 broken; needs proper alignment + validation study).
 
-Spec: docs/architecture/COGNITIVE-METRICS-SPEC.md §4.23 + §4.33 + §4.34
-Plan: docs/MEASUREMENT-PLANE-PLAN.md
-Design: docs/MEASUREMENT-PLANE-PR1-DESIGN-2026-05-07.md (v3)
+Spec: the cognitive-metrics spec §4.23 + §4.33 + §4.34
+Plan: the measurement-plane plan
+Design: the measurement-plane PR1 design (v3)
 
 Run by pipeline-health.js (PM2 hourly cron via the coordinator).
 Direct invocation:

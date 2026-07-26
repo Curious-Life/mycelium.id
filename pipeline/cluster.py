@@ -109,7 +109,7 @@ def scale_targets(n_points):
     below N≈600: at N=152 the floors forced 30 territories over 152 points
     (~5 pts each). The sqrt schedule bridges smoothly — N=152 → 17/4,
     N=600 → 34/9 (≈ the old floors), N=45k → 297/50 (≈ the old targets).
-    See docs/CLUSTERING-REBALANCE-DESIGN-2026-06-10.md.
+    See the clustering-rebalance design.
     """
     global TARGET_ATOMS, TARGET_TERRITORIES, TARGET_THEMES, TARGET_REALMS
     TARGET_ATOMS = max(300, min(2000, n_points // 15))
@@ -543,7 +543,7 @@ def _write_embeddings_to_d1(
             # blob-param protocol. It is read-safe (dual-read), and this path runs ONLY
             # during a full re-cluster (Generate), which is kill-switched on the live
             # vault. Flipping it (bridge blob support) is a PRECONDITION before Generate
-            # is re-enabled — see docs/DESIGN-sqlcipher-backfill-job-nomic-2026-06-19.md.
+            # is re-enabled — see the SQLCipher Nomic backfill-job design.
             envelope = encrypt_vector(
                 embeddings[idx].astype(np.float32), _NOMIC_SCOPE, master_key)
             # user_id required by the SQL guardian (USER_DATA_TABLES rule):
@@ -955,7 +955,7 @@ def centroids_to_groups(child_labels, embeddings, n_groups, embed_dim=None):
     Mass-weighting is the 2026-06-10 rebalance: the old unweighted variant let
     a 27-point child and a 1-point child weigh the same, which produced
     one-giant-parent output at every scale (89.6% of points in one realm at
-    N=15k in the lab). See docs/CLUSTERING-REBALANCE-DESIGN-2026-06-10.md.
+    N=15k in the lab). See the clustering-rebalance design.
 
     Returns: parent_labels array of same length as child_labels, where each point's
     parent = the group of its child cluster's centroid.
@@ -1098,7 +1098,7 @@ def run_clustering(embeddings: np.ndarray) -> dict:
     # vault), so at full scale it collapsed to k=2 with one realm holding 78% of
     # points. Themes & territories never collapse because they use a fixed √n target
     # via mass-weighted Ward (no silhouette) — realms now do the same. Lab on a 72k
-    # copy (docs/REALM-K-CLUSTERING-FIX-DESIGN-2026-06-17.md): TARGET_REALMS → 12
+    # copy (the realm-k clustering-fix design): TARGET_REALMS → 12
     # balanced realms, max-share 0.17 (vs 0.78), near-uniform entropy; deterministic
     # → run-to-run stable (no silhouette argmax churn). centroids_to_groups clamps
     # to the available theme count, so small vaults degrade gracefully.
@@ -1725,7 +1725,7 @@ def write_clustering_diagnostics(results, embeddings, user_id, version, dry_run=
     the single-row-per-user clustering_diagnostics table and surfaced on the
     mindscape (GET /mindscape `meta.partitionConfidence`). They are STORED, never
     used to select k (re-introducing index-driven k-selection re-introduces the
-    silhouette k=2 collapse — docs/CLUSTERING-ALGORITHM-DECISION-LOG-2026-06-19.md).
+    silhouette k=2 collapse — the clustering-algorithm decision log).
 
     Fail-soft and run LAST (after every result write): a diagnostic failure must
     never break a clustering run. Bounded for the live 16GB box via env knobs:

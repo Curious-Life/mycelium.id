@@ -51,7 +51,10 @@ export function createEmbedClient({
   if (typeof fetchImpl !== "function") {
     throw new EmbedServiceError("no fetch implementation available (Node >= 18 or pass opts.fetch)");
   }
-  const base = baseUrl.replace(/\/+$/, "");
+  // Trailing-slash strip WITHOUT a backtracking regex: /\/+$/ is O(n^2) on a
+  // leading-slash run (js/polynomial-redos). A bounded loop is linear + identical.
+  let base = String(baseUrl);
+  while (base.endsWith("/")) base = base.slice(0, -1);
 
   // `timeoutOverride` is a PER-CALL budget (embed/embedBatch opts.timeoutMs). The
   // constructor default stays the steady-state budget; the override exists for the

@@ -5,9 +5,9 @@ description: >-
   plan SAYS — a new/removed module, tool, endpoint, port, data-flow, schema
   migration, decision, or a shift in scope/sequence. Before declaring a unit
   done, update the three living docs so they never drift from reality: the PLAN
-  (docs/V1-BUILD-SPEC.md status + verification table), the ARCHITECTURE
-  (docs/ARCHITECTURE.md — the as-built system), and the build log
-  (docs/V1-BUILD-HANDOFF-*.md). Docs describe what is ACTUALLY built, with
+  (the V1 build spec status + verification table), the ARCHITECTURE
+  (the architecture doc — the as-built system), and the build log
+  (the V1 build-handoff journal). Docs describe what is ACTUALLY built, with
   file-path evidence, distinguishing built from planned — never aspirational.
   Pairs with handoff-discipline (session-end recap) and deploy-and-verify
   (verified state). Refuses "I'll document it later".
@@ -23,18 +23,18 @@ code.**
 
 ## The three living docs (keep all three current)
 
-1. **The plan — `docs/V1-BUILD-SPEC.md`.** The source of truth for *what we're
+1. **The plan — the V1 build spec.** The source of truth for *what we're
    building and in what order*. After a change: flip the affected component's
    status (planned → built → verified) in the verification table; if scope or
    sequence shifted, edit the plan to say so. The plan must always reflect the
    real next step, not a stale one.
-2. **The architecture — `docs/ARCHITECTURE.md`.** The as-built system: process
+2. **The architecture — the architecture doc.** The as-built system: process
    model, components (with file paths), data flow, storage, crypto/security
    model, transports, ports, verification. After a change: add/update the
    component, redraw the affected data-flow step, update counts (tools,
    migrations, suites, ports). This is *as-built*, not *as-designed* — if code
    and doc disagree, the doc is wrong.
-3. **The build log — `docs/V1-BUILD-HANDOFF-*.md`.** The running journal:
+3. **The build log — the V1 build-handoff journal.** The running journal:
    dated entries with what landed, commit hashes, new verify checks, decisions,
    and what's next. (handoff-discipline owns the session-end version of this.)
 

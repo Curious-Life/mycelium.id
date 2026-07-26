@@ -11,7 +11,7 @@
 -- What stays in `secrets` (SYSTEM key, see store.js):
 --   connector:<id>:tokens  → OAuth access/refresh tokens
 --   connector:<id>:oauth   → transient { oauthState, pkceVerifier } during connect
--- Tokens never belong in this table. See docs/DESIGN-connectors-tier2-2026-06-04.md §3.
+-- Tokens never belong in this table. See the tier-2 connectors design §3.
 --
 -- ENCRYPTED columns (ENCRYPTED_FIELDS.connectors): account_label, last_error,
 -- recent_runs. Everything else is plaintext by design (structural state the

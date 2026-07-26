@@ -1,7 +1,7 @@
 // tests/vault-disk-guard.test.js — fail-closed disk-space guard arithmetic + throw.
 // Deterministic without mocking fs: drive ok/not-ok via extreme floorGb/factor so the
 // real free space can't flip the result. @see src/db/disk-guard.js,
-// docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+// the vault-concurrency-fix design.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

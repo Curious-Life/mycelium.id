@@ -1,7 +1,7 @@
 // src/http/loopback.js — the single trust boundary for "did this request arrive
 // as a genuine local (owner) request, or through the relay / a reverse proxy?"
 //
-// SECURITY (fixes V-1 — see docs/DESIGN-portal-auth-relay-2026-06-05.md).
+// SECURITY (fixes V-1 — see the portal-auth relay design).
 // Control surfaces that mint/return the master key (/api/v1/account) or set the
 // operator password (/api/v1/remote), and the portal data gate, must tell a true
 // loopback caller apart from a request that Caddy/the relay reverse-proxied in.

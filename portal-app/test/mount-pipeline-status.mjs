@@ -198,7 +198,18 @@ writeFileSync(`${GEN}/generate-spy.js`, `import { calls } from './spies.js';\nex
 // pipeline + fmtSeconds are the REAL modules; goto/apiPost/start are the spies above so a click's
 // effect is observable. If the component ever imports a NEW $lib/$app specifier we don't rewire,
 // the unresolved-specifier guard below throws rather than silently importing an app path in jsdom.
+// D-067: the disclosure is now the shared <CollapsibleHeader> (the live-process-indicator
+// pattern), so the REAL child is compiled in alongside. It must NOT be stubbed — the whole claim
+// under test is that the element carrying `aria-expanded` is the HEADER ROW, and that claim lives
+// in this child's markup. A stub would make the hit-area assertions vacuous.
+writeFileSync(
+  `${GEN}/CollapsibleHeader.svelte.js`,
+  compile(readFileSync(resolve('src/lib/components/mindscape/CollapsibleHeader.svelte'), 'utf8'),
+    { generate: 'client', name: 'CollapsibleHeader', css: 'injected' }).js.code,
+);
+
 const rewired = compile(readFileSync(COMPONENT, 'utf8'), { generate: 'client', name: 'PipelineStatus', css: 'injected' }).js.code
+  .replace(/from\s+['"]\.\/CollapsibleHeader\.svelte['"]/g, `from './CollapsibleHeader.svelte.js'`)
   .replace(/from\s+['"]\$lib\/pipeline['"]/g, `from './pipeline.js'`)
   .replace(/from\s+['"]\$lib\/generate['"]/g, `from './generate-spy.js'`)
   .replace(/from\s+['"]\$lib\/api['"]/g, `from './api-spy.js'`)
@@ -341,6 +352,35 @@ try {
     stageCount: D.querySelectorAll('.pipe-stage').length,
     toggleVisible: (() => { const b = D.querySelector('button.pipe-toggle'); return b ? visible(b) : false; })(),
     toggleExisted,
+    // ⭐ D-067 HIT-AREA proof, read off the produced DOM. The defect was that the ONLY clickable
+    // thing was a lone ~10px caret glyph; the fix is the live-process-indicator pattern where the
+    // WHOLE header row carries the click. jsdom has no layout, so pixel size is unmeasurable —
+    // but the discriminator that actually regressed is structural and fully observable here:
+    //   toggleOwnsSummary — does the element carrying aria-expanded CONTAIN the status sentence?
+    //                       (a lone caret does not; a header row does)
+    //   toggleTextLen     — a caret-only control has textContent of length 1
+    //   toggleCaretHidden — the caret inside it is decorative (aria-hidden), never the target
+    //   toggleIsShared    — it is the shared CollapsibleHeader (data-collapsible-header), not a
+    //                       second, forked implementation
+    ...(() => {
+      const b = D.querySelector('[aria-expanded]');
+      if (!b) return { toggleOwnsSummary: false, toggleTextLen: 0, toggleCaretHidden: false, toggleIsShared: false, toggleTag: null };
+      const caret = b.querySelector('.ch-caret');
+      return {
+        toggleTag: b.tagName,
+        toggleOwnsSummary: !!b.querySelector('.pipe-overall-text'),
+        toggleTextLen: norm(b.textContent).length,
+        toggleCaretHidden: !!caret && caret.getAttribute('aria-hidden') === 'true',
+        toggleIsShared: b.getAttribute('data-collapsible-header') === '1',
+        // ⭐ The ACCESSIBLE NAME, not just the visible text. `aria-label` is name-from-author and
+        // REPLACES the contents — so a well-meaning "Show pipeline stages" label deletes "Your
+        // pipeline is up to date." from what AT announces, and from `.pipe`'s role="status" live
+        // text with it. That is a silent a11y regression which every text-based assertion above
+        // still passes, so the name is reported as its own fact.
+        toggleAriaLabel: b.getAttribute('aria-label'),
+        toggleAccName: b.getAttribute('aria-label') ?? norm(b.textContent),
+      };
+    })(),
     // ⭐ Unit-4 wiring proof: which remedy(ies) the click fired, and the in-flight disabled state.
     calls: [...spies.calls],
     clickedDisabledAfter,

@@ -1,5 +1,5 @@
 // src/agent/hooks.js — lifecycle hook bus for the native agent engine (Phase 5, G1).
-// Design: docs/HOOK-BUS-DESIGN-2026-06-18.md
+// Design: the hook-bus design
 //
 // Mycelium has no event-emitter/registry; its hook idiom is dependency-injected sinks
 // (onEgress/onUsage/onStall). This extends that idiom with a small typed `AgentHooks`

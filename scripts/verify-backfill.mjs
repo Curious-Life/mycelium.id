@@ -10,7 +10,7 @@
 //   - a corrupt envelope is LEFT in place + counted as failed (fail-closed per row)
 //   - the SYSTEM_KEY table (secrets) is refused
 //   - the file stays ciphertext at rest
-// @see docs/DESIGN-sqlcipher-backfill-engine-2026-06-19.md
+// @see the SQLCipher backfill-engine design
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';

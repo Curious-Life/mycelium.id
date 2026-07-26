@@ -1,4 +1,4 @@
-// verify:delete-cascade — THE delete contract (docs/DELETE-CASCADE-CONTRACT.md).
+// verify:delete-cascade — THE delete contract (the delete-cascade contract).
 //
 // The gate that existed before this one (verify:bulk-delete) had ZERO references to
 // territory / realm / theme / seen_points / note_links / document_versions — the

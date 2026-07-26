@@ -1,7 +1,7 @@
 // tests/vault-safe-copy.test.js — safeVaultCopy() produces a CONSISTENT, same-key
 // encrypted snapshot with no plaintext leak, and stays consistent under a live
 // concurrent writer (the regression: fs.copyFileSync tears → "database disk image is
-// malformed"). @see src/db/backup.js, docs/VAULT-CONCURRENCY-FIX-DESIGN-2026-07-01.md.
+// malformed"). @see src/db/backup.js, the vault-concurrency-fix design.
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
