@@ -6,6 +6,7 @@
 //   L2 connecting to the host's LAN IP:PORT is NOT reachable (refused/timeout) —
 //      which only holds if the server bound loopback, not 0.0.0.0
 // In-process child on a throwaway data dir; CI-portable; never logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import { rmSync, mkdirSync } from 'node:fs';

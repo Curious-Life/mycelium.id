@@ -7,6 +7,7 @@
 //   C4 ALL-SOURCE: a document-only territory gets a real name (sampler reached it)
 //   C5 territory_seen_points populated (the coverage ledger)
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';

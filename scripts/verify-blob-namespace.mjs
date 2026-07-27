@@ -14,6 +14,7 @@
 //   N6 db.attachments.update refuses local_path (insert-only) but allows other fields
 //
 // Boots a temp vault; no network; CWD-independent; never logs blob contents.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

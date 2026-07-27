@@ -10,6 +10,7 @@
 //
 // Drives the REAL scripts/stage-hf-models.sh on fixture caches. No mocks.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

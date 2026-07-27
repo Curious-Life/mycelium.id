@@ -10,6 +10,7 @@
 // that NO response body leaks a wrapped-DEK envelope ({v,s,iv,ct,dk}).
 // PASS/FAIL ledger; exit 0 only if all pass.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync } from 'node:fs';
 import Database from 'better-sqlite3';

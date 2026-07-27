@@ -7,15 +7,16 @@
 //   D4 describeEntity rejects junk (no name / empty essence) WITHOUT wiping the prior
 //   D5 describeEntity on a missing id is fail-closed (never creates)
 //   D6 registry + grants: both tools registered; getEntityContext ∈ SAFE_AUTONOMOUS,
-//      describeEntity ∈ AUTONOMY_TOOLS and NOT in the chat DOMAINS catalog
+//      describeEntity ∈ WRITE_AUTONOMOUS_TOOLS (a vault write) and NOT in the chat DOMAINS catalog
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { createNarrationDomain } from '../src/tools/narration.js';
-import { SAFE_AUTONOMOUS_TOOLS, AUTONOMY_TOOLS } from '../src/agent/autonomy-tools.js';
+import { SAFE_AUTONOMOUS_TOOLS, AUTONOMY_TOOLS, WRITE_AUTONOMOUS_TOOLS } from '../src/agent/autonomy-tools.js';
 import { DOMAINS } from '../src/agent/tool-domains.js';
 
 const DB = 'data/verify-describe-entity.db', KCV = 'data/verify-describe-entity-kcv.json';
@@ -96,10 +97,12 @@ rec('D5. describeEntity is fail-closed: missing id is rejected, no row created',
 // ── D6 — registry + autonomy/chat placement ──
 const names = new Set(tools.map((t) => t.name));
 const inChat = Object.values(DOMAINS || {}).some((d) => (d.tools || []).includes('describeEntity'));
-rec('D6. both tools registered; getEntityContext∈SAFE, describeEntity∈AUTONOMY and NOT in chat DOMAINS',
+// describeEntity moved AUTONOMY → WRITE (2026-07-27): it mutates the vault (setNameEssence +
+// upsertDescription), so it must sit behind the write-trust check like every other vault write.
+rec('D6. both tools registered; getEntityContext∈SAFE, describeEntity∈WRITE and NOT in chat DOMAINS',
   names.has('getEntityContext') && names.has('describeEntity')
-  && SAFE_AUTONOMOUS_TOOLS.has('getEntityContext') && AUTONOMY_TOOLS.has('describeEntity') && !inChat,
-  `registry=[${[...names].join(', ')}] safe=${SAFE_AUTONOMOUS_TOOLS.has('getEntityContext')} autonomy=${AUTONOMY_TOOLS.has('describeEntity')} inChat=${inChat}`);
+  && SAFE_AUTONOMOUS_TOOLS.has('getEntityContext') && WRITE_AUTONOMOUS_TOOLS.has('describeEntity') && !AUTONOMY_TOOLS.has('describeEntity') && !inChat,
+  `registry=[${[...names].join(', ')}] safe=${SAFE_AUTONOMOUS_TOOLS.has('getEntityContext')} write=${WRITE_AUTONOMOUS_TOOLS.has('describeEntity')} inChat=${inChat}`);
 
 close();
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }

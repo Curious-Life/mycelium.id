@@ -5,6 +5,7 @@
 // when the user has opted in (settings.agentCapture.enabled); non-agent ingest is
 // never gated; redactSecrets scrubs credentials before write; and the portal
 // GET/PUT /agent-capture route round-trips the preference.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';

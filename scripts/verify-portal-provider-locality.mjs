@@ -27,6 +27,7 @@
 // over a large adversarial + fuzzed corpus, driving the REAL router over REAL HTTP (a stub
 // db only supplies rows; publicRow itself is never re-implemented here). P4/P5 are source
 // asserts that the frontend cannot grow a parser back.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import express from 'express';
 import { readFileSync, readdirSync } from 'node:fs';

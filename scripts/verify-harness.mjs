@@ -9,6 +9,7 @@
 //   H5 tool handler throws → tool_error event + is_error fed back; loop continues
 //   H6 egress audited per model call (sha256 hash + length, NEVER the plaintext)
 //   H7 abort signal → loop stops early
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createAgentHarness } from '../src/agent/harness.js';
 import { webSearchEnabled } from '../src/agent/web-search.js';
 

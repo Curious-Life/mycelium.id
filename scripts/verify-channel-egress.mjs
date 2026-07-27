@@ -14,6 +14,7 @@
 //   - cross-channel detection sets crossChannel=1
 //   - ZERO-PLAINTEXT: no audit row ever carries the message body
 // Pure DI test — no network, no vault boot. PASS/FAIL ledger, exit 1 on any fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import http from 'node:http';
 import { createTelegramChokepoint } from '../packages/channel-daemon/chokepoint.js';

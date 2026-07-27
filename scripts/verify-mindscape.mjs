@@ -4,6 +4,7 @@
 // capability: each view routes to the reused handler and returns non-crash text;
 // territory/explore guide when no territory is given; unknown view is handled.
 // Seeds a clustered point so the Tier-2 gate is open. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

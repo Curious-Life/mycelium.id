@@ -4,6 +4,7 @@
 // getActiveMilestones / getTrajectoryHistory / getMetricSeries / getTopMovers
 // did (same db methods + formatters, reused verbatim). Seeds a clustered point
 // so the Tier-2 gate is open and the real folded logic runs. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

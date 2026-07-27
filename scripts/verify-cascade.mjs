@@ -7,6 +7,7 @@
 //   CC6 empty chain throws
 // Boots a temp vault with 3 providers; a mock fetch routes by host. No real
 // network; CWD-independent. Never logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

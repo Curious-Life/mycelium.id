@@ -5,6 +5,7 @@
 // ids prefix-match, and ANY unknown source self-places to kind 'other' (never a
 // crash, never a void). This is the contract the spectrum + river depend on.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { classifySource, canonicalSource, sourceForDocumentType, STREAM_KINDS } from '../src/streams/source-registry.js';
 
 const ledger = [];

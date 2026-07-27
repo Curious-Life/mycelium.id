@@ -82,6 +82,7 @@
 //   the exact failure mode of stacking narrowing flags on overlapping sets. Run during the
 //   #389 rebase reconciliation.
 // All restored afterwards; the suite returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

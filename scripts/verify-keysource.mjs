@@ -17,6 +17,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>; process.exit reflects pass/fail.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { resolveKeys, KeySourceError } from '../src/crypto/key-source.js';
 
 const ledger = [];

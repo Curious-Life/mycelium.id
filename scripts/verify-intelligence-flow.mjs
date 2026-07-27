@@ -26,6 +26,7 @@
 // MUTATION-TESTED: dropping the "for chat" scope from that label (naming the chat default as if
 //   it governed every job) → F25e RED.
 // All five restored; the suite returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 // The REAL fallback derivation (F25d asserts on the product, not on a fixture mirror of it).

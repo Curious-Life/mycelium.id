@@ -3,6 +3,7 @@
 // metric tables that lacked them, that applyMigrations is idempotent (re-runs
 // clean), and that cognitive_events' sensitive fields (magnitude/detail/headline)
 // are encrypted at rest while round-tripping through the adapter. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

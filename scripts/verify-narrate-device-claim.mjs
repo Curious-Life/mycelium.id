@@ -26,6 +26,7 @@
 //   D5  the tally is sticky + fail-closed (unknown claims nothing; off dominates)
 //   D6  ⭐ the client cannot author the claim (no provider echo from the body)
 //   D7  the UI reads the server fact — deny-by-default on the TOKEN, not on the FORM
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert';
 import fs, { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

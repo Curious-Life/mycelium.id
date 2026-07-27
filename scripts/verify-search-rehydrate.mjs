@@ -16,6 +16,7 @@
 //   R4 without a master key the loader fails soft to the prior behavior.
 //
 // Per CLAUDE.md §1: no vector bytes are ever logged — only counts.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

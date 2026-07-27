@@ -8,6 +8,7 @@
 //   T5 stream + tools → provider SSE piped through (tool_call deltas + [DONE])
 //   T6 no-tools request → normal completion (regression; not proxied)
 // Mounts the REAL gateway over a temp vault behind a requireAuth-shaped stub.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';

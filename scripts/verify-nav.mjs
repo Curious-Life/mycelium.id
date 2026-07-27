@@ -18,6 +18,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>. See the nav-IA lock.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";

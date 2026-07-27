@@ -21,6 +21,7 @@ import { getBlob } from './ingest/blob-store.js';
 import { uploadsRoot } from './paths.js';
 import { clampStored } from './enrich/text-limits.js';
 import { transcribeAttachment } from './enrich/transcribe-attachment.js';
+import { markMessagesForReembed } from './enrich/derived-text.js';
 import { getTranscriberHealth } from './transcribe/supervisor.js';
 import { serviceState, isRetryable, transcribeNotReadyReason } from './system/service-state.js';
 import { readCoverage } from './enrich/transcript-coverage.js';
@@ -231,6 +232,11 @@ export function portalAttachmentsRouter({ db, userId, getHealth = getTranscriber
       const description = typeof req.body?.description === 'string' ? clampStored(req.body.description) : null; // store the FULL description (was a silent 4000-char cut)
       if (description === null) return res.status(400).json({ error: 'description required' });
       await db.attachments.update(row.id, { description });
+      // A hand-written description is derived text arriving late in exactly the same
+      // sense a transcript is: the owning message was embedded from `content` alone
+      // ("File: photo.jpg" on the import path), so re-queue it for embedding or the
+      // owner's own words stay keyword-only. Never throws (src/enrich/derived-text.js).
+      await markMessagesForReembed(db, userId, row.id);
       res.json({ ok: true });
     } catch (err) {
       console.error('[portal-attachments] patch failed:', err.message);

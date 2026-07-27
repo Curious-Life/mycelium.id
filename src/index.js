@@ -70,6 +70,18 @@ export async function boot({
   // Keychain or 1Password); default 'env' preserves the USER_MASTER_KEY /
   // SYSTEM_KEY behavior. resolveKeys() fails closed (clear error, no key value).
   if (userHex === undefined || systemHex === undefined) {
+    // D-080 (aggravating factor): an INHERITED ENCRYPTION_MASTER_KEY must never
+    // silently outrank the configured source. crypto-local's getMasterKey() falls
+    // back to this env var and pins it as `source=env-deprecated` — so a dev key
+    // left in the environment becomes the key a production boot writes with. It
+    // is cleared here, BEFORE resolution, whenever the configured source is not
+    // 'env': line 99 below re-sets it from the key we actually resolved, so the
+    // env var can only ever mirror the authoritative source, never replace it.
+    const configuredSource = (process.env.MYCELIUM_KEY_SOURCE || 'env').trim().toLowerCase();
+    if (configuredSource !== 'env' && process.env.ENCRYPTION_MASTER_KEY) {
+      delete process.env.ENCRYPTION_MASTER_KEY;
+      console.error(`[mycelium] ignoring an inherited ENCRYPTION_MASTER_KEY — keys come from '${configuredSource}' (D-080)`);
+    }
     const resolved = resolveKeys();
     userHex = userHex ?? resolved.userHex;
     systemHex = systemHex ?? resolved.systemHex;
@@ -77,7 +89,9 @@ export async function boot({
   if (!userHex || !systemHex) {
     throw new Error('USER_MASTER_KEY and SYSTEM_KEY must be set (64-char hex each). Vault stays locked.');
   }
-  const { userKey, systemKey } = await unlock({ userHex, systemHex, kcvPath });
+  // dbPath is load-bearing here (D-080): it is what stops a fresh KCV being
+  // minted beside a vault this key has not been proven against.
+  const { userKey, systemKey } = await unlock({ userHex, systemHex, kcvPath, dbPath });
   // Bridge the vault key to the mind-files subsystem. mind-files encrypts via
   // crypto-local.getMasterKey(), which resolves USER_MASTER from tmpfs or the
   // ENCRYPTION_MASTER_KEY env fallback — NOT the unlock()-derived CryptoKey the

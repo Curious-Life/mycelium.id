@@ -30,7 +30,9 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
   const nowFn = typeof now === 'function' ? now : () => new Date();
   const iso = () => { const v = nowFn(); return v instanceof Date ? v.toISOString() : (typeof v === 'number' ? new Date(v).toISOString() : String(v)); };
 
-  // Mutable fields the agent / portal may patch (id + created_by are immutable).
+  // Mutable fields the agent / portal may patch (id, created_by and tool_provenance are
+  // immutable — tool_provenance decides the fire-time WRITE grant, so no patch path may RAISE
+  // it; updateTask below may only CLEAR it, which is a demotion).
   const TASK_PATCH = new Set(['name', 'prompt', 'schedule', 'scheduled_at', 'tz', 'status',
     'next_run', 'then_task_id', 'output_target', 'enabled_tools', 'essential', 'max_turns', 'notifications_enabled']);
 
@@ -46,8 +48,8 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
         `INSERT INTO scheduled_tasks
            (id, user_id, name, prompt, schedule, scheduled_at, tz, status, trigger_type, next_run,
             then_task_id, output_target, enabled_tools, essential, max_turns, notifications_enabled,
-            created_by, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            created_by, tool_provenance, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           id, userId, t.name ?? null, t.prompt ?? null, t.schedule ?? null, t.scheduledAt ?? null, t.tz ?? null,
           t.status || 'active', t.triggerType || 'schedule', t.nextRun ?? null,
@@ -55,7 +57,11 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
           t.enabledTools != null ? JSON.stringify(t.enabledTools) : null,
           t.essential ? 1 : 0, Number.isFinite(t.maxTurns) ? t.maxTurns : 8,
           t.notificationsEnabled === false ? 0 : 1,
-          t.createdBy || 'user', ts, ts,
+          // tool_provenance: WHICH CODE supplied enabled_tools, not who asked. Only a caller
+          // whose list comes from an in-repo constant may pass 'engine' (agent/seed-cycles.js);
+          // every model-reachable writer omits it and gets NULL = untrusted. Fail-closed: an
+          // unrecognised value is simply not in WRITE_TRUSTED_PROVENANCE.
+          t.createdBy || 'user', typeof t.toolProvenance === 'string' ? t.toolProvenance : null, ts, ts,
         ],
       );
       return id;
@@ -76,8 +82,23 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
       return rows(r).map(mapTask);
     },
 
-    /** Patch allowed fields (UPDATE path handles encryption + paren-safe literals). */
-    async updateTask(userId, id, fields = {}) {
+    /**
+     * Patch allowed fields (UPDATE path handles encryption + paren-safe literals).
+     *
+     * PROVENANCE DEMOTION (§4.3 of the trust-provenance design). A task's WRITE grant is trust in
+     * its INSTRUCTIONS, not in its row — so rewriting `prompt` CLEARS `tool_provenance` unless the
+     * patch comes from the authenticated-owner HTTP path. Without this, a trusted row is
+     * repurposable rather than mintable: `updateCycle` (tools/cycles.js) is a CHAT tool that finds
+     * a seeded cycle by created_by and patches its prompt, so an injection could rewrite the
+     * integration cycle's instructions and keep its editMindFile/writeMindFileWhole grant.
+     * The two callers are already distinct trust paths — tools/cycles.js is a model tool,
+     * portal-reflection.js sits behind portalOwnerGate, and a model turn has no tool that issues
+     * a portal HTTP request.
+     *
+     * Only ever a DEMOTION: `tool_provenance` is outside TASK_PATCH, so no caller can raise it.
+     * @param {{authorTrust?: 'model'|'owner'}} [opts]  'owner' ⇒ an authenticated owner request
+     */
+    async updateTask(userId, id, fields = {}, { authorTrust = 'model' } = {}) {
       const sets = []; const params = [];
       for (const [k, v] of Object.entries(fields)) {
         if (!TASK_PATCH.has(k)) continue;
@@ -86,10 +107,36 @@ export function createHarnessNamespace({ d1Query, d1QueryAdmin, randomUUID, now 
         else { sets.push(`${k} = ?`); params.push(v); }
       }
       if (!sets.length) return { changed: false };
+      // Fail-closed: anything that is not an explicit owner-authenticated edit demotes.
+      // `enabled_tools` demotes too — patching the tool list on a trusted row is the SAME
+      // escalation as patching its prompt, just through the other field. No caller does it today
+      // (it stays in TASK_PATCH pending its own caller audit), so this is the guard that keeps a
+      // future one from silently handing itself the write tier.
+      if ((Object.hasOwn(fields, 'prompt') || Object.hasOwn(fields, 'enabled_tools')) && authorTrust !== 'owner') sets.push('tool_provenance = NULL');
       sets.push("updated_at = datetime('now')");
       params.push(id, userId);
       await d1Query(`UPDATE scheduled_tasks SET ${sets.join(', ')} WHERE id = ? AND user_id = ?`, params);
       return { changed: true };
+    },
+
+    /**
+     * Stamp write-trust provenance on a REFLECTION-CYCLE row. Deliberately NOT a general patch:
+     * `tool_provenance` is outside TASK_PATCH precisely so nothing can raise it, and this is the
+     * one narrow, auditable exception. Guarded in SQL as well as by its callers — the
+     * `created_by = 'reflection-cycle'` predicate means an ordinary task row can never be promoted
+     * even if a future caller passes its id by mistake (defense in depth, §2).
+     *
+     * Two legitimate callers, both of which can justify the trust:
+     *   • agent/seed-cycles.js — the row's prompt still equals the in-repo CYCLES body.
+     *   • portal-reflection.js — an authenticated owner deliberately saved this cycle.
+     */
+    async setCycleProvenance(userId, id, provenance) {
+      const v = typeof provenance === 'string' ? provenance : null;
+      await d1Query(
+        `UPDATE scheduled_tasks SET tool_provenance = ?, updated_at = datetime('now')
+          WHERE id = ? AND user_id = ? AND created_by = 'reflection-cycle'`,
+        [v, id, userId],
+      );
     },
 
     async setTaskStatus(userId, id, status) {

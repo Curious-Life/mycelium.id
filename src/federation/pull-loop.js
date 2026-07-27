@@ -114,10 +114,17 @@ export function createFederationPullLoop({ db, userId, identity, selfDid, resolv
         fails += 1;
         skip = Math.min(2 ** fails, MAX_SKIP_CYCLES); // exponential skip while the relay is down
         logger(`[federation-pull] pull failed (skip ${skip} cycles): ${e.message}`);
-        return; // relay unreachable → don't attempt the send-retry outbox either (it would just fail)
+        // NOTE: we deliberately do NOT return here any more. This used to bail out on the
+        // reasoning that "the relay is unreachable, so a send would just fail too" — which
+        // stopped being true when federationDeliver gained the relay→direct fallback: an
+        // outbox send can now succeed over direct HTTP against a peer that is reachable even
+        // while the relay is down. Returning early re-created the exact "relay down ⇒
+        // everything down" assumption that took federation out for ~9 days, in the one place
+        // whose whole job is recovering from that outage. RECEIVE still backs off (above);
+        // only SEND continues.
       }
-      // The relay was reachable this cycle → flush the send-retry outbox (re-attempt DMs whose
-      // delivery failed earlier). Best-effort + bounded; a failure here never affects RECEIVE.
+      // Flush the send-retry outboxes (failed DMs + owed accept-acks). Best-effort + bounded;
+      // a failure here never affects RECEIVE.
       if (outbox) { try { await outbox(); } catch (e) { logger(`[federation-pull] outbox flush failed: ${e.message}`); } }
     } finally { ticking = false; }
   }

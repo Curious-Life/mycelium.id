@@ -3,6 +3,7 @@
 // The AGM belief-revision lifecycle + contradiction resolution, with the two reviewer rules:
 //   C — confidence moves ONLY on observation evidence; agent-inferred restatement weighs ZERO.
 //   A — promotion bar is config-default + decay_class-scaled; named retraction floor; boundary exempt.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import {
   decideOp, evidenceWeight, distinctDays, validFrom, shouldPromote, shouldRetire,
   updateConfidence, promoteLogodds, MIN_DISTINCT_DAYS,

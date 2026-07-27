@@ -21,6 +21,7 @@
 // never be revived — while finish() has no such guard and resurrects it at the end. Beats
 // must therefore come from a TIMER, not from onProgress, or every quiet importer dies
 // mid-run and comes back at completion.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import os from 'node:os';

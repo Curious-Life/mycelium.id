@@ -6,6 +6,7 @@
 // (incl. the §1 no-plaintext-in-audit canary). The K-section (K1–K8: harness + history
 // integration) is appended in Step 2 once the wiring lands.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import {
   fireBeforeToolCall, fireAfterToolCall, fireBeforeCompaction, fireAfterCompaction,
   createAgentHooks, autonomousToolGuard,

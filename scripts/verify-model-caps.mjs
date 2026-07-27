@@ -3,6 +3,7 @@
 // preference, fail-soft on old/down Ollama, boot cache, and the describe-image
 // integration that motivated it (gemma4-class vision models the legacy name
 // list can never match — 2026-06-10 finding).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { pickModelWithCapability, _resetModelCapsCache } from '../src/enrich/model-caps.js';
 import { pickVisionModel } from '../src/enrich/describe-image.js';
 

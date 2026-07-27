@@ -11,6 +11,7 @@
 // asserting the control surfaces 403 a proxied request and never leak a key.
 // Integration SKIPs cleanly if the server can't boot in this environment; the
 // unit layer still gates the verdict.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

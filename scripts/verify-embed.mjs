@@ -12,6 +12,7 @@
 //     Records PASS or SKIP(reason). Missing model/network/deps => SKIP.
 //
 // Final VERDICT reflects Tier-1 success (+ no hard Tier-2 failure).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";

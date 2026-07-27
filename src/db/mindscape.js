@@ -11,6 +11,11 @@
  * @property {(val: any) => any} parseJson
  */
 
+/** The point-fetch cap. EXPORTED because a caller that filters on point-presence must be able to
+ *  tell "this territory has no points" from "the bundle was truncated before reaching it" — a
+ *  hardcoded copy at the call site is exactly the two-definitions drift this repo keeps paying for. */
+export const POINTS_LIMIT = 100000;
+
 export function createMindscapeNamespace(deps) {
   if (!deps) throw new TypeError('createMindscapeNamespace: deps required');
   const { d1Query, parseJson } = deps;
@@ -18,7 +23,7 @@ export function createMindscapeNamespace(deps) {
   if (typeof parseJson !== 'function') throw new TypeError('createMindscapeNamespace: parseJson required');
 
   return {
-    async getPoints(userId, limit = 100000) {
+    async getPoints(userId, limit = POINTS_LIMIT) {
       const result = await d1Query(
         `SELECT id, source_id, atom_id, territory_id, theme_id, realm_id,
                 landscape_x, landscape_y, landscape_z, source_type, created_at

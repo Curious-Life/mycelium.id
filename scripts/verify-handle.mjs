@@ -3,6 +3,7 @@
 // subdomain / did:web label. Regression guard for the dash-vs-underscore divergence
 // bug: portal-compat.js used to accept underscores (`[a-z0-9_]{2,29}`) that can never
 // be a hostname, while identity.js (federation source of truth) requires dashes.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -166,7 +167,10 @@ ok(!/fetchImpl\([^)]*resolve-handle/.test(connsSrc.replace(/\n/g, ' ')) && !/wor
   // review. The from_handle VALUE on the wire is additionally backstopped behaviourally in
   // verify:federation-outbox (O8: the unsealed/announced from_handle === the federation handle,
   // never the userId) — two guards, neither able to mask the other.
-  const EXPECTED_FROM_HANDLE_SITES = 5; // request(:371) · accept(:569) · sendMessage(:892) · federationOutbox(:948) · announceShare(:1168)
+  // Bumped 5 → 6 on 2026-07-27: federationAcceptOutbox() is a NEW egress site (the accept-ack
+  // retry sweep, migration 0060). It carries `from_handle: requireSelfHandle()` like every other
+  // site, and its wire value is behaviourally backstopped by verify:federation-outbox O9b.
+  const EXPECTED_FROM_HANDLE_SITES = 6; // request · respondRemote · sendMessage · federationOutbox · federationAcceptOutbox · announceShare
   ok(guarded.length === EXPECTED_FROM_HANDLE_SITES,
     `EXACTLY ${EXPECTED_FROM_HANDLE_SITES} guarded from_handle egress sites (literal anchor — a concat/computed key that evades the balance check reds here)`,
     `${guarded.length}/${EXPECTED_FROM_HANDLE_SITES}`);
@@ -558,6 +562,34 @@ ok(!/\[a-z0-9_\]\{2,29\}/.test(profilesDb), 'db/profiles.js divergent underscore
   const r = await setHandle({ handle: 'mine', requireProvision: true, env: process.env, fetchImpl: cpStub('mine.mycelium.id') });
   ok(r.ok && r.claimed === true && cfg.readRemoteConfig().publicHost === 'mine.mycelium.id',
     'control-plane host-binding: the MATCHING host claims normally (no false reject)');
+
+  // MUTATION-TESTED (readiness rows, 2026-07-27): flipping the catch-branch to `ready: false`
+//   (fail-closed) → the FAILS-SOFT row REDs; deriving `handle` from the user_profiles mirror
+//   instead of currentHandle() → the derivation row REDs. Both restored → GO.
+  // ── R — FEDERATION READINESS (/portal/connections/readiness). The Connections UI gates its
+  //   composer on this, so it must (a) name the unmet precondition rather than silently allow a
+  //   doomed invite, and (b) fail SOFT — an advisory hint must never be able to lock the composer
+  //   on a working vault. The authority on the send path is still requireSelfHandle(), which
+  //   throws; this is only the friendly early warning.
+  //
+  //   The route reads currentHandle() (DERIVED from publicHost), never the user_profiles mirror
+  //   — the whole point of the handle unification. Asserting that here keeps a future edit from
+  //   quietly reintroducing the mirror as a source of truth on a NEW surface.
+  {
+    const compat = fs.readFileSync(new URL('../src/portal-compat.js', import.meta.url), 'utf8');
+    const route = compat.slice(compat.indexOf("router.get('/connections/readiness'"), compat.indexOf("router.get('/connections/count'"));
+    ok(route.length > 0, 'readiness: the /connections/readiness route exists');
+    ok(/currentHandle\(\)/.test(route) && !/user_profiles/.test(route),
+      'readiness: derives from currentHandle() (publicHost), NEVER the user_profiles mirror');
+    ok(/remoteMode === 'off'/.test(route),
+      "readiness: treats remoteMode 'off' as unreachable (the shell starts caddy/frpc on mode != 'off')");
+    ok(/catch\s*\{[\s\S]*ready:\s*true/.test(route),
+      'readiness: FAILS SOFT — a config-read throw reports ready:true, never locks a working composer');
+    // The reason must carry a settings pane so the UI can route the user to the fix, not just
+    // tell them something is wrong.
+    ok(/pane:\s*'connections'/.test(route),
+      'readiness: every reason names the settings pane that fixes it (actionable, not just a complaint)');
+  }
 
   for (const [k, v] of Object.entries(saved)) {
     const envKey = { rc: 'MYCELIUM_REMOTE_CONFIG', dd: 'MYCELIUM_DATA_DIR', auth: 'MYCELIUM_AUTH_DB', cp: 'MYCELIUM_CONTROL_PLANE', mk: 'ENCRYPTION_MASTER_KEY', email: 'MYCELIUM_USER_EMAIL' }[k];

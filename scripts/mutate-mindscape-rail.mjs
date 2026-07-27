@@ -169,7 +169,15 @@ const MUTATIONS = {
 
 function runGate() {
   try {
-    execFileSync('node', ['scripts/verify-mindscape-rail.mjs'], { encoding: 'utf8', timeout: 300000 });
+    // maxBuffer is explicit: Node's 1 MiB default makes execFileSync throw ENOBUFS once the
+    // gate's ledger grows past it, and the catch below would misread that as `green: false`
+    // — a FALSE RED that aborts the run at the "BASELINE IS NOT GREEN" check below for a
+    // reason that has nothing to do with the mutation under test.
+    execFileSync('node', ['scripts/verify-mindscape-rail.mjs'], {
+      encoding: 'utf8',
+      timeout: 300000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
     return { green: true, fails: [] };
   } catch (e) {
     const out = String(e.stdout || '') + String(e.stderr || '');

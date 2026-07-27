@@ -37,6 +37,7 @@
 // MUTATION-TESTED: Header reverted to call workspace.back() directly instead of goBackIntent()
 //   → B-gesture + D-wire RED (the gesture no longer routes through the unified back).
 // All restored afterwards; the suite returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

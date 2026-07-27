@@ -52,6 +52,10 @@ describe('federation integration (real boot + express + sqlite)', { skip: !HAVE_
     app.use(createFederationRouter({
       db: booted.db, userId: booted.userId, identity: booted.identity,
       getHost: () => 'alice.mycelium.id', getHandle: () => 'alice', fetch: fetchShim,
+      // safeFetch's SSRF guard resolves the peer host even when `fetch` is injected — the guard IS
+      // the security property and stays fully armed. `bob.mycelium.id` is fake, so without this the
+      // verdict depends on real public DNS. Same seam as tests/federation-sharing.test.js.
+      lookup: async () => [{ address: '93.184.216.34', family: 4 }],
     }));
     server = http.createServer(app);
     await new Promise((r) => server.listen(0, '127.0.0.1', r));

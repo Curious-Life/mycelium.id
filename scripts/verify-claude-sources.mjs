@@ -14,6 +14,7 @@
 //   S9 🔒 no token value ever appears in the returned status/error surface
 //
 // Pure + injected (execImpl/readImpl) — never touches a real Keychain or CLI.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { probeClaudeCredential, SOURCE_KINDS, DEFAULT_KEYCHAIN_SERVICE } from '../src/inference/claude-sources.js';
 import { claudeKeychainService } from '../src/inference/claude-config-dir.js';
 

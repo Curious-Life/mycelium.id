@@ -7,6 +7,7 @@
 //   4. no staleness — a re-encrypted (new) envelope decrypts fresh
 //   5. SYSTEM_KEY (secrets) envelopes round-trip (excluded from the cache by design)
 //   6. clearAllCaches() drops the plaintext cache
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import {
   importMasterKey, encrypt, encryptWithSystemKey, decrypt, isEncrypted,
   clearAllCaches, ScopeViolationError,

@@ -14,6 +14,7 @@
 //   M4  declining is a SUPPORTED CONFIG — the vault still works; labeler.status='no_model'
 //   M9  L2 enrichment is REPORTED — `taskModels.enrich` is its own setting, so "approved
 //       labeling, declined enrich" was dormant AND silent (no readiness member, no projection)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 

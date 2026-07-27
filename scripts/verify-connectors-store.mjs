@@ -18,6 +18,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 process.env.MYCELIUM_CONNECTORS_MOCK = '1';
 
 import crypto from 'node:crypto';

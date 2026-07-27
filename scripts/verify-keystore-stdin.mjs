@@ -15,6 +15,7 @@
 //      each in an isolated namespace, proving the stdin invocations work
 //      end-to-end without ever putting a key on argv.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';

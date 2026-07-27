@@ -2,6 +2,7 @@
 // OpenAI-compatible base_url widening + jurisdiction tagging (S3a). Boots a temp
 // vault, drives resolveInferenceConfig over real ai_providers rows, and unit-
 // checks jurisdictionForBaseUrl + cloudInfer's base_url routing (mock fetch).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

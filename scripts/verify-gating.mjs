@@ -3,6 +3,7 @@
 // "topology not ready" message (not honest-empty), the Tier-1 surface is
 // untouched, and seeding a clustered point flips readiness MID-SESSION (no
 // restart) so the same tool runs its real path. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

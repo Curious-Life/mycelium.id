@@ -13,6 +13,7 @@
 //   I6 traversal           ../evil.png asset rejected (unsafe_path), nothing stored
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, readFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';

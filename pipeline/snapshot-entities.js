@@ -21,6 +21,7 @@
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
+import { createStageResult } from './lib/stage-result.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -55,6 +56,15 @@ async function run() {
   try {
     if (!db.history?.recordSnapshot) { console.error('[snapshot] db.history unavailable — skipping'); return; }
 
+    // STAGE ACCOUNTING (Gap #3). ⚠️ NOTE THE EXIT CONTRACT: this stage is deliberately fail-soft
+    // (run-clustering.sh:165 "never blocks the cycle"; the bottom of this file exits 0 on any
+    // throw), and that is NOT changed here. finalize() records to pipeline_state BEFORE it
+    // throws, so a materially-incomplete snapshot becomes VISIBLE on the health surface while
+    // the cycle still continues. Visibility without a new failure mode.
+    const res = createStageResult('snapshot-entities', {
+      record: db.pipelineState?.recorderFor?.(USER_ID, 'snapshot-entities'),
+    });
+
     // Territories — live (non-dissolved) only; the SEC-3 scalars auto-decrypt on read.
     const territories = await q(
       `SELECT territory_id, energy, coherence, velocity, current_vitality, point_delta,
@@ -69,11 +79,19 @@ async function run() {
         messageCount: num(t.message_count, 0), growthState: t.growth_state || null,
         currentPhase: t.current_phase || null, isAnchored: t.is_anchored ? 1 : 0,
       };
-      if (DRY_RUN) { console.log(`[snapshot] (dry) territory ${t.territory_id}`); continue; }
-      const r = await db.history.recordSnapshot(USER_ID, {
-        entityKind: 'territory', entityId: t.territory_id, snapshotKind: 'dynamics', content: payload,
-      }).catch(() => ({ skipped: true }));
-      if (r.skipped) skipped += 1; else terr += 1;
+      if (DRY_RUN) { console.log(`[snapshot] (dry) territory ${t.territory_id}`); res.skip(); continue; }
+      // ⚠️ THE CATCH USED TO SAY `({ skipped: true })` — a thrown WRITE ERROR was counted as
+      // "unchanged", identical to the dedup-vs-latest no-op this stage does on purpose. That is
+      // Gap #3 in one line: a failure wearing a benign outcome's clothes, so a systematically
+      // broken recordSnapshot reported "(N unchanged)" and exited 0. Separated now: a throw is a
+      // FAILURE, `{skipped:true}` from a successful call is a genuine skip.
+      let r;
+      try {
+        r = await db.history.recordSnapshot(USER_ID, {
+          entityKind: 'territory', entityId: t.territory_id, snapshotKind: 'dynamics', content: payload,
+        });
+      } catch (err) { res.fail(err); skipped += 1; continue; }
+      if (r?.skipped) { res.skip(); skipped += 1; } else { res.ok(); terr += 1; }
     }
 
     // Realms — no SEC-3 scalars; the meaningful dynamics are the counts.
@@ -83,14 +101,18 @@ async function run() {
     ).catch(() => []);
     for (const rm of realmRows) {
       const payload = { messageCount: num(rm.message_count, 0), territoryCount: num(rm.territory_count, 0) };
-      if (DRY_RUN) { console.log(`[snapshot] (dry) realm ${rm.realm_id}`); continue; }
-      const r = await db.history.recordSnapshot(USER_ID, {
-        entityKind: 'realm', entityId: rm.realm_id, snapshotKind: 'dynamics', content: payload,
-      }).catch(() => ({ skipped: true }));
-      if (r.skipped) skipped += 1; else realms += 1;
+      if (DRY_RUN) { console.log(`[snapshot] (dry) realm ${rm.realm_id}`); res.skip(); continue; }
+      let r;   // see the territory loop: a throw is a FAILURE, not "unchanged"
+      try {
+        r = await db.history.recordSnapshot(USER_ID, {
+          entityKind: 'realm', entityId: rm.realm_id, snapshotKind: 'dynamics', content: payload,
+        });
+      } catch (err) { res.fail(err); skipped += 1; continue; }
+      if (r?.skipped) { res.skip(); skipped += 1; } else { res.ok(); realms += 1; }
     }
 
     console.log(`[snapshot] dynamics: +${terr} territory · +${realms} realm versions (${skipped} unchanged)`);
+    await res.finalize();   // records to pipeline_state; must run while the db is open
   } finally {
     close();
   }

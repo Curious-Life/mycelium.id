@@ -12,6 +12,7 @@
 //   W3 daemon.ensureUp() resolves {ok:false} → cycle does NOT throw; still fail-soft
 //   W4 NO daemon (tests / model-less host) → no throw; categories still run (back-compat)
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 // The cycle's embed stage (drainOnce) fail-closes without a master key. Seed a throwaway
 // one (read from process.env at call time) — the categories stage under test writes only

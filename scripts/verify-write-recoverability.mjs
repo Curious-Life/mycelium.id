@@ -10,6 +10,7 @@
 //   V5 identical re-write → NO new version (no churn)
 //   V6 facts: remember → overwrite captures prior value (encrypted) + restore round-trips
 //   V7 forgotten doc/fact → overwrite/re-assert does NOT version a husk
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import crypto from 'node:crypto';

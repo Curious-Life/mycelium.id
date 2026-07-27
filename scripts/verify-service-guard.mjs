@@ -23,6 +23,7 @@
 //   T*  transcribe: foreign holder → down + halted; nudge resumes
 //   Q*  qwen3-tts:  conflict → foreign → down + halted (fast ticks)
 // PASS/FAIL ledger; exit 0 only on full GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { EventEmitter } from 'node:events';
 import {
   looksLikePortConflict, inspectPortHolder, isOwnOrphan, reapOwnOrphanOnPort, createRestartGovernor,

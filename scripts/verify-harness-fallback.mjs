@@ -9,6 +9,7 @@
 //   F5 aborted (our cancel) → NO fallback, stop
 //   F6 all providers fail → bounded tries (≤ maxRetries + chain.length), lastErr surfaced
 //   F7 post-content error → NO fallback (can't swap mid-stream; keeps the streamed text)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 process.env.MYCELIUM_BACKOFF_BASE_MS = '1';   // shrink backoff so retries don't slow the gate
 process.env.MYCELIUM_BACKOFF_CAP_MS = '2';
 const { createAgentLoop } = await import('../src/agent/loop.js');

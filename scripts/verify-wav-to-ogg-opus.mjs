@@ -2,6 +2,7 @@
 // ROUND-TRIPPING through the existing inbound decoder (src/enrich/ogg-opus.js):
 // synth a known sine → wavToOggOpus → oggOpusToWav recovers a comparable signal.
 // This validates the hand-written Ogg muxer (pages/CRC/granulepos) empirically.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { wavToOggOpus } from '../packages/channel-daemon/tts/shared/wav-to-ogg-opus.js';
 import { oggOpusToWav } from '../src/enrich/ogg-opus.js';
 

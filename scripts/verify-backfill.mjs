@@ -11,6 +11,7 @@
 //   - the SYSTEM_KEY table (secrets) is refused
 //   - the file stays ciphertext at rest
 // @see the SQLCipher backfill-engine design
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';

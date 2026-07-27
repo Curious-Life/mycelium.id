@@ -4,6 +4,7 @@
 // query craft; sensitive messages are EXCLUDED from proactive recall but INCLUDED
 // in an explicit query; forgotten messages never resurface; BM25-only path works.
 // PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

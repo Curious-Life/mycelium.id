@@ -4,6 +4,7 @@
 // structured distribution fields (B: variability + context_primary are real columns, not prose),
 // valid-time asOf (incl. historical "what was true then"), per-change transaction-time + believedAsOf
 // (D: gapless, not periodic), retract (close+link, never delete), promote, and the CVP pending gate.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { createClaimsNamespace } from '../src/db/claims.js';

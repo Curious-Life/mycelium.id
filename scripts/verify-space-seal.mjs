@@ -5,6 +5,7 @@
 // for {space,gen,recipient} cannot be opened under a different context or by a
 // different recipient (E8). Plus tamper-evident + fresh ephemeral key per seal.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { createIdentity } from '../src/identity/identity.js';
 import { sealToX25519, openSealed } from '../src/crypto/space-seal.js';

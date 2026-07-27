@@ -1,4 +1,5 @@
 // Run: node pipeline/lib/gravity-core.test.mjs   (also: npm run verify:gravity)
+import '../../scripts/lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import {
 	ymToIndex, latestMonth, recencyScore, combineGravity, clamp
 } from './gravity-core.js';

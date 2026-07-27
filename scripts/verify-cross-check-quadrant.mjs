@@ -3,6 +3,7 @@
 // the four quadrants fire on the right (F, E) baseline-z pairs, the deadzone stays quiet, and
 // EITHER side low-confidence fails closed to 'insufficient' — NEVER a false basis-suspect chip.
 // Pure unit test of the single-sourced helper; no DB, no corpus.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { crossCheckQuadrant, QUADRANT_COPY } from '../src/metrics/cross-check-quadrant.js';
 
 const ledger = [];

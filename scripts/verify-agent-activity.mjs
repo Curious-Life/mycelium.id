@@ -7,6 +7,7 @@
 //   A4 list is content-free (no message text / fact value leaks)
 //   A5 inspect returns the run's conversation (owner's decrypted messages) + hash-only writes
 //   A6 unknown run id → 404
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import express from 'express';
 import Database from 'better-sqlite3';

@@ -124,7 +124,11 @@ export async function runNarrationWalk(deps, opts = {}) {
       // inferenceTask:'narrate' — honor the user's per-task model choice for narration
       // (Settings → Intelligence → Narration). Without it, run-turn defaults to 'harness'
       // and narration silently ignored the narrate assignment.
-      { userMessage, systemExtra, enabledTools: ['describeEntity', 'getEntityContext'], conversationId, history, localTools: true, inferenceTask: 'narrate' },
+      // writeTrusted: describeEntity is a vault write (it sets name/essence + the chronicle), and
+      // the grant now requires an explicit answer. TRUE here is legitimate and narrow: the
+      // enabledTools above are an in-repo literal, not model output, so nothing the model says
+      // can widen this turn's capability.
+      { userMessage, systemExtra, enabledTools: ['describeEntity', 'getEntityContext'], conversationId, history, localTools: true, inferenceTask: 'narrate', writeTrusted: true },
     );
     // Did the agent actually write, or reflect-and-leave? (toolsUsed from the turn.)
     const wrote = Array.isArray(res?.toolsUsed) && res.toolsUsed.includes('describeEntity');

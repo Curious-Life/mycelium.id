@@ -6,6 +6,7 @@
 //   T4 mis-keyed vault → vault-data path 503 error 'vault_locked' reason 'key_mismatch'
 //      with an ACTIONABLE message (enter recovery key / restore from backup)
 // Isolated: ephemeral data dir + Keychain names + OS-assigned port.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

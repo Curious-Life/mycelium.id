@@ -17,6 +17,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>; process.exit reflects pass/fail.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createInferenceRouter, LOCAL_TASKS, CLOUD_TASKS } from "../src/inference/router.js";
 import { localInfer } from "../src/inference/local.js";
 import { InferenceError } from "../src/inference/errors.js";

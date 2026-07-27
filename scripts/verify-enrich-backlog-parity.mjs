@@ -22,6 +22,7 @@
 // Runs the REAL SQL against a REAL better-sqlite3 vault built from the REAL migrations.
 // No mocks: the bug WAS the SQL, so a mock would have proved nothing and caught nothing.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import assert from 'node:assert/strict';
 import { applyMigrations } from '../src/db/migrate.js';

@@ -11,6 +11,7 @@
 // PASS/FAIL ledger + VERDICT + EXIT=<code>. Skips clean (GO, 0 checks) if the
 // portal hasn't been built, so a fresh clone without the build still goes green.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from "node:crypto";
 import { rmSync, mkdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";

@@ -38,6 +38,7 @@
 //
 // Run: node scripts/verify-provider-import.mjs
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';

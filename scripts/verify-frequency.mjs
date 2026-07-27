@@ -6,6 +6,7 @@
 // columns (granularity enum, window_end, language) stay plaintext, AND that a
 // read through the JS adapter auto-decrypts + coerces them to numbers. Runs the
 // REAL Python stage via spawnSync(.venv python3). PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

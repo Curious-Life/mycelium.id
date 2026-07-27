@@ -14,6 +14,7 @@
 //   B11 unlinkBlobIfUnreferenced: keeps referenced, removes unreferenced, no-ops missing
 //
 // Boots a temp vault; no network; never logs content.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';

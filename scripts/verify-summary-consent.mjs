@@ -21,6 +21,7 @@
 //   S4  END-TO-END: POST /contexts/:id/summary with no approved model → 503 honest error,
 //       NO Ollama call, NO summary persisted
 //   S5  END-TO-END: after approving a model, the endpoint runs it (never llama3.1) + persists
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 

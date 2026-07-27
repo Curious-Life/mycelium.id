@@ -200,6 +200,7 @@
 // settle()` first, which is what let M3 observe the 602-document / 4-media leak.
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';

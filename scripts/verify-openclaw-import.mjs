@@ -8,6 +8,7 @@
 //   O6 .trajectory.jsonl telemetry mirror is NOT imported (only canonical .jsonl)
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

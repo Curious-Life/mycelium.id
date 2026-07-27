@@ -28,6 +28,7 @@
  */
 
 import { getDb } from '../src/db/index.js';
+import { createStageResult } from './lib/stage-result.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
 import * as cryptoLocal from '../src/crypto/crypto-local.js';
@@ -95,6 +96,16 @@ async function run() {
   try {
     console.log(`[sync] Syncing messages → clustering_points for user=${USER_ID}${DRY_RUN ? ' (dry-run)' : ''}`);
 
+    // STAGE ACCOUNTING (Gap #3, pipeline/lib/stage-result.js). Step 1 was one of four stages that
+    // wrapped every write in try/catch, logged, continued, and exited 0 — so a SYSTEMATIC failure
+    // (wrong key, schema drift, constraint) wrote nothing, printed "Done: 0 inserted", and the
+    // 16-step run went on to cluster an empty table. That is the exact shape the end-to-end gate
+    // caught one level up (W1: 19/20 stages "OK" over a pipeline that processed nothing). This
+    // closes it INSIDE the stage, where the counts actually are.
+    const res = createStageResult('sync-clustering-points', {
+      record: db.pipelineState?.recorderFor?.(USER_ID, 'sync-clustering-points'),
+    });
+
     // Messages with a 768D embedding that aren't already in clustering_points.
     const rows = await query(
       `SELECT m.id AS source_id, m.created_at, m.embedding_768
@@ -129,9 +140,18 @@ async function run() {
     let skipped = 0;
     for (const r of rows) {
       const vec = await decode256(r.embedding_768, masterKey);
-      if (!vec) { skipped++; continue; }
+      if (!vec) {
+        // ⚠️ fail(), NOT skip(). The message HAS an embedding_768 — the SELECT required it — so
+        // this is a vector we should have been able to read and could not. skip() means
+        // "legitimately nothing to write", and calling it that here would let a wrong-key or
+        // corrupt-column run report a clean exit over a vault it could not read at all. The 10%
+        // failRatio keeps a handful of legacy rows tolerable; a SYSTEMATIC decode failure writes
+        // zero rows on non-empty input and correctly aborts the run.
+        res.fail(new Error('embedding_768 did not decode to a 256d vector'));
+        skipped++; continue;
+      }
 
-      if (DRY_RUN) { inserted++; continue; }
+      if (DRY_RUN) { res.skip(); inserted++; continue; }
 
       const id = `${USER_ID}:cp:message:${r.source_id}`;
       try {
@@ -152,8 +172,10 @@ async function run() {
              updated_at = datetime('now')`,
           [id, USER_ID, r.source_id, raw, r.created_at],
         );
+        res.ok();
         inserted++;
       } catch (err) {
+        res.fail(err);
         console.error(`[sync] insert failed for ${r.source_id}:`, err.message);
         skipped++;
       }
@@ -180,7 +202,7 @@ async function run() {
       );
       for (const r of stale) {
         const vec = await decode256(r.e, masterKey);
-        if (!vec) { skipped++; continue; }
+        if (!vec) { res.fail(new Error('embedding_768 did not decode to a 256d vector')); skipped++; continue; }
         try {
           const raw = encodeVectorRaw(vec);   // Stage A: raw LE-f32 BLOB (see insert loop)
           await query(
@@ -189,8 +211,10 @@ async function run() {
               WHERE id = ?`,
             [raw, r.cp_id],
           );
+          res.ok();
           backfilled++;
         } catch (err) {
+          res.fail(err);
           console.error(`[sync] backfill failed for ${r.cp_id}:`, err.message);
           skipped++;
         }
@@ -198,6 +222,9 @@ async function run() {
     }
 
     console.log(`[sync] Done: ${inserted} inserted, ${backfilled} backfilled, ${skipped} skipped (no/undecryptable embedding)`);
+    // finalize() writes pipeline_state and THROWS when the stage is materially incomplete. It
+    // must run while the db is still open — hence here, not in the finally below.
+    await res.finalize();
   } finally {
     close();
   }

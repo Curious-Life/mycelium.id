@@ -28,6 +28,7 @@
 //       ScanForData's onImported wiring in ImportView (its default is a NO-OP), the connector
 //       "Sync now" success path (created>0, with a created=0 CONTROL), and ChatFloat's upload
 //       path. Keep-alive panes never remount, so a missed emission is permanent.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 

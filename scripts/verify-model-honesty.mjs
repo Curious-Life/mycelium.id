@@ -13,6 +13,7 @@
 //   H2 ⭐ a transient fallback stamps the reply with the model that ACTUALLY answered
 //   H3 no fallback → the primary is stamped (unchanged behavior)
 //   H4 ⭐ an AUTH failure never reaches the reply tool at all (no answer, no false label)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 process.env.MYCELIUM_BACKOFF_BASE_MS = '1';   // shrink backoff so retries don't slow the gate
 process.env.MYCELIUM_BACKOFF_CAP_MS = '2';
 const { createAgentLoop } = await import('../src/agent/loop.js');

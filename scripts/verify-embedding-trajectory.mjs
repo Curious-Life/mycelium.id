@@ -4,6 +4,7 @@
 // (no common direction) is flagged low_confidence by the R̄·√n floor (not by count); the two
 // scalars are ENCRYPTED at rest (and the adapter decrypts them); and a re-run is idempotent
 // (era-skip). Network-free (real 768-D envelopes; no model). PASS/FAIL ledger; exit 0 iff GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

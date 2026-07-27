@@ -7,7 +7,6 @@
 	import { generate } from '$lib/generate';
 	// D-004: embedded-vs-mapped + the rebuild control. Mounted on the REALM LIST — the surface a
 	// user with a built map actually looks at, and the one where "369 of 2510" was invisible.
-	import MapFreshness from './MapFreshness.svelte';
 	// QA9 — the ONE collapse-header pattern, shared with PipelineStatus and taken from the live
 	// process indicator (StatusPopover's vault-pill). Not a second implementation.
 	import CollapsibleHeader from './CollapsibleHeader.svelte';
@@ -728,11 +727,16 @@
 				{/if}
 			{/if}
 
-			<!-- ⚠️ MOUNTED UNCONDITIONALLY at the realm level, deliberately (D-004). It is NOT
-			     nested under the naming card's cardState, and NOT under `sortedRealms.length > 0`:
-			     the whole defect was a remedy that existed only behind a condition the user could
-			     not reach. This component owns its own honest empty/unknown states. -->
-			<MapFreshness />
+			<!-- P8b — <MapFreshness/> STOOD HERE AND IS GONE (operator, QA9: "i want us to not have
+			     that section and to instead rebuild it automatically when there are new points").
+			     Its three jobs did not disappear with it, they MOVED to the stage that owns them:
+			       · the counts   → the `cluster` row of <PipelineStatus/>, which now names its unit
+			                        ("1,014 points") instead of fusing two tables into one sentence
+			       · the rebuild  → the ↻ control co-located on that same row, on every built map
+			       · the decision → MindscapeView's edge-triggered auto-rebuild
+			     ⚠️ D-004's property survives the move: the remedy is still mounted unconditionally
+			     on a built map, never behind a condition the user cannot reach. That was the whole
+			     defect, and deleting the card must not quietly re-create it. -->
 
 			{#if totalMessages > 0}
 				<div class="nav-footer">
@@ -923,12 +927,25 @@
 							· since {currentTerritory.firstActive}
 						{/if}
 					</p>
+					<!-- P8c — "Describe more" was one of THREE surfaces using the same verb for three
+					     different jobs, and the label alone could not tell them apart:
+					       · the pipeline's `Describe` stage — runs BOTH halves over the WHOLE map
+					       · "Name your areas"  — describe-clusters, writes NAMES, whole map, gap-fill
+					       · this button        — describe-chronicles, writes PROSE for ONE area and
+					                              deliberately PRESERVES its name
+					     The distinguishing facts are WHAT IT WRITES and OVER WHAT SCOPE, so the label
+					     now carries both, and the sub-line states the preserve guarantee the way the
+					     naming card states its own ("Keeps every name you already have"). The old
+					     `title` attribute already said the right thing — but a tooltip is not an
+					     answer to "what is the difference between these two buttons", because you
+					     cannot hover two things at once. -->
 					{#if currentTerritory.exploredPercent < 100 && msState.selectedTerritoryId != null}
 						<button class="describe-more-btn" disabled={describingTerritoryId === msState.selectedTerritoryId}
 							onclick={() => describeTerritory(msState.selectedTerritoryId!)}
-							title="Deepen this area's description by folding in content not yet described">
-							{describingTerritoryId === msState.selectedTerritoryId ? 'Describing…' : 'Describe more'}
+							title="Writes more about this one area, folding in content not yet described. Keeps its name.">
+							{describingTerritoryId === msState.selectedTerritoryId ? 'Adding detail…' : 'Add more detail'}
 						</button>
+						<p class="describe-more-note">Writes more about this area. Keeps its name.</p>
 					{/if}
 					{#if currentTerritory.temporalSaliency != null}
 						<div class="saliency-row">
@@ -2129,4 +2146,6 @@
 		background: rgba(125,182,217,0.12); color: #7DB6D9; cursor: pointer;
 	}
 	.describe-more-btn:disabled { opacity: 0.5; cursor: default; }
+	/* P8c: the preserve guarantee, stated the way the naming card states its own. */
+	.describe-more-note { margin: 0.25rem 0 0; font-size: 0.68rem; line-height: 1.35; color: var(--color-text-tertiary); }
 </style>

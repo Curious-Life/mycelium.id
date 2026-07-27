@@ -7,6 +7,7 @@
 //   R5 re-POST is safe (single-flight/idempotent — never 500s)
 //
 // Boots a temp vault, mounts the real router on an ephemeral port, drives it over HTTP.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import express from 'express';
 import { rmSync, mkdirSync } from 'node:fs';

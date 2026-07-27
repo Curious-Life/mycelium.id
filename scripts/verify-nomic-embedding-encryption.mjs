@@ -9,6 +9,7 @@
 // The cross-language checks run the REAL production decoder (cluster.py
 // _decode_nomic_embedding) and the REAL Python writer (crypto_local.encrypt_vector)
 // via the pipeline venv — not a re-implementation. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

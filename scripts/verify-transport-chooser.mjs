@@ -7,6 +7,7 @@
 //   C6  planDelivery: a resolver throws → 'direct' (fail-closed)
 //   C7  resolveRelayInbox fail-closed: non-https endpoint → null; doc.id mismatch → null
 //   C8  resolveRelayInbox SSRF: a private-host did → null (never even fetched)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { buildDidDocument, resolveRelayInbox } from '../src/federation/did.js';
 import { planDelivery } from '../src/federation/transport-chooser.js';
 

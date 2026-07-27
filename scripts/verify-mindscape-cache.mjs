@@ -8,6 +8,7 @@
 //      stale data (generation guard) → next read recomputes
 //   C6 wiring: handler reads via getMindscapeCached; bust fires on job
 //      completion + chronicle + all three clustering_points delete paths
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { getMindscapeCached, bustMindscape } from '../src/mindscape-cache.js';
 

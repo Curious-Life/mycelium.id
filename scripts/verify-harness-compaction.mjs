@@ -10,6 +10,7 @@
 //   K8 prune-only: pruning alone gets under budget → no summarize call
 //   K9 sanitizeOrphans drops a leading orphan tool message
 //   K10 summary prompt is structured + temporally anchored
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import {
   estimateMessagesTokens, shouldCompact, pruneToolResults, partition,
   sanitizeOrphans, buildSummaryUser, summaryCap, compact,

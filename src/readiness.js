@@ -73,6 +73,18 @@ import { onMindscapePointsBust } from './mindscape-cache.js';
 // These are PURE functions of the drainer's in-memory status + a remaining count; they touch no
 // DB. portal-activity imports drainer/supervisor but NOT readiness, so there is no cycle.
 import { embedEta, categorizeEta } from './portal-activity.js';
+// P8b — the map's FRESHNESS rides the `cluster` stage that owns it, instead of a second card
+// with its own fetch. `evaluateFreshness` stays the ONE owner of the predicate (D-004): this is
+// a new READER of it, not a second copy. Both imports are free here:
+//   • mindscape-freshness.js is pure (no imports at all) — no cycle, no I/O.
+//   • readGenerateStats() is a sync read of one tiny JSON file in the data dir, already done
+//     per-request by portal-mindscape.js's map-status route.
+// ⚠️ And crucially NO NEW QUERY: `points` below is db.mindscape.getNoiseStats().total, whose
+// predicate (`clustering_points WHERE user_id = ? AND landscape_x IS NOT NULL`, db/mindscape.js:39)
+// is CHARACTER-FOR-CHARACTER the one countMappedPoints uses. The two counts were always the same
+// number measured twice; the pipeline slice's zero-marginal-scan promise is unaffected.
+import { evaluateFreshness } from './mindscape-freshness.js';
+import { readGenerateStats } from './generate-stats.js';
 
 /** Generate needs embedded vectors; below this the pipeline dies cryptically. */
 const MIN_EMBEDDED = 5;
@@ -784,7 +796,24 @@ export function createReadiness({ db, userId, embedderHealth, labelerHealth, enr
       // cluster — the map. A map that EXISTS is done. Below the floor the user is stranded unless
       // told: blocked, too_few_embedded, with a Generate action (§"Filling the gaps" #2). Above the
       // floor with no map yet ⇒ needs_generate (the debounce made visible), never silence.
-      if (points > 0) stages.push({ key: 'cluster', state: 'done', count: { done: points } });
+      // P8b: a BUILT map also reports whether it has fallen behind, so the `cluster` row can say
+      // "1,014 points · 2,141 new to place" and carry the Rebuild verb. This retires the separate
+      // MapFreshness card (operator, QA9: "i want us to not have that section and to instead
+      // rebuild it automatically when there are new points") under the sprint's layout rule — a
+      // section is a STAGE, its controls are that stage's verbs, its status is that stage's outcome.
+      //
+      // ⚠️ `stale` here is what ARMS the client's automatic rebuild, so it must mean exactly what
+      // POST /mycelium/generate's own debounce means by it — same evaluateFreshness(), same inputs,
+      // same self-zeroing baseline. If the two ever diverged the client would fire a rebuild the
+      // route then skips, forever. That is why the predicate is imported rather than re-expressed.
+      if (points > 0) {
+        const fresh = evaluateFreshness({
+          embedded,
+          mapped: points,
+          builtAtEmbedded: readGenerateStats()?.lastEmbedded ?? null,
+        });
+        stages.push({ key: 'cluster', state: 'done', count: { done: points }, stale: fresh.stale, drift: fresh.drift });
+      }
       // The map read FAILED (not a real zero) ⇒ we do NOT know whether a map exists. Hold at pending
       // with an honest reason — NEVER `blocked needs_generate` (that would pop a spurious Generate over
       // a built vault and kick a redundant re-cluster). A pending stage carries no action, so no nag.

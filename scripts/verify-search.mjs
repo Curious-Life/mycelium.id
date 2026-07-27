@@ -12,6 +12,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>; process.exit reflects pass/fail.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
@@ -135,12 +136,18 @@ async function unitPipeline() {
 // runs: with the latch it must be EXACTLY ONE no matter how many concurrent
 // callers race in. A deliberately slow rawQuery guarantees the callers overlap.
 async function singleFlight() {
+  // Matches the CORPUS read (any FROM messages without an `id IN (…)` list) rather than one
+  // literal SQL string: the corpus query now LEFT JOINs attachments to index a voice note's
+  // transcript with its message, and a fixture pinned to the old text silently stopped
+  // matching — the build counter read 0 and four single-flight checks went RED for a reason
+  // that had nothing to do with the latch they guard. The `id IN` exclusion is what still
+  // separates the build read from hydrateMessages'.
   const slowMessagesDb = (counter) => ({
     rawQuery: async (sql) => {
-      if (/FROM messages WHERE user_id = \? AND forgotten_at IS NULL/.test(sql)) {
+      if (/FROM messages\b/.test(sql) && !/\bid IN \(/.test(sql)) {
         counter.n++;
         await new Promise((r) => setTimeout(r, 40)); // simulate the long cold build
-        return { results: [{ id: 'm-1', text: 'forest mycelium roots', created_at: '2026-05-01T10:00:00Z' }] };
+        return { results: [{ id: 'm-1', content: 'forest mycelium roots', created_at: '2026-05-01T10:00:00Z' }] };
       }
       return { results: [] }; // other sources + hydration → empty
     },

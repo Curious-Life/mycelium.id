@@ -6,6 +6,7 @@
 // per-item LWW lamport, sealed-CEK grant store/fetch, owner-authority origin row, and
 // per-space isolation. The DB layer is content-agnostic — payload/blob are opaque.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

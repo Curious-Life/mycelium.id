@@ -8,6 +8,7 @@
 //   M5 REST: PUT/GET /providers/task-models round-trips; bad task→400; bad provider→404
 //   M6 clear (providerId:null) → narrate falls back to the active provider
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import express from 'express';

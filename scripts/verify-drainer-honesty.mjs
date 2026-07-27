@@ -11,6 +11,7 @@
 //
 // Doubles mirror scripts/verify-enrich-ollama-wake.mjs so both gates exercise the same
 // injected surface (embed / classify / daemon / ollama).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 

@@ -1,0 +1,39 @@
+-- 0058_scheduled_tasks_tool_provenance.sql — trust provenance for a scheduled task's
+-- tool grant. See the task-trust-provenance design.
+--
+-- WHY. `enabled_tools` becomes a TOOL GRANT at fire time with no human present
+-- (agent/scheduler.js -> agent/run-turn.js -> agent/autonomy-tools.js). Until now that grant
+-- honoured the vault-WRITE tier on NAME MEMBERSHIP ALONE, so any writer that could get a row
+-- into this table could hand itself write tools — including `schedule_task`, which is reachable
+-- from an owner DM, an external MCP client, and POST /api/v1/schedule_task. That let the
+-- schedule path LAUNDER a capability its caller was denied: an owner DM may not call
+-- writeMindFileWhole (agent/resolve-grant.js trims it out on purpose) but could schedule a task
+-- that receives it.
+--
+--  • tool_provenance: WHICH CODE wrote this row's enabled_tools — NOT "who asked". The only
+--    value that grants the WRITE tier is 'engine' (agent/seed-cycles.js, whose tool list comes
+--    from the in-repo CYCLES constant). NULL ⇒ untrusted ⇒ read-safe + non-write tools only.
+--    Deliberately absent from TASK_PATCH (db/harness.js) so no patch path can ever RAISE it;
+--    a prompt rewrite CLEARS it, because capability trust follows the instructions, not the row.
+--
+-- FAIL-CLOSED BY CONSTRUCTION: every pre-existing row defaults to NULL, i.e. untrusted.
+ALTER TABLE scheduled_tasks ADD COLUMN tool_provenance TEXT DEFAULT NULL;
+
+-- NO SQL BACKFILL HERE — deliberately. Legacy cycle rows are healed in CODE by
+-- agent/seed-cycles.js instead. Two reasons, both found by adversarial review and one of them
+-- REPRODUCED against this file's earlier draft:
+--
+--  1. A backfill in this file would NOT be one-shot. db/migrate.js re-execs the non-ALTER
+--     statements of a migration whenever it self-heals (migrate.js: `heal = missing.length > 0`)
+--     or when the file's hash changes. A `WHERE tool_provenance IS NULL` guard reads as
+--     idempotent but is in fact a RE-PROMOTION condition: a cycle demoted because a model
+--     rewrote its prompt matches that predicate exactly, so the next heal would hand the write
+--     tier back to attacker-authored instructions. Demonstrated: prompt→'ATTACKER TEXT',
+--     provenance→NULL, then a heal restored 'engine'.
+--  2. `created_by = 'reflection-cycle'` alone is the WRONG predicate for trust. This design binds
+--     capability to the INSTRUCTIONS, not to the row, and a cycle's prompt has been editable by a
+--     chat tool (tools/cycles.js updateCycle) since long before this column existed — so a vault
+--     whose cycle was already repurposed would have that prompt retroactively blessed on upgrade.
+--
+-- The seeder can decide correctly because it holds the in-repo CYCLES constant and can compare a
+-- row's prompt against the code-authored body. SQL cannot.

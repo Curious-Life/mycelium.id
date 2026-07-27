@@ -16,7 +16,7 @@
 // This keeps the chat exclusion invariant intact (these tools stay OUT of DOMAINS) while
 // giving the autonomous surfaces a precise, opt-in capability set.
 
-import { filterSelfArming } from './turn-taking.js';
+import { filterSelfArming, SELF_ARMING_TOOLS } from './turn-taking.js';
 
 // Read-only tools an autonomous turn may always use — no writes, no egress.
 //
@@ -34,8 +34,12 @@ export const SAFE_AUTONOMOUS_TOOLS = new Set([
 // SAME names kept out of the chat DOMAINS catalog (tool-domains.js §9-13): an autonomous
 // turn can schedule follow-ups and reply to a channel; interactive chat can do neither.
 // describeEntity (narration write) joins them: the narration walk opts it in; chat cannot.
+// NB: describeEntity used to live here. It is a vault WRITE — tools/narration.js calls
+// db.mindscape.setNameEssence + territoryDocs.upsertDescription — so leaving it in this tier
+// meant a mutation that skipped the write-trust check entirely. Moved to WRITE_AUTONOMOUS_TOOLS;
+// its only consumer (the narration walk) declares its own trust.
 export const AUTONOMY_TOOLS = new Set([
-  'schedule_task', 'list_my_schedules', 'cancel_task', 'reply', 'describeEntity',
+  'schedule_task', 'list_my_schedules', 'cancel_task', 'reply',
 ]);
 
 // Vault-WRITE tools — also gated, also opt-in-by-name. The boundary, stated as it ACTUALLY is:
@@ -54,7 +58,36 @@ export const AUTONOMY_TOOLS = new Set([
 export const WRITE_AUTONOMOUS_TOOLS = new Set([
   'remember', 'link', 'mark', 'saveDocument', 'updateDocument', 'captureMessage',
   'editMindFile', 'writeMindFileWhole', 'updateInternalModel', 'createTask', 'flagForDiscussion',
+  'describeEntity',
 ]);
+
+// ── Trust provenance for a SCHEDULED task's write grant ──────────────────────────────────────
+// the task-trust-provenance design.
+//
+// Provenance answers "WHICH CODE wrote this row's enabled_tools", NOT "who asked". That framing
+// is forced by the surface: a tool handler receives only `args` (run-turn.js passes one argument;
+// the domains are built once at boot), and schedule_task is reachable from SIX surfaces — stdio
+// MCP, HTTP /mcp, the loopback MCP router, POST /api/v1/:toolName, an owner channel turn and an
+// autonomous turn — four of which have no "turn" at all. A signal that only existed on the
+// run-turn path would be absent exactly where it is needed, so the trusted branch must belong to
+// the WRITER, not the caller.
+//
+// Exactly one writer qualifies: agent/seed-cycles.js, whose tool list is the in-repo CYCLES
+// constant. Every model-reachable writer stores NULL and is untrusted by construction.
+// NOTE the deliberate omission: there is NO 'owner-DM' provenance. The threat is an injection
+// inside content the owner forwarded INTO that DM, so trusting it would re-admit the attack.
+export const ENGINE_PROVENANCE = 'engine';
+export const WRITE_TRUSTED_PROVENANCE = new Set([ENGINE_PROVENANCE]);
+
+/**
+ * May a task row carrying this provenance hold the vault-WRITE tier at fire time?
+ * Fail-closed: NULL/undefined/unknown/non-string ⇒ false. Every pre-existing row (the column
+ * defaults NULL) and every DAL-smuggled row therefore lands untrusted.
+ * @param {unknown} provenance  the row's `tool_provenance`
+ */
+export function isWriteTrustedProvenance(provenance) {
+  return typeof provenance === 'string' && WRITE_TRUSTED_PROVENANCE.has(provenance);
+}
 
 // CYCLE tools — a FOURTH tier, strictly narrower than WRITE_AUTONOMOUS_TOOLS (D-076;
 // the cycle-tool-grant design §4). Two independent conditions (CLAUDE.md §2):
@@ -146,6 +179,94 @@ export const CYCLE_AUTONOMOUS_TOOLS = new Set([
 // data. This is the D-063 invariant applied to the most destructive tool in the registry.
 export const OWNER_DESTRUCTIVE_TOOLS = new Set(['forget']);
 
+// ── WRITE-TIME ALLOWLIST ──────────────────────────────────────────────────────────────────
+// Every name a SCHEDULED TASK may name in `enabled_tools` — the allowlist the schedule_task
+// handler validates against (the schedule-enabled-tools design).
+//
+// WHAT IT DOES AND DOES NOT BUY (an overclaim here becomes a false sense of safety).
+// `schedule_task` takes `enabled_tools` from the MODEL and persists it; the scheduler hands the
+// stored array straight to autonomyTools() at fire time with no human present (tools/
+// schedule-tasks.js -> agent/scheduler.js -> agent/run-turn.js). An owner DM can call
+// schedule_task (resolve-grant.js OWNER_GATED_TOOLS), so an injection inside content the owner
+// forwarded could plant a task today that fires tomorrow.
+//
+//   • DOES NOT close that escalation. A planted task naming only names in THIS set is
+//     unaffected — the array stays attacker-selectable within these tiers. The control for that
+//     is trust PROVENANCE on the task row (unbuilt), not this allowlist.
+//   • DOES bound the set to what a scheduled turn can actually be granted, so a name outside it
+//     is never stored: nothing is accepted-then-silently-dropped.
+//   • DOES keep the write path and the grant path from drifting apart — the divergence that
+//     made the reflection cycles inert (D-078) with every gate still green.
+//
+// WHY IT IS A UNION EXPRESSION AND NOT A HAND-WRITTEN LIST. A tier added later is excluded
+// BY CONSTRUCTION and must be opted in deliberately, which is what makes this fail closed as
+// the tier design grows. That property has now paid off twice, without this file being touched:
+//
+//   • OWNER_DESTRUCTIVE_TOOLS (`forget`) needs `ownerTrusted === true` AND `humanTriggered
+//     === true`; the scheduler passes neither, so it can NEVER be granted to a fired task.
+//   • CYCLE_AUTONOMOUS_TOOLS needs `isCycle === true`, which derives from
+//     created_by === 'reflection-cycle' — a value the model cannot forge and that a
+//     schedule_task-created task (created_by 'agent') never has.
+//
+// Both are therefore excluded here, and naming one is REFUSED at schedule time rather than
+// accepted and silently dropped at fire time — accepting it would be a lie to the caller.
+// Do NOT spread a new tier in here without proving it is grantable to a SCHEDULED turn.
+//
+// Read-safe names ARE included: they are granted unconditionally, so naming one is a harmless
+// no-op the tool's own schema documents ('e.g. searchMindscape, ...'); rejecting them would
+// break documented, legitimate input.
+//
+// SELF-ARMING IS SUBTRACTED (D-063, #381). `schedule_task` is in AUTONOMY_TOOLS — an owner DM
+// (humanTriggered) really can be granted it — but filterSelfArming strips it on any turn no
+// human started, and the scheduler passes no such flag. So for a SCHEDULED task it can never be
+// granted, and accepting it would be the same lie as accepting `forget`. Subtracting it here
+// REINFORCES D-063 rather than competing with it: the denial simply moves to write time, where
+// the caller is told, instead of happening silently at fire time with nobody present. The
+// runtime deny-guard (turn-taking.js selfArmingDenyGuard) remains the enforcing layer.
+//
+// This set is therefore "what a SCHEDULED turn can be granted", which is exactly the question
+// the schedule_task handler needs answered — not "what any autonomous turn can be granted".
+// THE VAULT-WRITE TIER IS SUBTRACTED TOO (trust provenance). Same argument as self-arming, one
+// step further: the WRITE tier now needs `writeTrusted`, which comes from the task row's
+// tool_provenance, and NO model-reachable writer can stamp a trusted one — schedule_task least of
+// all. So for a task written by this handler a WRITE name can never be granted either, and
+// accepting it would be the same lie. The denial moves to write time, where the caller is TOLD.
+export const GRANTABLE_TOOLS = new Set(
+  [...SAFE_AUTONOMOUS_TOOLS, ...AUTONOMY_TOOLS]
+    .filter((n) => !SELF_ARMING_TOOLS.has(n)),
+);
+
+/**
+ * Split a caller-supplied opt-in list into names that could be granted and names that never can.
+ * Trims, drops blanks, dedupes (first spelling wins), and treats a non-string entry as rejected
+ * rather than silently skipping it — a malformed entry is a bug the caller should hear about.
+ *
+ * @param {unknown} names  the raw `enabled_tools` value
+ * @returns {{enabled: string[], rejected: string[]}}  rejected is raw/untrusted — the caller
+ *   MUST bound + sanitise it before echoing it back.
+ */
+export function partitionEnabledTools(names) {
+  const enabled = [];
+  const rejected = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(names) ? names : []) {
+    // NB: a fixed label, NOT String(raw) — `JSON.parse('[{"toString":1}]')` yields an object whose
+    // own non-callable toString makes ToPrimitive THROW, and this runs outside the handler's
+    // try/catch (schedule-tasks.js), which promises to soft-fail with a string and never throw.
+    if (typeof raw !== 'string') { rejected.push('<non-string entry>'); continue; }
+    const n = raw.trim();
+    // A blank entry is malformed input, not an omission — report it rather than dropping it in
+    // silence, which is the principle this whole allowlist exists to enforce. A DUPLICATE is
+    // different: the caller did name a real tool, so it is deduped without complaint.
+    if (!n) { rejected.push('<blank entry>'); continue; }
+    if (seen.has(n)) continue;
+    seen.add(n);
+    (GRANTABLE_TOOLS.has(n) ? enabled : rejected).push(n);
+  }
+  return { enabled, rejected };
+}
+
+
 /**
  * Build the granted tool defs for an autonomous turn.
  *
@@ -174,7 +295,7 @@ export const OWNER_DESTRUCTIVE_TOOLS = new Set(['forget']);
  *   ∪ explicitly-enabled cycle tools when this is a cycle ∪ explicitly-enabled destructive
  *   when owner-trusted AND human-triggered)
  */
-export function autonomyTools(registryTools, enabledNames = [], { humanTriggered = false, isCycle = false, ownerTrusted = false } = {}) {
+export function autonomyTools(registryTools, enabledNames = [], { humanTriggered = false, isCycle = false, ownerTrusted = false, writeTrusted = false } = {}) {
   const enabled = new Set(filterSelfArming(enabledNames, { humanTriggered }));
   const out = [];
   for (const t of registryTools || []) {
@@ -189,7 +310,15 @@ export function autonomyTools(registryTools, enabledNames = [], { humanTriggered
       // a reflection cycle can never reach this branch, and an owner DM can never reach that
       // one, so the two narrowing flags never have to be reconciled against each other.
       if (enabled.has(t.name) && ownerTrusted === true && humanTriggered === true) out.push(t);
-    } else if ((AUTONOMY_TOOLS.has(t.name) || WRITE_AUTONOMOUS_TOOLS.has(t.name)) && enabled.has(t.name)) out.push(t);  // gated/write, opt-in only
+    } else if (WRITE_AUTONOMOUS_TOOLS.has(t.name)) {
+      // Vault-WRITE: opt-in AND write-trusted. Name membership ALONE was the escalation — the
+      // scheduler passed no flag, so a task planted via schedule_task got whatever it named with
+      // no human present. And because an owner DM may call schedule_task but may NOT call the
+      // mind-model rewriters (resolve-grant.js), the schedule path LAUNDERED a capability its
+      // caller was explicitly denied. `=== true` matters more here than anywhere: the value
+      // originates in a TEXT column.
+      if (enabled.has(t.name) && writeTrusted === true) out.push(t);
+    } else if (AUTONOMY_TOOLS.has(t.name) && enabled.has(t.name)) out.push(t);  // gated, opt-in only
     // else: never granted (fail-closed)
   }
   return out;

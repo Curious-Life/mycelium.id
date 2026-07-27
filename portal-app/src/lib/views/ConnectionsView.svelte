@@ -154,7 +154,7 @@
 	let seeded = false;
 
 	async function refreshAll() {
-		await Promise.all([loadConnections(), loadPending(), loadSent(), loadUnread()]);
+		await Promise.all([loadConnections(), loadPending(), loadSent(), loadUnread(), loadReachability()]);
 		if (seeded) {
 			for (const r of pending) if (!seenPending.has(r.id)) toasts.info(`@${r.handle} wants to connect`);
 			for (const c of connections) if (!seenConns.has(c.id)) toasts.success(`Connected with @${c.other_handle}`);
@@ -190,6 +190,25 @@
 	});
 	async function loadPresence() {
 		try { presence = (await apiGet<{ presence: Record<string, string> }>('/portal/connections/presence')).presence || {}; } catch {}
+	}
+
+	// REACHABILITY PRECONDITION. Connecting to anyone requires a CLAIMED handle: the outbound
+	// request carries `from_handle` so the peer can resolve us back, and requireSelfHandle()
+	// throws without one. This page used to advertise the composer unconditionally, so a vault
+	// with no public address invited you to send an invite that could not work and only said so
+	// after you tried. We read the authoritative state (handle is DERIVED from publicHost;
+	// `pending_handle` is a name picked but never claimed — an intent, not an identity) and say
+	// it up front. /portal/profile is used deliberately over /api/v1/remote/status: the latter is
+	// 404'd at the relay edge, so it would break this banner for web/remote clients.
+	interface ReadyReason { code: string; title: string; detail: string; pane?: string }
+	let ready = $state(true); // optimistic → no banner flash before the first load resolves
+	let readyReason = $state<ReadyReason | null>(null);
+	async function loadReachability() {
+		try {
+			const r = await apiGet<{ ready: boolean; reason: ReadyReason | null }>('/portal/connections/readiness');
+			ready = r.ready !== false;
+			readyReason = r.reason ?? null;
+		} catch { /* leave optimistic — never block the page on an advisory status read */ }
 	}
 
 	async function loadConnections() {
@@ -388,9 +407,19 @@
 				</div>
 				<h2>Where your mind meets others'</h2>
 				<p class="lede">Message anyone on Mycelium, see where your minds overlap, share selectively. Signed vault-to-vault — nothing leaves until you choose.</p>
+				{#if !ready && readyReason}
+					<div class="reach-gate" role="status">
+						<strong>{readyReason.title}</strong>
+						<p>{readyReason.detail}</p>
+						<button type="button" class="btn btn-primary"
+							onclick={() => workspace.openOrFocus('settings', { pane: readyReason?.pane ?? 'connections' })}>
+							{readyReason.code === 'no_handle' ? 'Claim your address' : 'Open connection settings'}
+						</button>
+					</div>
+				{/if}
 				<form class="big-composer" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
-					<input type="text" bind:value={connectHandle} autocomplete="off" placeholder="their handle  ·  or  name@their-server.org" />
-					<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary">{connecting ? 'Sending…' : 'Connect'}</button>
+					<input type="text" bind:value={connectHandle} autocomplete="off" disabled={!ready} placeholder={ready ? 'their handle  ·  or  name@their-server.org' : 'set up your address first'} />
+					<button type="submit" disabled={connecting || !connectHandle.trim() || !ready} class="btn btn-primary">{connecting ? 'Sending…' : 'Connect'}</button>
 				</form>
 			</div>
 		</div>
@@ -406,10 +435,22 @@
 				</div>
 
 				{#if composerOpen}
-					<form class="inline-composer" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
-						<input type="text" bind:value={connectHandle} autocomplete="off" placeholder="handle · name@server.org" />
-						<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary btn-sm">{connecting ? '…' : 'Send'}</button>
-					</form>
+					{#if !ready && readyReason}
+						<!-- Same precondition as the empty-state composer: a vault that cannot be
+						     reached must not be invited to send an invite that cannot be delivered. -->
+						<div class="reach-gate reach-gate-sm" role="status">
+							<strong>{readyReason.title}</strong>
+							<button type="button" class="btn btn-primary btn-sm"
+								onclick={() => workspace.openOrFocus('settings', { pane: readyReason?.pane ?? 'connections' })}>
+								{readyReason.code === 'no_handle' ? 'Claim your address' : 'Open settings'}
+							</button>
+						</div>
+					{:else}
+						<form class="inline-composer" onsubmit={(e) => { e.preventDefault(); sendRequest(); }}>
+							<input type="text" bind:value={connectHandle} autocomplete="off" placeholder="handle · name@server.org" />
+							<button type="submit" disabled={connecting || !connectHandle.trim()} class="btn btn-primary btn-sm">{connecting ? '…' : 'Send'}</button>
+						</form>
+					{/if}
 				{/if}
 
 				{#if connections.length > 3}
@@ -734,6 +775,16 @@
 	@media (prefers-reduced-motion: reduce) { .orrery .arm, .orrery .marm { animation: none; } }
 	.onboard-card h2 { font-size: 1.4rem; font-weight: 400; color: var(--color-text-primary); margin-bottom: 0.6rem; }
 	.lede { font-size: 0.9rem; line-height: 1.6; color: var(--color-text-secondary); margin-bottom: 1.5rem; }
+	/* Reachability gate: shown when no handle is claimed, so the composer below is
+	   visibly disabled rather than silently doomed. */
+	.reach-gate { margin: 0 0 1rem; padding: 0.85rem 1rem; border-radius: 12px; text-align: left;
+		background: color-mix(in srgb, var(--color-warning, #E5B84C) 10%, transparent);
+		border: 1px solid color-mix(in srgb, var(--color-warning, #E5B84C) 35%, transparent); }
+	.reach-gate strong { display: block; font-size: 0.9rem; color: var(--color-text-primary); margin-bottom: 0.3rem; }
+	.reach-gate p { font-size: 0.8rem; line-height: 1.5; color: var(--color-text-secondary); margin: 0 0 0.7rem; }
+	.reach-gate-sm { margin-bottom: 0.6rem; padding: 0.6rem 0.7rem; }
+	.reach-gate-sm strong { font-size: 0.78rem; margin-bottom: 0.5rem; }
+	.big-composer input:disabled { opacity: 0.5; cursor: not-allowed; }
 	.big-composer { display: flex; gap: 0.5rem; }
 	.big-composer input { flex: 1; padding: 0.7rem 0.9rem; font-family: var(--font-mono); font-size: 0.85rem; background: var(--glass-input-bg); border: 1px solid var(--glass-input-border); border-radius: 10px; color: var(--color-text-primary); outline: none; }
 	.big-composer input:focus { border-color: var(--color-accent-aurum); }

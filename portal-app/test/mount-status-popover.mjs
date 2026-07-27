@@ -218,6 +218,13 @@ await build({
   plugins: [{ name: 'stub-api', setup(b) { b.onResolve({ filter: /^\.\/api$/ }, () => ({ path: resolve(GEN, 'api-stub.js') })); } }],
   logLevel: 'silent',
 });
+// The REAL $lib/stage-count (P8b) — PipelineStatus's count/unit rendering. Pure, no redirects.
+await build({
+  entryPoints: ['src/lib/stage-count.ts'],
+  outfile: `${GEN}/stage-count.js`,
+  bundle: true, format: 'esm', platform: 'neutral',
+  logLevel: 'silent',
+});
 // The REAL generate store, for PipelineStatus's REAL fmtSeconds ETA formatting.
 await build({
   entryPoints: ['src/lib/generate.ts'],
@@ -229,7 +236,10 @@ await build({
 // Spies for PipelineStatus's remedy wiring (goto/apiPost/start) — inert here (we don't click the
 // expanded detail's buttons; verify:pipeline-status-render owns that), but they must RESOLVE.
 writeFileSync(`${GEN}/nav-spy.js`, `export async function goto(u){ globalThis.__posts?.push('goto:'+u); }\n`);
-writeFileSync(`${GEN}/generate-spy.js`, `export { fmtSeconds } from './generate.js';\nexport async function start(){}\n`);
+// P8b: `rebuild` joins the inert spy set — PipelineStatus's cluster row imports it. This harness
+// never clicks it (mount-pipeline-status owns that assertion); it exists so the module's export
+// shape matches, because an ESM named-import of a missing export is a hard SyntaxError at load.
+writeFileSync(`${GEN}/generate-spy.js`, `export { fmtSeconds } from './generate.js';\nexport async function start(){}\nexport async function rebuild(){}\n`);
 
 // ── PipelineStatus.svelte — the shipped expanded detail, compiled + its four specifiers rewired
 // (pipeline → the shared store above; generate/api/navigation → real fmtSeconds + inert spies). ─
@@ -246,6 +256,7 @@ const psSrc = readFileSync('src/lib/components/mindscape/PipelineStatus.svelte',
 const psJs = compile(psSrc, { generate: 'client', name: 'PipelineStatus', css: 'injected' }).js.code
   .replace(/from\s+['"]\.\/CollapsibleHeader\.svelte['"]/g, `from './CollapsibleHeader.svelte.js'`)
   .replace(/from\s+['"]\$lib\/pipeline['"]/g, `from './pipeline.js'`)
+  .replace(/from\s+['"]\$lib\/stage-count['"]/g, `from './stage-count.js'`)
   .replace(/from\s+['"]\$lib\/generate['"]/g, `from './generate-spy.js'`)
   .replace(/from\s+['"]\$lib\/api['"]/g, `from './api-stub.js'`)
   .replace(/from\s+['"]\$app\/navigation['"]/g, `from './nav-spy.js'`);

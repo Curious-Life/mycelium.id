@@ -5,6 +5,7 @@
 // window_end) stay plaintext, AND that a read through the adapter returns
 // decrypted/usable values (level_name back to a string, metrics to numbers).
 // Runs the REAL stage via spawnSync(node …). PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

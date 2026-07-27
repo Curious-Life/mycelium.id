@@ -68,6 +68,7 @@
 // status correctly (verify:chat / verify-portal-chat.mjs), that the Noise handshake or the
 // encrypted socket work (verify:e2e-transport), that ChatView's duplicate copy of this handler is
 // exercised, or anything about the plain-HTTPS transport, which never showed this symptom.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 

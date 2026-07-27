@@ -21,6 +21,7 @@
 // make the decision a PURE exported function (deriveEmbedLiveness) and test it directly,
 // with no stubbing and no skip path. Time is injected, so nothing here is clock-flaky.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { deriveEmbedLiveness } from '../src/portal-activity.js';
 

@@ -14,6 +14,7 @@
 //     - I5: owner media is never throttled (all accepted, extracted)
 //     - I6: unauthorized media is never submitted, never captured (stage never runs)
 // PASS/FAIL ledger; exit 1 on any fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createInboundHandler } from '../packages/channel-daemon/inbound.js';
 import { createMediaQueue } from '../packages/channel-daemon/media-queue.js';
 import { normalizeUpdate } from '../packages/channel-daemon/transport/normalize.js';

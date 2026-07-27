@@ -20,6 +20,7 @@ import { humanSchedule, humanNextRun, computeNextRun } from './agent/scheduler-t
 import { buildCyclePatch } from './tools/cycles.js';
 import { resolveTaskCapability } from './inference/capability.js';
 import { REFLECTION_INFERENCE_TASK } from './agent/cycle-prompts.js';
+import { ENGINE_PROVENANCE, isWriteTrustedProvenance } from './agent/autonomy-tools.js';
 
 /** Is this a real IANA zone Intl accepts? (fail-closed: reject anything Intl throws on). */
 function isValidTz(tz) {
@@ -52,6 +53,13 @@ export function portalReflectionRouter({ db, userId, authenticatePortalRequest, 
     lastRun: t.last_run || null,
     lastStatus: t.last_status || null,
     tz: t.tz || null,
+    // Whether this cycle may still write to the vault at fire time (its trust provenance).
+    // EXPOSED ON PURPOSE: a cycle can lose the write tier — a model rewrote its instructions, or
+    // it predates migration 0058 and its prompt no longer matches the code-authored body — and a
+    // capability that disappears with no way to SEE it is exactly the D-076 failure mode (a cycle
+    // that runs, reports 'done', and quietly writes nothing). Non-sensitive: a boolean about
+    // capability, no prompt text. The owner restores it by saving the cycle's instructions.
+    canWriteVault: isWriteTrustedProvenance(t.tool_provenance),
   });
 
   // Model health for the dashboard banner (C3): cycles are worthless on a model that can't
@@ -242,7 +250,28 @@ export function portalReflectionRouter({ db, userId, authenticatePortalRequest, 
       if (built.error) return res.status(400).json({ error: built.error });
       if (!Object.keys(built.patch).length) return res.status(400).json({ error: 'nothing to update' });
 
-      await db.harness.updateTask(userId, task.id, built.patch);
+      // authorTrust:'owner' — this route is behind the authenticated owner gate (a real HTTP
+      // request from the owner's browser, not a model turn; no tool can issue one). So the owner
+      // editing their own cycle instructions KEEPS the cycle's write provenance, where the
+      // model-driven updateCycle tool clears it. This is the whole owner/model boundary.
+      await db.harness.updateTask(userId, task.id, built.patch, { authorTrust: 'owner' });
+      // …and RE-ARM the write trust — but ONLY when the owner submitted the INSTRUCTIONS.
+      //
+      // This is the one way back from a demotion (a model rewrote the prompt) or from a legacy row
+      // the boot heal left untrusted, so without it the loss is permanent and updateCycle's
+      // "save it to restore that" message is a lie. But the restoring act has to be one where the
+      // human actually SAW what they are trusting. The editor loads the current prompt and sends
+      // it back (ReflectionCyclesSection.svelte saveEdit), so a patch carrying `prompt` means the
+      // owner had the instructions in front of them.
+      //
+      // Gating on the whole route instead would be a promotion primitive: an independent review
+      // found that a schedule- or on/off-toggle patch — which never fetches or displays the prompt
+      // — would silently restore the write tier to attacker-authored instructions, and the
+      // demotion message *invites* the owner to go to that screen. `enabled`-only is exactly what
+      // the toggle sends.
+      if (Object.hasOwn(built.patch, 'prompt')) {
+        try { await db.harness.setCycleProvenance(userId, task.id, ENGINE_PROVENANCE); } catch { /* non-fatal */ }
+      }
       const updated = (await listCycleTasks()).find((t) => t.id === id);
       res.json({ ok: true, cycle: updated ? shape(updated) : null });
     } catch (e) { res.status(500).json({ error: String(e?.message || e).slice(0, 200) }); }

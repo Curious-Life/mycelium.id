@@ -22,6 +22,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';

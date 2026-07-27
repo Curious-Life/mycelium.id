@@ -8,6 +8,7 @@
 //   • the release workflow builds + signs + publishes latest.json, fail-closed.
 // Passes in dev even with the placeholder pubkey (loud WARNING), so CI stays green
 // until the operator provisions the signing key — the workflow enforces the rest.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

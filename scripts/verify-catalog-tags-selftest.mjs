@@ -27,6 +27,7 @@
 // fully green (9/9), which is this repo's oldest gate failure mode — a stubbed
 // check that proves handling while proving nothing about the wiring.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert';
 import { classifyStatus, isUnsupportedName, manifestUrl, probeTag, run } from './verify-catalog-tags.mjs';
 

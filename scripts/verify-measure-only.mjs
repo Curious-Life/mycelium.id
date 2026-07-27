@@ -7,6 +7,7 @@
 //   M2 startMeasurementJob is exported and delegates to startClusteringJob(measureOnly)
 //   M3 with Generate LOCKED: startClusteringJob → 'disabled'; startMeasurementJob is
 //      EXEMPT (gets past the lock) — proven by it failing later (on keys), not at the lock
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 
 const ledger = [];

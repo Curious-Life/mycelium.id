@@ -4,6 +4,7 @@
 // flow to grantees); a revoke tombstones it; a backfill brings pre-existing content into a
 // newly-shared space; and the mirror is a clean no-op when E2E is off.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

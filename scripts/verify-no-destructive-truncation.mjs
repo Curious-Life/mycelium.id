@@ -6,6 +6,7 @@
 // Principle under test: persistence ≠ model-context budget. The storage path
 // stores the full value (bounded only by a generous ~200k DoS ceiling); budgets
 // belong at READ time, not at write time.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { DERIVED_TEXT_MAX_CHARS, CAPTION_MAX_CHARS, clampStored } from '../src/enrich/text-limits.js';
 

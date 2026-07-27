@@ -4,13 +4,14 @@
 	import { mindscapeState } from '$lib/stores/mindscape';
 	import { navigationState } from '$lib/stores/navigation';
 	import MindscapeDetail from '$lib/components/mindscape/MindscapeDetail.svelte';
-	import NarrateControl from '$lib/components/mindscape/NarrateControl.svelte';
-	import MeasureControl from '$lib/components/mindscape/MeasureControl.svelte';
-	import MeasurementHealthSection from '$lib/components/mindscape/MeasurementHealthSection.svelte';
+	import MeasureSection from '$lib/components/mindscape/MeasureSection.svelte';
 	import MindscapeBackground from '$lib/components/mindscape/MindscapeBackground.svelte';
 	import MindscapeInvite from '$lib/components/mindscape/MindscapeInvite.svelte';
 	import PipelineStatus from '$lib/components/mindscape/PipelineStatus.svelte';
-	import { ingest as ingestPipeline } from '$lib/pipeline';
+	// P8b reads the `cluster` stage's freshness off this same store to arm the automatic rebuild —
+	// no new fetch and no second notion of "stale": the flag it keys on is the one the server
+	// already computes for the pipeline slice.
+	import { pipeline, ingest as ingestPipeline } from '$lib/pipeline';
 	import { pollAction, timerArmed } from '$lib/pipeline-poll';
 	import { probeExhausted } from '$lib/mind-probe-cap';
 
@@ -39,7 +40,7 @@
 	let genProbeFailed = $state(false);
 	// ⚠️ THE PROBE MUST NOT SPIN FOREVER. loadGenerated() re-probes every GEN_POLL_MS while the
 	// answer isn't known-true; on a machine whose /readiness KEEPS failing that was an UNBOUNDED
-	// "Checking your mind…" spinner — the exact hang generate.ts's `unknown` cap (#232) fixed one
+	// "Checking your mindscape…" spinner — the exact hang generate.ts's `unknown` cap (#232) fixed one
 	// surface over. genProbeFailCount counts CONSECUTIVE failures (a success resets it to 0);
 	// past PROBE_MAX_FAILS the view stops retrying and renders a RETRYABLE "couldn't read your map"
 	// state instead (see the markup). A failed read claims NOTHING — §3.2a — so the capped state is
@@ -176,7 +177,7 @@
 		if (!timerArmed(genProbeExhausted) && genPollTimer) { clearInterval(genPollTimer); genPollTimer = null; }
 	});
 	import { api, apiGet } from '$lib/api';
-	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, fmtSeconds } from '$lib/generate';
+	import { generate, start as startGen, resume as resumeGen, reset as resetGen, cancel as cancelGen, rebuild as rebuildGen, fmtSeconds } from '$lib/generate';
 	import { get } from 'svelte/store';
 	import { auth } from '$lib/stores/auth';
 
@@ -261,6 +262,49 @@
 			autoGenTried = true;
 			startGen();
 		}
+	});
+
+	// ── P8b: AUTO-REBUILD WHEN NEW POINTS ARRIVE WHILE THE PAGE IS OPEN ──────────────────
+	// The operator's ask, in full: "i want us to not have that section and to instead rebuild it
+	// automatically when there are new points."
+	//
+	// The LOAD case already worked: the effect above POSTs generate once per page load, and the
+	// route's debounce falls THROUGH when the map is stale, so opening a stale mindscape already
+	// rebuilds it. The gap is the IN-PAGE case — an import or an embed backlog finishing while the
+	// user is looking at the map. `autoGenTried` is long since latched by then, so nothing re-fires.
+	//
+	// ⚠️ EDGE-TRIGGERED, AND SEEDED FROM THE FIRST OBSERVATION. `staleSeen` starts null and the
+	// first reading only RECORDS the value — it never fires. That is what keeps this effect from
+	// racing the load-path auto-generate above: a page that opens already-stale is the load path's
+	// job, and if both fired we would POST generate twice on every stale open.
+	//
+	// ⚠️ WHY THIS CANNOT LOOP, WHICH IS THE ONLY THING THAT MATTERS HERE. `stale` is computed
+	// server-side from evaluateFreshness against the self-zeroing baseline (generate-stats
+	// lastEmbedded, written when a run COMPLETES). So:
+	//   • run succeeds ⇒ baseline catches up ⇒ stale goes true→false ⇒ the latch re-arms, and a
+	//     LATER genuine drift can trigger a later rebuild. That is the feature.
+	//   • run FAILS ⇒ no baseline write ⇒ stale stays true ⇒ no false→true edge ⇒ IT NEVER FIRES
+	//     AGAIN. A broken pipeline gets exactly one automatic attempt, not an infinite retry loop
+	//     hammering a vault that cannot cluster. The manual ↻ on the cluster row is the second try.
+	// The self-zeroing baseline is therefore load-bearing for termination, not just for freshness —
+	// it is the entire fix for D-004 ↻1 and must survive any change to this path.
+	//
+	// `staleSeen` is a PLAIN `let`, not `$state`: a reactive latch the effect writes would itself
+	// become a dependency and re-invalidate the effect — the D-028 re-entry mechanism one effect
+	// below. The body is untracked for the same reason: this effect depends on `stale` and nothing else.
+	let staleSeen: boolean | null = null;
+	$effect(() => {
+		const cluster = $pipeline.stages.find((s) => s.key === 'cluster');
+		const stale = cluster?.stale === true;
+		const prev = staleSeen;
+		staleSeen = stale;
+		if (prev === null) return;            // first observation seeds only — the load path owns it
+		if (!stale || prev) return;           // fire on the false→true EDGE, never on a level
+		untrack(() => {
+			// Never interrupt a run in flight; the next poll will re-evaluate once it settles.
+			if ($generate.phase === 'starting' || $generate.phase === 'running' || $generate.phase === 'embedding') return;
+			void rebuildGen();
+		});
 	});
 
 	// React to the shared store reporting completion: reload the map, then clear.
@@ -717,9 +761,20 @@
 			     (PIPELINE-TRANSPARENCY-DESIGN §"Risks": overview, not a replacement of detail). -->
 			<PipelineStatus />
 			<MindscapeDetail />
-			<MeasureControl />
-			<MeasurementHealthSection />
-			<NarrateControl />
+			<!-- ONE section for the `measure` stage: its control AND the freshness it produces.
+			     They were two siblings — a button, and the thing the button produces, presented
+			     as unrelated neighbours (operator, QA9: "refresh analysis and measurement health
+			     should be in one section"). Falls out of the layout rule in
+			     the pipeline-sprint design §4.1 — a section is a STAGE — not a one-off tidy. -->
+			<MeasureSection />
+			<!-- P8d — <NarrateControl/> STOOD HERE and now lives on the Agents page
+			     (AgentsView, between the scheduled rhythms and the activity timeline).
+			     Operator decision, QA9 sprint design. It is an AGENT job, not a pipeline
+			     stage: the agent walks your territories and writes about them, on its own
+			     lifecycle. Under the sprint's layout rule — a section is a STAGE — the rail
+			     has no room for something that is not one, and sitting next to the stage
+			     list implied it was part of the run. RELOCATED, NOT DELETED: the routes,
+			     narration_runs, and all seven narrate gates are untouched. -->
 		</div>
 		<!-- Resize handle — a direct child of the panel, NOT of the scroller: it is the panel's
 		     full-height edge affordance and must not scroll away with the content. -->
@@ -753,6 +808,18 @@
 			     away. NOT a slower animation, NOT a delay, NOT a fade: the same states, one node. -->
 			{#if loadArm}
 				<div class="loading-3d">
+					<!-- ⚠️ QA9 (operator, 2026-07-27): "in such cases we should at least show the
+					     onboarding mindscape screen not an empty page". The waiting/capped states used
+					     to render as bare centred text on a flat background — which reads as a broken
+					     app, not a loading one.
+					     The living mindscape now breathes behind EVERY waiting arm. This is the
+					     BACKGROUND ONLY — deliberately NOT <MindscapeInvite/>, which carries the
+					     empty-vault "Grow your mycelium" call to action. Rendering the invite here
+					     would tell an owner with a fully built map that their vault is empty, which is
+					     the §3.2a violation ("a failed read is 'couldn't look', never 'empty'") that
+					     the arms below exist to prevent. Ambient visual: yes. Empty-vault claim: never. -->
+					<MindscapeBackground />
+					<div class="loading-inner">
 					<!-- The cap is the one waiting state that is NOT waiting: the probe has given up
 					     and retry is the user's move, so a spinner there would be a lie. -->
 					{#if loadArm !== 'capped'}<div class="spinner"></div>{/if}
@@ -773,7 +840,10 @@
 						     the rail (which polls independently and recovers first) — the very overlap
 						     this increment exists to make impossible. Claim nothing; say so.
 						     Bounded: past PROBE_MAX_FAILS this yields to the capped state ABOVE. -->
-						<p class="load-fail sub">Checking your mind…</p>
+						<!-- "your mind" → "your mindscape" (operator, QA9 2026-07-27): we are checking
+						     the MAP, not the person. The old copy claimed a scope the product does not
+						     have and reads as presumptuous. -->
+						<p class="load-fail sub">Checking your mindscape…</p>
 					{:else if loadArm === 'built-not-loaded'}
 						<!-- ⚠️ The map EXISTS (the server counted points) but this client has none — the
 						     points fetch raced clustering, or the durable points cache held a stale-empty
@@ -788,6 +858,7 @@
 						{#if msState.error}<p class="load-fail sub">{msState.error}</p>{/if}
 						<button class="load-retry" onclick={() => mindscapeState.load({ fresh: true })}>Try again</button>
 					{/if}
+					</div>
 				</div>
 			{:else if msState.points && msState.points.length > 0}
 				<!-- `loadArm` is null here ⇒ Mindscape3D has resolved (see loadArm's 'module' arm),
@@ -915,6 +986,10 @@
 	.load-retry:hover { border-color: var(--color-accent-aurum); }
 
 	.loading-3d {
+		/* `relative` is load-bearing: <MindscapeBackground/> is `position:absolute; inset:0`
+		   (MindscapeBackground.svelte:216-217), so without a positioned ancestor it would
+		   escape to the viewport and paint over the rail. */
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -924,6 +999,17 @@
 		flex: 1;
 		min-height: 0;
 		background: var(--color-bg);
+	}
+	/* The waiting copy sits ABOVE the ambient mindscape. Same centring the arms had when they
+	   were direct children of .loading-3d — the wrapper only adds the stacking context. */
+	.loading-inner {
+		position: relative;
+		z-index: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 0.4rem;
 	}
 
 	.spinner {

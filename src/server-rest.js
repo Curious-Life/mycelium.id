@@ -9,7 +9,7 @@ import { boot } from './index.js';
 import { dataDir, dbPath as resolveDbPath, kcvPath as resolveKcvPath, uploadsRoot as resolveUploadsRoot, remoteConfigPath as resolveRemoteConfigPath, destroyExtraRoots, vaultFileFamily } from './paths.js';
 import { resolveKeys } from './crypto/key-source.js';
 import { applyMigrations } from './db/migrate.js';
-import { precompressedStatic, setStaticHeaders, compressionMiddleware } from './serving.js';
+import { precompressedStatic, setStaticHeaders, compressionMiddleware, sendPortalFile } from './serving.js';
 import { apiRouter } from './api.js';
 import { internalRouter } from './internal-router.js';
 import { portalCompatRouter } from './portal-compat.js';
@@ -51,6 +51,7 @@ import { portalConnectorsRouter } from './portal-connectors.js';
 import { registerBuiltinAdapters, createConnectorRunner, startConnectorScheduler, connectorsUnavailable } from './connectors/index.js';
 import { authShimRouter } from './auth-shim.js';
 import { accountRouter } from './account/router.js';
+import { vaultPresence, unopenableVaultMessage } from './account/vault-presence.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
 import { startEnrichDrainer } from './enrich/drainer.js';
@@ -203,7 +204,14 @@ export function ensureDataDir({ env = process.env } = {}) {
 
   const newDb = path.join(dir, 'mycelium.db');
   const legacyDb = path.join(legacyDir, 'mycelium.db');
-  if (existsSync(newDb) || !existsSync(legacyDb)) return; // already moved, or no legacy vault
+  // D-080: ask BOTH artifacts. Testing only the db meant a destination holding a
+  // kcv.json but no mycelium.db was treated as empty — the legacy db got copied in
+  // while copyIfPresent skipped the legacy kcv (the destination already had one),
+  // marrying a foreign vault to the wrong verifier. No bytes lost (the original is
+  // renamed aside below), but it manufactures exactly the mis-paired state this
+  // whole change exists to prevent.
+  if (vaultPresence({ dbPath: newDb, kcvPath: path.join(dir, 'kcv.json') }).any) return; // already moved
+  if (!existsSync(legacyDb)) return;                                                     // no legacy vault
 
   const copyIfPresent = (from, to, opts) => { if (existsSync(from) && !existsSync(to)) cpSync(from, to, opts); };
   // Byte-copy is deliberate here — this runs BEFORE keys are available, and a byte copy
@@ -727,11 +735,26 @@ export async function startRestServer({
             fedPull = createFederationPullLoop({
               db, userId: bootUserId, identity, selfDid: `did:web:${publicHost}`,
               resolvePeerKey: (d) => resolveDidKey(d), client: _fedClient, logger: (m) => console.error(m),
-              // Send-retry: on cycles when the relay is reachable, re-attempt DMs that failed to
-              // deliver earlier (P5 delivery robustness). Self-terminating on first success.
-              outbox: () => db.connections.federationOutbox(bootUserId),
+              // Send-retry: re-attempt DMs that failed to deliver earlier (P5) AND connect-
+              // responses we still owe a peer we accepted (P5b — without this an accept that
+              // failed to deliver left them on "Sent" and us on "Connected", permanently).
+              // Both are bounded + self-terminating on success.
+              outbox: async () => {
+                await db.connections.federationOutbox(bootUserId);
+                await db.connections.federationAcceptOutbox(bootUserId);
+              },
             }).start();
             console.error(`[federation-pull] receiving for ${_fedHandle} via ${_relayBase}`);
+          } else {
+            // Say WHY receive is off. This branch used to be silent, so a vault that could
+            // not receive a single connect request looked identical in the log to one that
+            // was working — the operator's only symptom was invites that never arrived.
+            // Name the specific unmet precondition; each maps to a concrete user action.
+            const _why = !publicHost ? 'no public address claimed yet (Settings → Connections)'
+              : !_relayBase ? `remote mode is '${_rc.remoteMode}' — needs 'managed' or 'own-relay' to have a relay to pull from`
+              : !isValidHandle(_fedHandle) ? `publicHost '${_rc.publicHost}' has no valid handle label`
+              : 'no signing identity (vault locked?)';
+            console.error(`[federation-pull] NOT receiving — ${_why}. Inbound connection requests and peer messages will not arrive until this is resolved.`);
           }
         } catch (e) { console.error(`[federation-pull] not started: ${e.message}`); }
         enqueueEnrichment = (id) => { try { baseEnqueue(id); } catch { /* :8095 optional */ } drainer.nudge(); };
@@ -818,6 +841,13 @@ export async function startRestServer({
         try {
           await db.harness.reconcileOnBoot();
           await db.harness.advanceOverdue(new Date().toISOString());
+          // The pipeline's half of the same rule (migration 0059). A 'running' pipeline_runs row
+          // at process start CANNOT be live — the only thing that heartbeats it is the parent
+          // process, and the parent is what just started. Leaving it 'running' would assert
+          // "still working" about a process that no longer exists: inference-as-evidence, written
+          // into the database. After a crash the honest state is 'aborted'.
+          const aborted = await db.pipelineRuns.reconcileOnBoot();
+          if (aborted > 0) console.error(`[pipeline] boot reconcile: ${aborted} interrupted run(s) marked aborted`);
         } catch (e) { console.warn('[scheduler] boot reconcile skipped:', e?.message || e); }
         harnessScheduler.start();
         // E2E dial-out relay (Phase 3): OPT-IN via MYCELIUM_RELAY_DIALOUT=1 (flip on
@@ -912,14 +942,36 @@ export async function startRestServer({
     try {
       await completeBoot();
     } catch (err) {
-      // Only a bootError if a vault FILE actually exists (else this is a genuine
-      // fresh "not created yet" — no keys present is expected, not a failure).
-      if (existsSync(effectiveKcvPath)) {
+      // D-080 (P0, data loss). THE decision this defect was made of: "I cannot
+      // read this vault" is NOT "there is no vault here". The old test asked
+      // existsSync(kcv.json) — a SIDECAR — and a missing verifier fell through to
+      // "no vault yet — entering setup mode", which is the state from which a new,
+      // empty vault gets created over a real one. Ask the DATA (mycelium.db), and
+      // treat EITHER artifact as proof that a vault lives here.
+      const present = vaultPresence({ dbPath: effectiveDbPath, kcvPath: effectiveKcvPath });
+      if (present.any) {
         bootError = classifyBootError(err);
-        // Surface the CLASS to /account/status so the UI offers the right recovery;
-        // keep the raw reason out of the response (it can name key material) — log
-        // it for the operator only.
-        console.error(`[mycelium] vault not opened (${bootError}) — entering setup mode (${err?.message || err})`);
+        // FAIL CLOSED (CLAUDE.md §3) → RECOVERY-ONLY MODE, not setup mode.
+        //
+        // The fix's first draft aborted the process here. That is wrong, and an
+        // existing gate proves it: verify:account B3-B7 boots against an existing
+        // vault with NO resolvable key and then pastes the correct recovery key to
+        // re-open it. Aborting deletes the only in-app way back into your own vault
+        // after a Keychain loss / new Mac / migrated account — which would push a
+        // user toward deleting the data dir, i.e. straight back to losing the vault.
+        //
+        // So the process stays up to serve exactly ONE thing — the recovery-key
+        // paste — with every creating path refused (this is what makes it safe, and
+        // each has its own gate check): /account/setup returns 409 vault_exists,
+        // unlock() will not mint a kcv.json for a key that cannot open an encrypted
+        // vault, /account/status reports needsSetup:false + needsRecoveryKey:true,
+        // and nothing has applied a schema or opened a writable handle. No vault is
+        // created, truncated or written over on this path.
+        console.error(unopenableVaultMessage({
+          dbPath: effectiveDbPath, kcvPath: effectiveKcvPath, reason: bootError,
+        }));
+        // The raw reason is operator-only (it can name key material).
+        console.error(`[mycelium] vault not opened (${bootError}): ${err?.message || err}`);
       } else {
         console.error(`[mycelium] no vault yet — entering setup mode (${err?.message || err})`);
       }
@@ -1145,7 +1197,10 @@ export async function startRestServer({
     app.get(NAV_ROUTE, (req, res, next) => {
       if (!isPortalNav(req)) return next();
       res.setHeader('Cache-Control', 'no-store');
-      res.sendFile(spaFallback);
+      // sendPortalFile, not res.sendFile — a bare sendFile of an absolute path
+      // 404s the shell whenever the install sits under a dot-directory (see
+      // serving.js), which takes down every client route at once.
+      sendPortalFile(res, spaFallback);
     });
   } else {
     // Canonical UI not built → serve the inline "not built" placeholder (no
@@ -1155,7 +1210,7 @@ export async function startRestServer({
     }
     // Favicon comes from portal-app/static (present in source even pre-build).
     app.get('/favicon.svg', (req, res, next) => {
-      if (existsSync(PORTAL_FAVICON)) return res.type('image/svg+xml').sendFile(PORTAL_FAVICON);
+      if (existsSync(PORTAL_FAVICON)) return sendPortalFile(res.type('image/svg+xml'), PORTAL_FAVICON);
       next();
     });
     app.get(NAV_ROUTE, (req, res, next) => {

@@ -84,6 +84,49 @@ const STAGE_LABELS = {
   14: 'Computing semantic coherence…',
   15: 'Computing behavioral-temporal patterns…',
   16: 'Computing embedding-anchor metrics (Tier-1, CVP-pending)…',
+  // ⚠️ SUB-STEPS. run-clustering.sh emits three banners whose step token is NOT a bare integer:
+  // "Step 7b/16", "Step 9.5/16", "Step 10b/16" (:194, :218, :230). The progress parser's old
+  // `^Step (\d+)/` could not match them, so `state.step` STAYED AT THE PREVIOUS NUMBERED STEP —
+  // and when one of these three failed, the run was reported as a failure of a DIFFERENT, HEALTHY
+  // stage:
+  //     embedding-trajectory (7b) fails → "Step 7/16 (Compute Fisher trajectory) failed"
+  //     gravity              (9.5) fails → "Step 9/16 (territory vitality) failed"
+  //     embedding-novelty    (10b) fails → "Step 10/16 (Lempel-Ziv complexity) failed"
+  // Three stages that, on failure, sent the operator to the wrong file. Keyed by the TOKEN STRING
+  // (JS object keys are strings anyway, so the integer keys above are unaffected). This map is also
+  // the ALLOWLIST classifyPipelineFailure validates against, which is what keeps the feed's reason
+  // content-free — so a token added here must always come with its label.
+  '7b': 'Computing embedding-trajectory (movement cross-check)…',
+  '9.5': 'Scoring cluster gravity (attentional weight)…',
+  '10b': 'Computing embedding-novelty (novelty cross-check)…',
+};
+
+/**
+ * The step token as run-clustering.sh writes it: an integer, or a sub-step like `7b` / `9.5`.
+ * Anchored + bounded so it cannot match arbitrary child stdout.
+ */
+export const STEP_LINE_RE = /^Step\s+(\d+(?:\.\d+|[a-z])?)\/(\d+):\s*(.*)$/;
+
+/**
+ * The stage name safe to PERSIST, derived only from the allowlist.
+ *
+ * ⚠️ `state.stageLabel` falls back to RAW CHILD STDOUT (`m[3].trim()`) for a token outside
+ * STAGE_LABELS — fine for the in-memory job (behind the authed status route), but
+ * pipeline_run_stages.stage_name is content-free BY CONTRACT, and a contract held only by
+ * coincidence of what the script happens to print is not held at all. An unknown token yields
+ * `Step <token>` — an identifier, never text the child chose. Same mechanism
+ * classifyPipelineFailure already uses for the feed's reason.
+ */
+export const stageNameFor = (token) => {
+  const t = token == null ? '' : String(token);
+  if (Object.prototype.hasOwnProperty.call(STAGE_LABELS, t)) return STAGE_LABELS[t];
+  return /^\d+(?:\.\d+|[a-z])?$/.test(t) ? `Step ${t}` : 'Unknown stage';
+};
+
+/** Numeric position for the PROGRESS BAR only (7b → 7, 9.5 → 9). Never used for attribution. */
+export const stepOrdinal = (token) => {
+  const n = Math.floor(Number.parseFloat(String(token)));
+  return Number.isFinite(n) && n > 0 ? n : 0;
 };
 
 // SECURITY (§1 zero-plaintext-leakage): the reason a pipeline run failed is the
@@ -107,10 +150,14 @@ const STAGE_LABELS = {
 // `state.stageLabel` is deliberately NOT used here: it falls back to raw child
 // stdout (`m[3].trim()`) for a step outside STAGE_LABELS, so it is not a constant.
 export function classifyPipelineFailure({ failedStep, totalSteps } = {}) {
-  const n = Number(failedStep);
+  // `failedStep` is now the step TOKEN ('5', '7b', '9.5'), not a bare integer — a sub-step failure
+  // must name ITSELF, not the numbered step before it. Content-freedom is unchanged and still comes
+  // from the same place: the token is only echoed after it is found in STAGE_LABELS, so the output
+  // is assembled from a known key plus fixed literals. An unknown token degrades to the constant.
+  const token = failedStep == null ? '' : String(failedStep);
   const t = Number(totalSteps);
-  if (!Number.isInteger(n) || n <= 0 || !STAGE_LABELS[n]) return 'pipeline failed';
-  return Number.isInteger(t) && t > 0 ? `failed at step ${n}/${t}` : `failed at step ${n}`;
+  if (!token || !Object.prototype.hasOwnProperty.call(STAGE_LABELS, token)) return 'pipeline failed';
+  return Number.isInteger(t) && t > 0 ? `failed at step ${token}/${t}` : `failed at step ${token}`;
 }
 
 const jobs = new Map();   // jobId → state (kept for status polling)
@@ -184,7 +231,7 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   // is accepted + in-flight — the user will get their map); `stageLabel` tells the finer story.
   const jobId = `${measureOnly ? 'measure' : 'gen'}_${crypto.randomBytes(6).toString('hex')}`;
   const state = {
-    id: jobId, status: 'running', step: 0, totalSteps: 5,
+    id: jobId, status: 'running', step: 0, stepToken: null, totalSteps: 5,
     stageLabel: 'Starting…', startedAt: Date.now(), finishedAt: null, error: null,
     stalled: false,            // set by the inactivity watchdog; cleared on new output
     child: null,               // live handle (internal — never returned by getJob)
@@ -194,6 +241,13 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   };
   jobs.set(jobId, state);
   runningJobId = jobId;
+  // DURABLE RUN RECORD (migration 0059). Opened BEFORE any stage work, so a crash one second
+  // from now is still diagnosable — the whole point of the table is that the in-memory `jobs`
+  // Map above dies with the process. Fail-soft: this is bookkeeping ABOUT the work, and a
+  // failed INSERT must never stop a user's map from being built.
+  db?.pipelineRuns?.open?.(jobId, {
+    userId, kind: measureOnly ? 'measure' : 'generate', trigger: 'user', stagesTotal: null,
+  })?.catch?.(() => {});
   // Mirror into the unified activity feed (header dot + chip) — content-free.
   const feedLabel = measureOnly ? 'Refreshing analysis' : 'Mapping your mind';
   const feedBegun = db?.activityFeed
@@ -204,7 +258,21 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
   // terminal row. Miss one and the reaper (activity-feed.js STALE_MS) flips it to
   // 'abandoned' 45s later. See classifyPipelineFailure — `error` here is only ever a CONSTANT.
   let feedPublished = false;
+  // ⚠️ ALSO closes the durable run row. publishTerminal is ALREADY the single chokepoint every
+  // terminal path funnels through (normal close, spawn error, cancel, kill-switch, disk-low), so
+  // closing here means a new exit path cannot forget to close the run. Deliberately OUTSIDE the
+  // `!db?.activityFeed` early-return below: a vault with no activity feed must still get an
+  // honest run record.
+  let runClosed = false;
+  const closeRun = (status, errorClass = null) => {
+    if (runClosed) return;
+    runClosed = true;
+    db?.pipelineRuns?.close?.(jobId, { status, errorClass })?.catch?.(() => {});
+  };
   const publishTerminal = (status, error = null) => {
+    // feed 'abandoned' is our word for a user cancel / never-started spawn; the run record calls
+    // that 'aborted' (it did not finish), and keeps 'failed' for a run that actually ran and died.
+    closeRun(status === 'done' ? 'ok' : status === 'abandoned' ? 'aborted' : 'failed', error);
     if (feedPublished || !db?.activityFeed) return;
     feedPublished = true;
     feedBegun.then(() => db.activityFeed.finish(jobId, { status, error })).catch(() => {});
@@ -251,12 +319,23 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
         const lines = buf.split('\n');
         buf = lines.pop() || ''; // keep the partial last line
         for (const line of lines) {
-          const m = line.match(/^Step\s+(\d+)\/(\d+):\s*(.*)$/);
+          const m = line.match(STEP_LINE_RE);
           if (m) {
-            state.step = parseInt(m[1], 10);
+            // TOKEN for identity, ORDINAL for the bar. Keeping these separate is the fix: the old
+            // parser had only an integer, so the three sub-step banners (7b / 9.5 / 10b) matched
+            // nothing and left `step` pointing at the previous stage — which then took the blame.
+            state.stepToken = m[1];
+            state.step = stepOrdinal(m[1]);
             state.totalSteps = parseInt(m[2], 10);
-            state.stageLabel = STAGE_LABELS[state.step] || m[3].trim();
+            state.stageLabel = STAGE_LABELS[m[1]] || m[3].trim();
             if (db?.activityFeed) db.activityFeed.heartbeat(jobId, { step: state.step, totalSteps: state.totalSteps, stageLabel: feedLabel, stalled: false }).catch(() => {});
+            // Per-stage row. stageStarted() also closes the PREVIOUS running stage as 'ok' —
+            // sound ONLY because run-clustering.sh runs under `set -euo pipefail`, so the next
+            // banner cannot print unless the previous command exited 0. See the coupling note on
+            // db/pipeline-runs.js stageStarted(): the P2 driver removes `set -e`, and when it
+            // does, each stage must report its own outcome instead of this inference.
+            // stageNameFor(), NOT state.stageLabel — the label may be raw child stdout; this column is content-free by contract.
+            db?.pipelineRuns?.stageStarted?.(jobId, stageNameFor(m[1]), state.step)?.catch?.(() => {});
           }
         }
       });
@@ -296,9 +375,11 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
         } else if (state.status !== 'error') {
           state.status = 'error';
           const detail = lastErrLine();
-          const stage = state.step > 0 ? `Step ${state.step}/${state.totalSteps} (${state.stageLabel}) failed` : 'pipeline failed';
+          // Report the TOKEN, so a sub-step failure names itself ("Step 7b/16 (embedding-trajectory)")
+          // instead of the numbered step it happened to follow ("Step 7/16 (Fisher trajectory)").
+          const stage = state.stepToken ? `Step ${state.stepToken}/${state.totalSteps} (${state.stageLabel}) failed` : 'pipeline failed';
           state.error = detail ? `${stage}: ${detail} (exit ${code})` : `${stage} (exit ${code})`;
-          state.failedStep = state.step || null;
+          state.failedStep = state.stepToken || null;   // the TOKEN — classifyPipelineFailure validates it
         }
         publishTerminal(state.status === 'done' ? 'done' : state.status === 'canceled' ? 'abandoned' : 'error', state.status === 'error' ? classifyPipelineFailure(state) : null);
         finish();

@@ -21,6 +21,7 @@
 //       RECORDED — never silently skipped, never recursed
 //
 // Pure fs against an ABSOLUTE temp dir; no vault boot; no network.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdirSync, rmSync, existsSync, writeFileSync, readdirSync, symlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';

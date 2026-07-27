@@ -64,9 +64,49 @@ const SOURCES = [
   // pages → the app stays responsive during the one-time build, and per-page
   // marshalling avoids materializing ~1GB of rows at once. pageSql appends the
   // keyset predicate + ORDER BY id + LIMIT to the same filter.
-  { table: 'messages', sql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != ''", kind: 'message', prefix: '',
+  // ATTACHMENT DERIVED TEXT IS PART OF THE MESSAGE (2026-07-26). A voice note captured by
+  // the import path stores content "File: memo.ogg" and puts the words the person actually
+  // SPOKE in attachments.transcript. With messages.content as the only indexed text, that
+  // recording was UNFINDABLE — searching any phrase from it returned nothing, and the four
+  // agent-facing joins (src/agent/attachment-context.js) only surface a transcript for
+  // messages that happen to fall in a recent window / conversation history / day review.
+  // The LEFT JOIN puts the transcript (audio/video) and description (image caption,
+  // extracted document text) in the SAME index entry as their message, so retrieving the
+  // message retrieves what it says.
+  //
+  // PER-COLUMN SELECT IS LOAD-BEARING, NOT STYLE (same trap as the documents source below):
+  // transcript/description are ENCRYPTED (ENCRYPTED_FIELDS.attachments). autoDecryptResults
+  // (crypto-local.js:1735) walks each row's columns and decrypts anything envelope-SHAPED —
+  // it keys on the value, not on the source table, so a joined column decrypts correctly.
+  // Concatenating in SQL (`content || transcript`) would splice two envelopes into a
+  // non-envelope string it cannot decrypt → garbage tokens that never match. Hence textFrom.
+  //
+  // JOIN SCOPING: `a.user_id = m.user_id` alongside the id match, so a cross-user attachment
+  // can never join into this user's corpus even if an attachment_id were wrong (defense in
+  // depth — m.user_id is already pinned by the WHERE; CLAUDE.md §2/§5).
+  //
+  // The content predicate is WIDENED: a row whose content is empty but whose attachment
+  // carries derived text is now a real hit (ingest.js:116 admits an empty-content message
+  // when it has an attachmentId), where before it was dropped as an "empty doc".
+  //
+  // ⚠️ BM25 ONLY, BY CONSTRUCTION: embedding_768 is the vector the enrich drain computed
+  // from messages.content ALONE, and nothing re-embeds a message when its transcript lands
+  // later (transcribe-attachment.js writes attachments.transcript and never touches the
+  // message row). So the transcript is keyword-searchable immediately; it becomes
+  // SEMANTICALLY searchable only once that message is re-embedded. RRF fusion still
+  // surfaces the BM25 hit. Re-embed-on-transcript is the follow-on, not this change.
+  { table: 'messages', sql: "SELECT m.id AS id, m.content AS content, a.transcript AS transcript, a.description AS description, m.created_at AS created_at, m.embedding_768 AS embedding_768 FROM messages m LEFT JOIN attachments a ON a.id = m.attachment_id AND a.user_id = m.user_id WHERE m.user_id = ? AND m.forgotten_at IS NULL AND ((m.content IS NOT NULL AND m.content != '') OR (a.transcript IS NOT NULL AND a.transcript != '') OR (a.description IS NOT NULL AND a.description != ''))", kind: 'message', prefix: '',
     paginate: true,
-    pageSql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != '' AND id > ? ORDER BY id LIMIT ?" },
+    textFrom: (r) => [r.content, r.transcript, r.description].filter(Boolean).join(' '),
+    pageSql: "SELECT m.id AS id, m.content AS content, a.transcript AS transcript, a.description AS description, m.created_at AS created_at, m.embedding_768 AS embedding_768 FROM messages m LEFT JOIN attachments a ON a.id = m.attachment_id AND a.user_id = m.user_id WHERE m.user_id = ? AND m.forgotten_at IS NULL AND ((m.content IS NOT NULL AND m.content != '') OR (a.transcript IS NOT NULL AND a.transcript != '') OR (a.description IS NOT NULL AND a.description != '')) AND m.id > ? ORDER BY m.id LIMIT ?",
+    // The pre-join query, verbatim. Used ONLY if the JOIN above fails on its first read (no
+    // `attachments` table / no `attachment_id` column) — messages stay searchable without
+    // their derived text instead of vanishing from the corpus. See the loop in loadFromDb.
+    fallback: {
+      sql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != ''",
+      pageSql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != '' AND id > ? ORDER BY id LIMIT ?",
+      textFrom: null,
+    } },
   // name + essence are ENCRYPTED columns on all three topology tables
   // (ENCRYPTED_FIELDS.territory_profiles / .realms / .semantic_themes — name was
   // "newly encrypted (was plaintext)"). Same root cause as the documents source
@@ -214,6 +254,21 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
   if (typeof backend.beginBulk === 'function') { try { backend.beginBulk(); } catch { /* best-effort */ } }
   try {
     for (const src of SOURCES) {
+      // ENRICHMENT MUST BE STRICTLY ADDITIVE (2026-07-26). The messages source now LEFT JOINs
+      // `attachments` to index derived text. Every catch in this loop is SILENT by design
+      // ("table absent → skip this source"), which is survivable for a topology profile and
+      // CATASTROPHIC for messages: one missing column or table would drop the ENTIRE message
+      // layer out of search with no error anywhere — the vault would just quietly stop
+      // finding anything. So a source may declare a `fallback` (the pre-join query): if the
+      // richer query fails on its FIRST read, we fall back and index messages WITHOUT derived
+      // text rather than indexing nothing. Losing the transcript is a degradation; losing
+      // every message is an outage.
+      let eff = src;
+      const demote = () => {
+        if (!src.fallback || eff !== src) return false;
+        eff = { ...src, ...src.fallback };
+        return true;
+      };
       if (src.paginate) {
         // Keyset pagination over the id PK: each page is a BOUNDED SQLCipher scan,
         // then flush + yield so the event loop is serviced — vs one ~300s block
@@ -223,22 +278,33 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
         for (;;) {
           let rows;
           try {
-            const res = await db.rawQuery(src.pageSql, [userId, lastId, PAGE]);
+            const res = await db.rawQuery(eff.pageSql, [userId, lastId, PAGE]);
             rows = res?.results || [];
-          } catch { break; } // table absent / query failed → skip this source
+          } catch {
+            // Only the FIRST page may demote: a mid-scan failure has already indexed rows
+            // with the rich shape, and restarting under the fallback would double-index them.
+            if (lastId === '' && demote()) continue;
+            break; // table absent / query failed → skip this source
+          }
           if (rows.length === 0) break;
           lastId = String(rows[rows.length - 1].id);
-          for (const row of rows) await processRow(src, row);
+          for (const row of rows) await processRow(eff, row);
           await flush(); // flush each bounded page + yield
           if (rows.length < PAGE) break; // final (short) page
         }
       } else {
         let rows;
         try {
-          const res = await db.rawQuery(src.sql, [userId]);
+          const res = await db.rawQuery(eff.sql, [userId]);
           rows = res?.results || [];
-        } catch { continue; } // table absent / query failed → skip this source
-        for (const row of rows) await processRow(src, row);
+        } catch {
+          if (!demote()) continue; // table absent / query failed → skip this source
+          try {
+            const res = await db.rawQuery(eff.sql, [userId]);
+            rows = res?.results || [];
+          } catch { continue; }
+        }
+        for (const row of rows) await processRow(eff, row);
         await flush(); // flush at source boundary (keeps batches kind-homogeneous)
       }
     }

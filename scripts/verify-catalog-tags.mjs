@@ -36,6 +36,7 @@
 // The classification + retry logic here is proven hermetically, against stubbed
 // registry responses, by scripts/verify-catalog-tags-selftest.mjs.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 

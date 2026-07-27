@@ -10,6 +10,7 @@
 // assertions fail LOUDLY — which is the whole point. Do NOT "update the goldens"
 // to make it pass; a changed value means a vault-orphaning regression.
 // VERDICT: GO / exit 0.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { deriveSystemKey, deriveDbKey, isHex64 } from '../src/account/keystore.js';
 
 const FIXED = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';

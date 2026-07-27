@@ -2,6 +2,7 @@
 // full metadata, real timestamps, high-water mark) + the importMessages createdAt
 // fix. Parser is unit-tested; on-stop + backfill are exercised end-to-end against
 // a real (consent-opted-in) HTTP server.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';

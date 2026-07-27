@@ -15,6 +15,7 @@
 //
 // PRE-FIX: territories/territory/explore/time throw → FAIL. POST-FIX (vf() coerce
 // in src/tools/topology-tools.js): all render → GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

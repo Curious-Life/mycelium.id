@@ -11,6 +11,10 @@ import { isTrustedLoopback } from './http/loopback.js';
 // bound (one module, no duplicated predicate/constant — II.2a/II.3), and the narrator authority
 // createNarrator itself consumes (the served §4g fact, never re-derived).
 import { evaluateFreshness, countMappedPoints } from './mindscape-freshness.js';
+// The point-fetch cap — ONE definition, so the aggregate can distinguish "this territory has no
+// points" from "the bundle was truncated before reaching it".
+import { POINTS_LIMIT } from './db/mindscape.js';
+import { isBundleUsable, isRenderableTerritory } from './mindscape-territory-universe.js';
 import { readGenerateStats } from './generate-stats.js';
 import { isPlaceholderName, perUnitTokenBound } from '../pipeline/lib/naming-facts.js';
 import { resolveNarratorAuthority } from '../pipeline/lib/narrate-infer.js';
@@ -402,9 +406,47 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
         };
       }
 
+      // ── ONE TERRITORY UNIVERSE (QA9: "naming territories still get territory 1089 as the names")
+      // Three code paths asked "which territories exist?" and the RENDERER disagreed with the other
+      // two:
+      //   naming-status (the count)   DISTINCT territory_id FROM clustering_points   :786-792
+      //   describe-clusters (writer)  DISTINCT territory_id FROM clustering_points   :214-217
+      //   HERE (the renderer)         territory_profiles WHERE dissolved_at IS NULL  — NO join
+      // So a profile row that is not dissolved but has no surviving points was RENDERED, never
+      // visited by the naming job, and never counted. It showed as "Territory {id}" forever while
+      // the naming card truthfully reported "all named" — both statements true, about different
+      // sets. (The operator's id, 1089, is far larger than their ~50 areas: an orphan from an
+      // earlier clustering generation.)
+      //
+      // ⚠️ NOT fixed in cluster.py, and that was my first plan. cluster.py ALREADY dissolves
+      // point-less territories (:1951-1970) — but it DEFERS the whole prune whenever a re-embed
+      // backlog exists (:1946-1950), deliberately, so a re-import window cannot dissolve a
+      // territory whose points are transiently absent. On a vault that is importing, that
+      // deferral can hold indefinitely. Dissolution is therefore correct AND permanently
+      // incomplete; the renderer cannot rely on it.
+      //
+      // Nor can such a territory be NAMED instead: describe-clusters samples its members from
+      // clustering_points, so a territory with no points has nothing to describe. It is not a
+      // place on the map — it has no geometry, no members and no content.
+      //
+      // ⇒ The renderer requires live mapped points, measured from the SAME bundle it is about to
+      // render (`territoryCentroids[tid].count`, built from getPoints which is already
+      // `landscape_x IS NOT NULL`). No second query, so no cache-coherence gap by construction.
+      //
+      // TWO GUARDS, both §3.2a — an absent bundle must never DELETE the user's areas:
+      //   · empty bundle  → we cannot tell "no map" from "failed read" ⇒ do not filter
+      //   · truncated bundle (points hit POINTS_LIMIT) → a territory may be absent only because
+      //     the fetch stopped ⇒ do not filter
+      // The two predicates live in src/mindscape-territory-universe.js as PURE FUNCTIONS, so the
+      // gate can drive them directly. Inlined here they could only be gated by string-matching this
+      // file — and a gate that pins a string REDs on a harmless refactor while proving nothing.
+      const bundleUsable = isBundleUsable(territoryCentroids, meta?.total, POINTS_LIMIT);
+      let orphanedTerritories = 0;
+
       const territories = {};
       for (const tp of territoryProfiles) {
         const c = territoryCentroids[tp.territory_id];
+        if (!isRenderableTerritory(c, bundleUsable)) { orphanedTerritories++; continue; }
         const centroid = c && c.count > 0 ? { x: c.x / c.count, y: c.y / c.count, z: c.z / c.count } : null;
         territories[tp.territory_id] = {
           name: tp.name, essence: tp.essence,
@@ -480,7 +522,11 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
 
       // `meta` (total / noise / clusterCounts / partitionConfidence) is part of the
       // durable points bundle — point-derived, so it travels with the geometry.
-      return { nodes, themes, territories, realms, semanticThemes, meta };
+      // `orphanedTerritories` is DIAGNOSTIC, and it is exposed rather than dropped on purpose:
+      // this filter removes rows a user could previously see, so the count of what it removed must
+      // be observable. A silent filter is how "0 conversations ready · 1014 on the map" happened.
+      return { nodes, themes, territories, realms, semanticThemes,
+               meta: { ...meta, orphanedTerritories, territoryUniverseFiltered: bundleUsable } };
       });
       res.json(payload);
     } catch { fail(res, 500, 'failed to load mindscape data'); }

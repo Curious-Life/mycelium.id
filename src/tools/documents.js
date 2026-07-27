@@ -252,7 +252,14 @@ export function createDocumentsDomain(deps) {
     },
     {
       name: 'getDocument',
-      description: 'Retrieve full document content by path. Works for any library document — mindscape docs, transcriptions, notes, etc.',
+      // "transcriptions" was in this description but was never true for AUDIO: an uploaded
+      // .md/.txt/.pdf/.docx becomes a real library document (run-import.js → saveDocument,
+      // path `uploads/<name>`), while a voice note takes the ATTACHMENT branch and gets no
+      // document row at all. An agent that believed the old wording would call
+      // getDocument('uploads/memo.ogg'), get "Document not found", and reasonably conclude
+      // no transcript exists. Voice-note text reaches the agent through the message it is
+      // attached to (src/agent/attachment-context.js) and through search.
+      description: 'Retrieve full document content by path. Works for any library document — mindscape docs, notes, and uploaded text/PDF/Word files. NOT for voice notes or images: their transcript/caption travels with the message the file is attached to, and is searchable, rather than living at a document path.',
       inputSchema: {
         type: 'object',
         properties: {

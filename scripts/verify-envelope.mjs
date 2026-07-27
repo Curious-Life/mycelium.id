@@ -10,6 +10,7 @@
 //   E9  ZERO-KNOWLEDGE: the wire envelope contains no plaintext of the payload
 //   E10 unsupported version → rejected
 //   E11 IMPERSONATION: sig by Carol but claiming Alice's did → rejected
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { createIdentity } from '../src/identity/identity.js';
 import { sealEnvelope, openEnvelope, _internal } from '../src/federation/envelope.js';

@@ -13,6 +13,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import http from 'node:http';
 import os from 'node:os';

@@ -9,6 +9,7 @@
 //   R1 real boot (env keys) → vault open, bootError null (no completeBoot throw)
 //   R2 closeHandle runs clean (exercises the drainer/daemon .stop() teardown refs)
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

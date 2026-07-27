@@ -19,6 +19,7 @@
 //
 // Reach: gates the DECISION, not MindscapeView's $effect wiring of it (see drive-pipeline-poll.mjs's
 // honest-reach note). The decision is the falsifiable half.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 

@@ -8,6 +8,7 @@
  * (fail-closed on unknown axis) and that the raw-lean read stays inside the sanctioned
  * reader (no new ungated reader of cognitive_metrics_anchor).
  */
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { execSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';

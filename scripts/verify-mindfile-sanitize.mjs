@@ -4,6 +4,7 @@
 // + runaway size, fail-closed, with LOW false-positives (legitimate reflective prose, emoji,
 // multilingual scripts, and abstract security discussion all pass). Also proves the gate is
 // wired into writeMindFile (a blocked write throws BEFORE any fs write — no partial persist).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { sanitizeMindWrite } from '../src/mindfiles/sanitize.js';
 import { createMindFiles } from '../src/mindfiles/mind-files.js';
 

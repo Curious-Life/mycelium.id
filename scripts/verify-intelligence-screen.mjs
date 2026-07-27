@@ -41,6 +41,7 @@
 // MUTATION-TESTED: dropping the row-level "Couldn't check which model is running" line → S12f RED
 //   (the unknown becomes silence, which reads as "nothing is selected").
 // All seven restored; the suite returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';

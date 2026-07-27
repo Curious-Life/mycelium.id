@@ -10,6 +10,7 @@
 //   - ciphertext-at-rest on documents.content      (defense-in-depth)
 //
 // Ends with a VERDICT line and exits non-zero on any failure.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

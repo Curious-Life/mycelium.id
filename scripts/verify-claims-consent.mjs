@@ -36,6 +36,7 @@
 // Every outbound dependency IS redirected here (Ollama, cloud, embed), so the child
 // has no un-stubbed network dependency and the gate is hermetic + deterministic.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import http from 'node:http';
 import crypto from 'node:crypto';

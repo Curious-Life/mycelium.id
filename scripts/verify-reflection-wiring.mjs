@@ -6,9 +6,26 @@
 //   B. the portal reflection router: enable → seed 6 · disable → pause all · re-enable → resume
 //   C. per-cycle PATCH (schedule/instructions/on-off) via the shared buildCyclePatch
 //   D. timezone persists + re-arms cycles (local-time scheduling, not UTC)
+//   C2. write-trust RESTORE fires only on a patch carrying the INSTRUCTIONS (not toggle/schedule)
 //   E. 'chat' cycle output routes to the visible chat:reflections thread
 // Isolated: an in-memory db + a live express mount (no vault, no real boot).
+//
+// MUTATION-TESTED: made the write-trust re-stamp in src/portal-reflection.js unconditional on the
+//   patch shape (dropping `if (Object.hasOwn(built.patch,'prompt'))`) → C2 'a toggle-only owner
+//   PATCH does NOT restore write trust' and 'a reschedule-only owner PATCH …' RED (VERDICT:
+//   NO-GO). Not hypothetical: that unconditional form was the first version of the restore path,
+//   and an independent review found it exploitable — a model rewrites a cycle's prompt (demoting
+//   it), updateCycle's own message sends the owner to Settings → Reflection, and a single on/off
+//   toggle there — a screen that never displays the prompt — silently handed the vault-WRITE tier
+//   back to attacker-authored instructions. Restored afterwards; the gate returns GREEN.
+// MUTATION-TESTED: hardcoded `canWriteVault: true` in shape() (src/portal-reflection.js) → C2
+//   'a demoted cycle is REPORTED as unable to write the vault' RED. The demotion is fail-closed
+//   and CORRECT, but a capability that disappears with no way to SEE it is D-076 itself — and an
+//   owner who edited a cycle's prompt before migration 0058 lands demoted on upgrade through no
+//   fault of their own. Found by the post-rebase security review, which called the silence a
+//   D-076 recurrence rather than an accepted trade. Restored; the gate returns GREEN.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import http from 'node:http';
 import { createContextDomain } from '../src/tools/context.js';
@@ -48,7 +65,15 @@ function makeDb() {
         return id;
       },
       async listTasks() { return tasks.map((t) => ({ ...t })); },
-      async updateTask(_u, id, fields) { const t = findCycle(id); if (t) Object.assign(t, fields); },
+      // Mirrors the real DAL's provenance rules (src/db/harness.js): a MODEL-authored patch of the
+      // instructions or the tool list demotes; an owner-authenticated one does not.
+      async updateTask(_u, id, fields, { authorTrust = 'model' } = {}) {
+        const t = findCycle(id);
+        if (!t) return;
+        if ((Object.hasOwn(fields, 'prompt') || Object.hasOwn(fields, 'enabled_tools')) && authorTrust !== 'owner') t.tool_provenance = null;
+        Object.assign(t, fields);
+      },
+      async setCycleProvenance(_u, id, provenance) { const t = findCycle(id); if (t && t.created_by === CYCLE_CREATED_BY) t.tool_provenance = provenance; },
       async setTaskStatus(_u, id, status) { const t = findCycle(id); if (t) t.status = status; },
       async recentRuns() { return runs.map((r) => ({ ...r })); },
     },
@@ -121,6 +146,42 @@ try {
   // PATCH — unknown cycle
   r = await j('PATCH', '/settings/reflection/cycles/nope', { enabled: false });
   ok(r.status === 404, 'PATCH on an unknown cycle → 404');
+
+  // C2. WRITE-TRUST RESTORE — only when the owner submitted the INSTRUCTIONS.
+  // This route is the sole way back from a demotion (a model rewrote a cycle's prompt, so the
+  // cycle lost its vault-write tier), and updateCycle's error text sends the owner straight here.
+  // That makes it a promotion primitive if it fires on the wrong patch shape: the on/off toggle
+  // and the reschedule never fetch or display the prompt, so restoring trust on those would hand
+  // the write tier back to attacker-authored instructions with no human having read them.
+  // the task-trust-provenance design §4.3.
+  {
+    const cyc = db._tasks.find((t) => t.name === 'Morning check-in');
+    const demote = () => { cyc.tool_provenance = null; };
+
+    demote();
+    await j('PATCH', `/settings/reflection/cycles/${cyc.id}`, { enabled: false });
+    ok(cyc.tool_provenance == null, 'a toggle-only owner PATCH does NOT restore write trust');
+
+    demote();
+    await j('PATCH', `/settings/reflection/cycles/${cyc.id}`, { schedule: 'daily:7', enabled: true });
+    ok(cyc.tool_provenance == null, 'a reschedule-only owner PATCH does NOT restore write trust');
+
+    // The loss must be VISIBLE. A capability that vanishes with no way to see it is the D-076
+    // failure mode — and a cycle whose prompt the owner edited BEFORE migration 0058 lands here
+    // on upgrade, through no fault of theirs. The portal must say so.
+    demote();
+    let listed = await j('GET', '/settings/reflection');
+    let shown = (listed.body.cycles || []).find((x) => x.id === cyc.id);
+    ok(shown?.canWriteVault === false, 'a demoted cycle is REPORTED as unable to write the vault', `canWriteVault=${shown?.canWriteVault}`);
+
+    demote();
+    r = await j('PATCH', `/settings/reflection/cycles/${cyc.id}`, { prompt: 'the owner reviewed and re-saved these instructions' });
+    ok(r.status === 200 && cyc.tool_provenance === 'engine', 'an owner PATCH carrying the INSTRUCTIONS restores write trust');
+    ok(cyc.prompt === 'the owner reviewed and re-saved these instructions', 'and the owner-supplied prompt is what was saved');
+    listed = await j('GET', '/settings/reflection');
+    shown = (listed.body.cycles || []).find((x) => x.id === cyc.id);
+    ok(shown?.canWriteVault === true, '…and the portal reports the capability restored');
+  }
 
   // D. timezone re-arm — change tz, cycles re-arm under it
   const beforeNext = db._tasks.find((t) => t.name === 'Weekly review').next_run;

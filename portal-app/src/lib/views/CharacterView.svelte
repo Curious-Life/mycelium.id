@@ -7,6 +7,7 @@
 	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 	import { workspace } from '$lib/workspace/store';
+	import { avatarHue as hueFor, avatarGlyph as glyphFor } from '$lib/components/agents/agent-visual';
 
 	let { id = 'personal-agent' }: { id?: string } = $props();
 
@@ -354,9 +355,11 @@
 
 	// ── Avatar — derived placeholder (design §5.4a): deterministic gradient+glyph
 	//    from the agent id. Zero storage, no upload; looks intentional.
-	function hashStr(s: string): number { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
-	const avatarHue = $derived(hashStr(id) % 360);
-	const avatarGlyph = $derived(String.fromCodePoint(0x1f331 + (hashStr(id) % 8))); // a small spread of nature glyphs
+	//    The derivation is SHARED with the Agents page hero (agent-visual.ts) rather
+	//    than duplicated here, so "the same agent wears the same face on both" is a
+	//    fact the compiler keeps, not a comment that decays.
+	const avatarHue = $derived(hueFor(id));
+	const avatarGlyph = $derived(glyphFor(id));
 	function fmtWhen(iso: string | null): string { if (!iso) return ''; try { return new Date(iso).toLocaleDateString(); } catch { return iso; } }
 </script>
 

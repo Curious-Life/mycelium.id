@@ -6,6 +6,7 @@
 //   H3 appended turn → only the new turn syncs (line high-water mark)
 //   H4 app down → exit 0, work deferred, state NOT advanced (retried next run)
 //   H5 after the app is back → the deferred turn is picked up
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync, readFileSync, existsSync } from 'node:fs';

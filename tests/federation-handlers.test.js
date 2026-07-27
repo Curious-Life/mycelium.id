@@ -21,6 +21,11 @@ const fetchSenderDid = async (url, init) => {
   return { ok: false, status: 404, async json() { return {}; } };
 };
 
+const testLookup = async (host) => {
+  if (/\.mycelium\.id$/.test(host)) return [{ address: '93.184.216.34', family: 4 }];
+  throw new Error(`testLookup: unmapped host ${host}`);
+};
+
 function makeHandlers({ host = 'alice.mycelium.id', handle = 'alice', matrixId = null, now } = {}) {
   const received = [];
   const responses = [];
@@ -28,10 +33,14 @@ function makeHandlers({ host = 'alice.mycelium.id', handle = 'alice', matrixId =
     async receiveRemote(p) { received.push(p); return 'cid'; },
     async receiveResponse(p) { responses.push(p); return 'sid'; },
   } };
+  // See tests/federation-sharing.test.js for the full story: safeFetch's fail-closed SSRF guard
+  // resolves the host even when `fetch` is injected, so without an injected `lookup` these fake
+  // *.mycelium.id hosts are answered by REAL public DNS and the test's verdict depends on the
+  // internet rather than on the code. The guard stays fully armed; only the resolver is controlled.
   const h = createFederationHandlers({
     db, userId: 'me', identity: LOCAL,
     getHost: () => host, getHandle: () => handle, getMatrixId: () => matrixId,
-    fetch: fetchSenderDid, now,
+    fetch: fetchSenderDid, now, lookup: testLookup,
   });
   return { h, received, responses };
 }

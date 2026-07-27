@@ -10,6 +10,7 @@
 // column-identifier guard are unchanged in spirit, retargeted to the encrypted table.
 // Boots a PLAINTEXT low-level DB (boot()), so a field-encrypted value MUST be absent
 // from the raw bytes; a plaintext column (a message id) MUST be present. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import crypto from 'node:crypto';

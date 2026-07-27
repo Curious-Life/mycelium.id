@@ -10,6 +10,7 @@
 //   - listClaimsHistory replays the per-change belief log + the current-tendencies view,
 //   - validate stays OPTIONAL: absent → no retraction; supplied → a conflicting user-stated proposal
 //     supersedes an inferred claim (never deletes), and the reply reports it.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { createClaimsNamespace } from '../src/db/claims.js';

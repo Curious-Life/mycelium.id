@@ -4,6 +4,7 @@
 // re-remember supersedes in place (UNIQUE), sensitive is excluded from getContext
 // but present in the explicit listing, forget soft-redacts (value nulled, husk +
 // audit hash-only), and bad input fails closed. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

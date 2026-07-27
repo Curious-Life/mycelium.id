@@ -18,6 +18,7 @@
 // Asserts the IDENTITY of what answered (LOCAL_HELLO vs ANTHROPIC_HELLO), never a call count
 // alone: a counter cannot tell "the floor stayed local" from "the floor never ran".
 // Mock fetch throughout — no real network. Never logs a key.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

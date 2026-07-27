@@ -24,6 +24,7 @@
 //       three MYCELIUM_KC_* overrides (they namespace away from the real keys)
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

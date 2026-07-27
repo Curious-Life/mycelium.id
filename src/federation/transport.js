@@ -77,7 +77,15 @@ export function createDirectHttpTransport({ sign, did, lookup, fetch: fetchImpl 
   async function send(endpoint, subpath, body) {
     const url = `${endpoint.replace(/\/$/, '')}/${subpath}`;
     const { bodyStr, headers } = frame(body);
-    await safeFetch(url, { lookup, fetch: fetchImpl, method: 'POST', headers, body: bodyStr, redirect: 'manual', signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
+    const res = await safeFetch(url, { lookup, fetch: fetchImpl, method: 'POST', headers, body: bodyStr, redirect: 'manual', signal: AbortSignal.timeout(FEDERATION_POST_TIMEOUT_MS) });
+    // Fail LOUD on a peer reject. fetch does NOT throw on 4xx/5xx, so without this a peer
+    // answering 502/500/403 was indistinguishable from a delivered envelope and the caller
+    // reported "invite sent" for a request that never landed — the QA N10 defect class,
+    // which #298 closed for endpoint RESOLUTION but not for DELIVERY. The relay path has
+    // guarded this since P3b (see enqueueSealed's identical check); the direct path had not.
+    // 404 is kept distinguishable so classifyDeliveryFailure can still tell a genuinely
+    // absent peer from a transient outage.
+    if (!res.ok) throw new Error(`federation POST ${subpath} rejected (${res.status})`);
   }
 
   // Signed POST that RETURNS the raw Response, so the caller can verify the SIGNED reply

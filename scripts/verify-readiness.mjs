@@ -23,6 +23,7 @@
 // An earlier version of this file numbered the SLICING tests R6, silently displacing
 // §7's back-compat test — so a reviewer ticking §7 by ID got a false green (independent
 // review, 2026-07-15).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import express from 'express';
 import { readFileSync } from 'node:fs';

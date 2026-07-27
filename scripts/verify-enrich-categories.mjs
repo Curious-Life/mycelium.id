@@ -11,6 +11,7 @@
 //   7. restampLegacyCategories: one-shot idempotent 0041 backfill — re-stamps provenance onto
 //      legacy/external-backfill rows (processed=1, categorized_at NULL) ONLY, with an honest
 //      sentinel (not now()), labels & classifier untouched, user-scoped, idempotent on re-run
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

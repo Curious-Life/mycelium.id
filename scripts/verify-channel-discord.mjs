@@ -1,6 +1,7 @@
 // verify:channel-discord — Discord egress (via the shared send-handler core +
 // discord adapter), the REST api (injected fetch), normalize, and inbound auth.
 // Pure DI — no network, no discord.js (gateway is host-verified). PASS/FAIL.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { createDiscordApi } from '../packages/channel-daemon/discord-api.js';

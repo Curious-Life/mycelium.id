@@ -10,6 +10,7 @@
 //     (so a half-migrated column reads correctly during backfill)
 //   - bad lengths fail closed
 // @see the SQLCipher stage-A vectors design
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

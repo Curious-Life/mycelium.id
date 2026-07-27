@@ -19,6 +19,7 @@ import {
   sealKeys, unsealKeys, lockExists, readLock, writeLock, removeLock, MIN_PASSPHRASE_LENGTH,
 } from './passphrase-lock.js';
 import { getSessionKeys } from './session-keys.js';
+import { vaultPresence } from './vault-presence.js';
 import { isTrustedLoopback } from '../http/loopback.js';
 
 // 500s: log the real error server-side (key-free by construction — these paths
@@ -56,7 +57,10 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
   // The UI gates on this: needsSetup → /setup, locked → /unlock, else the app.
   router.get('/status', (_req, res) => {
     const open = Boolean(isInitialized());
-    const vaultExists = existsSync(kcvPath);
+    // D-080: ask the DATA, not just the sidecar. This used to be
+    // existsSync(kcvPath) alone, so a vault whose verifier was missing published
+    // needsSetup:true and the UI offered to create a new one over it.
+    const vaultExists = vaultPresence({ dbPath, kcvPath }).any;
     const passphraseEnabled = lockExists(lockFile);
     res.json({
       open,
@@ -80,6 +84,20 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
   // First run: generate a key, store it, open the vault, return the key ONCE.
   router.post('/setup', async (_req, res) => {
     if (isInitialized()) return res.status(409).json({ error: 'already_initialized' });
+    // FAIL CLOSED (D-080), the second independent layer (CLAUDE.md §2). The boot
+    // path now aborts before setup mode is ever served, but this endpoint mints a
+    // NEW master key and boots a NEW vault, so it must refuse on its own evidence
+    // rather than trusting that the caller only got here legitimately. It used to
+    // guard on isInitialized() alone and never asked whether a mycelium.db was
+    // sitting right there.
+    const present = vaultPresence({ dbPath, kcvPath });
+    if (present.any) {
+      console.error('[account] REFUSED /setup: a vault already exists on this device (D-080)');
+      return res.status(409).json({
+        error: 'vault_exists',
+        message: 'A vault already exists on this device. Unlock it with its recovery key, or restore a backup — creating a new one here would leave the existing vault unopenable.',
+      });
+    }
     if (!keychainAvailable()) {
       return res.status(400).json({ error: 'keychain_unavailable', message: 'The macOS Keychain is required to store your key.' });
     }
@@ -109,9 +127,17 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
     // backup (POST /restore-backup) — or hand-copy the data dir — THEN paste the
     // key. See the vault-backup and remote-access design §4.
     if (!existsSync(kcvPath)) {
+      // D-080: distinguish "nothing here" from "the db is here but its verifier
+      // is not". Both refuse (a key cannot be verified without a KCV, and
+      // minting one would lock the real key out — see unlock()), but saying "no
+      // vault on this device" while mycelium.db sits beside it is the same lie
+      // that cost a vault, and it invites the user to create a new one.
+      const dbHere = vaultPresence({ dbPath }).db;
       return res.status(409).json({
-        error: 'no_vault',
-        message: 'There is no vault on this device yet. Restore a backup first, or create a new vault.',
+        error: dbHere ? 'kcv_missing' : 'no_vault',
+        message: dbHere
+          ? 'This vault is missing its kcv.json key-verifier, so a recovery key cannot be checked against it. Restore kcv.json (or the whole .myvault backup) alongside the existing mycelium.db, then try again. The vault data has not been touched.'
+          : 'There is no vault on this device yet. Restore a backup first, or create a new vault.',
       });
     }
     let userHex;
@@ -120,7 +146,11 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
     const systemHex = deriveSystemKey(userHex);
     // Verify the key against the existing KCV BEFORE writing anything — a wrong
     // key is rejected (unlock throws), never stored.
-    try { await unlock({ userHex, systemHex, kcvPath }); }
+    // dbPath is passed even though the guard above makes the mint branch
+    // unreachable today: that pair is a TOCTOU (restore-backup moves kcv.json
+    // aside on the same always-mounted router), and this was the one unlock()
+    // call left in src/ that skipped its own guard.
+    try { await unlock({ userHex, systemHex, kcvPath, dbPath }); }
     catch { return res.status(400).json({ error: 'wrong_key', message: 'That key does not match this vault.' }); }
     try {
       // force: the user explicitly pasted a recovery key to (re)open THIS vault.
@@ -180,7 +210,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
   // still require the vault to be OPEN so a fresh/locked device can't be drained.
   router.get('/backup', async (_req, res) => {
     if (!isInitialized()) return res.status(409).json({ error: 'vault_not_open' });
-    if (!dbPath || !existsSync(kcvPath)) return res.status(400).json({ error: 'no_vault' });
+    if (!dbPath || !vaultPresence({ dbPath, kcvPath }).any) return res.status(400).json({ error: 'no_vault' });
     try {
       const { buffer, manifest } = await buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteConfigPath, mindRoot: mindDir(), voiceSamplesRoot: voiceSamplesRoot() });
       if (buffer.length > BACKUP_SOFT_LIMIT_BYTES) {

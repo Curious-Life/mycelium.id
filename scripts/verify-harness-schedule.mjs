@@ -3,6 +3,7 @@
 //   T1 parseSchedule: all forms + invalid + interval min-clamp
 //   T2 daily (today vs tomorrow)   T3 weekly (next DOW)   T4 monthly short-month clamp
 //   T5 every:Nh   T6 interval (+clamp)   T7 once (future/past)   T8 cron   T9 IANA tz   T10 strictly-after
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { parseSchedule, computeNextRun } from '../src/agent/scheduler-time.js';
 
 const ledger = [];

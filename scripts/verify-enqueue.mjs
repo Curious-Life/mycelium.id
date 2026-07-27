@@ -3,6 +3,7 @@
 //   E1 service ABSENT — enqueueEnrichment(id) never throws / never blocks capture
 //   E2 service UP (mock) — receives POST /enrich-all with { userId, messageId }
 //   E3 captureMessage completes normally even when the nudge target is down
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createServer } from 'node:http';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

@@ -29,6 +29,7 @@
 //   N6  §4g sensitive-US block ⇒ still refuses rather than running an unapproved model
 //       (the path cloudFallbackToLocal does NOT govern — live once #151 lands)
 //   N7  the callers REPORT the refusal instead of silently naming nothing
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';

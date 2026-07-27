@@ -3,6 +3,7 @@
 // and decrypt correctly through the adapter for the live readers (getOrphanGaps,
 // compute-territory-neighbors). Embeddings are sensitive (README §7); these were
 // plaintext before SEC-1. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

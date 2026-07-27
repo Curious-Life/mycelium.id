@@ -6,6 +6,7 @@
 // freshly-booted HTTP server with NO MYCELIUM_MCP_BEARER set still accepts the
 // persisted bearer (and rejects a wrong one). So the installed app connects the
 // hooks with zero manual setup.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';

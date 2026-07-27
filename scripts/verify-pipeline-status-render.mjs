@@ -62,6 +62,7 @@
 //   NO collapse toggle").
 // MUTATION-TESTED (D-025, 2026-07-23): the toggle's `onclick` replaced with a no-op, making the
 //   disclosure a dead control → C3 REDs ("clicking the disclosure must EXPAND the card").
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 
@@ -204,15 +205,55 @@ t('R4c. ⭐ co-located per-stage controls (R2/R3/N9): a RUNNING stage shows a �
     // The toggle is two-state: a paused stage shows Resume and NOT a Pause button.
     assert.ok(!c.pause, `a paused stage must NOT show a Pause control — the toggle shows Resume. Got: ${JSON.stringify(s.controls)}`);
   }
-  // Controls are EMBED/CATEGORIZE only — a derived stage (cluster/describe/measure) never carries them.
+  // ⚠️ SCOPED TO THE STOP/RESUME/RESTART TRIO, NOT TO "ANY CONTROL" (P8b). This check used to count
+  // EVERY `.pipe-ctrl` and require zero, which was equivalent while those three were the only
+  // controls that existed. P8b adds a REBUILD (↻) to the cluster row of a built map — a different
+  // verb on a different route — and the blunt count REDded on it. The assertion's INTENT was always
+  // "a settled vault has nothing to stop and nothing paused"; that intent is unchanged and still
+  // exactly asserted here. The rebuild control gets its own assertion in R4e rather than an
+  // exemption, so it is proven, not merely tolerated.
+  const RUN_CTRLS = new Set(['pause', 'resume', 'restart']);
+  const runCtrls = (s) => s.controls.filter((c) => RUN_CTRLS.has(c.kind));
+
+  // Controls are EMBED/CATEGORIZE only — a derived stage (cluster/describe/measure) never carries
+  // a pause/resume/restart, because there is no per-stage drainer behind it to control.
   for (const s of midflight.stages.filter((x) => x.key !== 'embed' && x.key !== 'categorize')) {
-    assert.equal(s.controls.length, 0, `a derived stage (${s.key}) must carry NO per-stage controls`);
+    assert.equal(runCtrls(s).length, 0, `a derived stage (${s.key}) must carry NO Stop/Resume/Restart controls`);
   }
-  // A caught-up (all-done) vault shows no controls — nothing to stop, nothing paused. Read the
+  // A caught-up (all-done) vault shows no run controls — nothing to stop, nothing paused. Read the
   // OPENED card (D-025 collapses it at rest), so this stays a real assertion about the stage
   // rows rather than a vacuous 0 from a card that renders no stages at all.
   assert.ok(caughtupOpen.stageCount === 6, `the opened caught-up card must render its six stages (got ${caughtupOpen.stageCount})`);
-  assert.equal(caughtupOpen.ctrlCount, 0, 'a settled vault must show no Stop/Resume controls');
+  const settledRunCtrls = caughtupOpen.stages.flatMap(runCtrls);
+  assert.equal(settledRunCtrls.length, 0,
+    `a settled vault must show no Stop/Resume/Restart controls. Got: ${JSON.stringify(settledRunCtrls)}`);
+});
+
+t('R4e. ⭐ P8b: a BUILT map carries a Rebuild (↻) on its cluster row, and clicking it really fires rebuild()', () => {
+  // THE REGRESSION THIS GUARDS. P8b deletes the MapFreshness card, whose "Rebuild map" button was
+  // the user's only manual trigger — D-004 symptom 2 was precisely a rebuild that existed with no
+  // reachable control ("pass ?force=1 to rebuild. this i cant do from the UI as a user"). Deleting
+  // the section without preserving the verb re-creates that defect, so the verb is asserted HERE,
+  // mounted and clicked, not merely present in the source.
+  const cluster = byKey(caughtupOpen).cluster;
+  assert.equal(cluster.state, 'done', 'the caught-up probe must have a BUILT map (cluster done)');
+  const rebuildCtrl = cluster.controls.find((c) => c.kind === 'rebuild');
+  assert.ok(rebuildCtrl, `a built map's cluster row must carry a Rebuild control. Got: ${JSON.stringify(cluster.controls)}`);
+  assert.ok(rebuildCtrl.hasIcon && rebuildCtrl.visible && !rebuildCtrl.disabled,
+    `the Rebuild control must be a visible, enabled ICON button. Got: ${JSON.stringify(rebuildCtrl)}`);
+  assert.ok(/rebuild/i.test(rebuildCtrl.label),
+    `its accessible name must state the ACTION. Got: ${JSON.stringify(rebuildCtrl.label)}`);
+
+  // ⚠️ IT IS ON EVERY BUILT MAP, NOT ONLY A STALE ONE. `caughtup` is the UP-TO-DATE probe — no
+  // drift, nothing to catch up on — and the control must still be there. Gating it on staleness is
+  // the tempting "only show it when it's needed", which is the original defect's exact shape.
+  assert.ok(!cluster.stale, 'the caught-up probe must be a NON-stale map (that is what makes this assertion bite)');
+
+  // And it is WIRED: the harness clicks it and records the spy call. A rendered-but-inert button is
+  // the same dead end as no button ([[render-must-be-mounted-not-grepped]]).
+  const clicked = run('caughtup', { expand: true, click: 'cluster', ctrl: 'rebuild' });
+  assert.ok(clicked.calls.includes('rebuild'),
+    `clicking Rebuild must call rebuild() from the generate lifecycle. Got calls: ${JSON.stringify(clicked.calls)}`);
 });
 
 t('R4d. ⭐ QA6: a DEFERRED categorize (waiting_embed) renders its reason + Pause control, NO generic action, and NOT "waiting on you"', () => {

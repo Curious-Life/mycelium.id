@@ -49,6 +49,7 @@
 //   version of this record claimed otherwise. The fingerprint above is the real guard.
 // • M1b and T4b/T4c cannot red independently of M1 — see the notes at each. They are
 //   labels and characterisations, not coverage.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createHash } from 'node:crypto';
 import { lookupModel, REGISTRY_META, MODEL_REGISTRY } from '../src/inference/model-registry.js';
 import { resolveModelProfile, _resetModelProfileCache } from '../src/inference/model-profile.js';

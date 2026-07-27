@@ -37,6 +37,7 @@
 //   4. NO_REPLY sentinel delivers nothing
 //   5. seedReflectionCycles is idempotent (2× = 6 rows, not 12) and stamps the cycle body/marker
 //   6. the 'reflection' inference task is registered
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -249,7 +250,7 @@ ok(isGrantableTool('removeFromMind'), 'removeFromMind is chat-grantable (mindfil
   const crypto = (await import('node:crypto')).default;
   const { boot } = await import('../src/index.js');
   const { applyMigrations } = await import('../src/db/migrate.js');
-  const { autonomyTools } = await import('../src/agent/autonomy-tools.js');
+  const { autonomyTools, isWriteTrustedProvenance } = await import('../src/agent/autonomy-tools.js');
   const { cycleTurnOpts: realCycleTurnOpts } = await import('../src/agent/cycle-prompts.js');
 
   const DB = 'data/verify-reflection-cycles.db', KCV = 'data/verify-reflection-cycles-kcv.json';
@@ -280,7 +281,13 @@ ok(isGrantableTool('removeFromMind'), 'removeFromMind is chat-grantable (mindfil
     // derived by the REAL cycleTurnOpts from the row's immutable created_by.
     const grantFor = (row) => {
       const { isCycle } = realCycleTurnOpts(row);
-      return new Set(autonomyTools(tools, row.enabled_tools || [], { isCycle }).map((t) => t.name));
+      // Mirrors src/agent/scheduler.js buildAndRunTurn exactly: isCycle from the row's immutable
+      // created_by, NARROWED by its trust provenance, which also supplies writeTrusted. Derived
+      // from the row rather than hardcoded, so a repurposed cycle fails here as in production.
+      const instructionsTrusted = isWriteTrustedProvenance(row.tool_provenance);
+      return new Set(autonomyTools(tools, row.enabled_tools || [], {
+        isCycle: isCycle && instructionsTrusted, writeTrusted: instructionsTrusted,
+      }).map((t) => t.name));
     };
 
     // 10b — the teeth. Every name the STORED row declares must survive a real grant call.
@@ -333,8 +340,9 @@ ok(isGrantableTool('removeFromMind'), 'removeFromMind is chat-grantable (mindfil
     // — a false green on exactly the regression this check exists to catch. Tolerant about
     // SIBLING KEYS in the bag (D-063's `humanTriggered` legitimately joined it), strict about
     // where the key appears.
-    ok(/enabledTools:\s*task\.enabled_tools/.test(schedSrc) && /runAgentTurn\([\s\S]{0,800}?^\s*isCycle,\s*$/m.test(schedSrc),
-      '10f [source] scheduler forwards BOTH enabled_tools and isCycle to the turn');
+    ok(/enabledTools:\s*task\.enabled_tools/.test(schedSrc)
+      && /runAgentTurnImpl\([\s\S]{0,1200}?^\s*isCycle: isCycle && instructionsTrusted,\s*$/m.test(schedSrc),
+      '10f [source] scheduler forwards enabled_tools + provenance-narrowed isCycle to the turn');
     ok(/autonomyTools\(tools,\s*enabledTools,\s*\{[^}]*\bisCycle\b[^}]*\}\)/.test(turnSrc),
       '10f [source] run-turn passes isCycle into the grant');
   } finally {

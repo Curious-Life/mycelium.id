@@ -10,6 +10,9 @@ import { createInferenceRouter } from './inference/router.js';
 // the single reserved list, the control-plane availability check and the claim all
 // live there — this router never touches user_profiles.handle itself.
 import { setHandle, checkAvailability, currentHandle, pendingHandle, mirrorProfileHandle } from './identity/handle-service.js';
+// Read-only: the federation READINESS check (/connections/readiness) reports which
+// precondition is unmet so the Connections UI can say so instead of failing on send.
+import { readRemoteConfig } from './remote/config.js';
 import { computeContentHash, validatePath, SaveDocumentError } from './core/document-store.js';
 import { resolveKeyAgreementKey } from './federation/did.js';
 import { applyShareGrant, applyShareRevoke } from './federation/space-membership.js';
@@ -528,6 +531,60 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   router.get('/connections', async (_req, res) => {
     try { ok(res, { connections: (await db.connections.list(userId)).map(mapConn) }); }
     catch { ok(res, { connections: [] }); }
+  });
+  // FEDERATION READINESS — can this vault connect to anyone at all?
+  //
+  // Connecting requires a CLAIMED handle: the outbound request carries `from_handle` so the
+  // peer can resolve us back, and requireSelfHandle() throws without one. It ALSO requires the
+  // reachability stack to be running, because FIRST contact with a stranger resolves their
+  // did.json (or WebFinger) over the network and they must be able to do the same to us — the
+  // relay makes delivery offline-tolerant, not discovery.
+  //
+  // The Connections UI used to advertise the composer unconditionally, so a vault missing either
+  // precondition was invited to send an invite that could not work and only found out on submit.
+  // This reports WHICH precondition is unmet, so the UI can name it and route the user to the fix.
+  //
+  // Deliberately a PORTAL route, not /api/v1/remote/status: that one is 404'd at the relay edge
+  // (it mints/returns the recovery key and sets the operator password, so it is loopback-only by
+  // design), which would break this check for every web/remote client.
+  //
+  // Fail SOFT, not closed: a config read that throws reports ready:true rather than locking the
+  // composer. This is an ADVISORY hint — the real authority is requireSelfHandle() on the send
+  // path, which still fails loudly. A readiness bug must never be able to block a working vault.
+  router.get('/connections/readiness', (_req, res) => {
+    try {
+      const rc = readRemoteConfig();
+      const handle = currentHandle();
+      // remoteMode drives the Tauri shell's sidecar start (caddy for managed/own-relay/direct,
+      // frpc for the relay modes) — see src-tauri/src/main.rs. 'off' means nothing is listening
+      // for us publicly, so peers cannot resolve us however good the handle is. NOTE the legacy
+      // `remoteEnabled` toggle is NOT a federation precondition: the shell starts the stack on
+      // `mode != 'off'` alone, and claiming a handle sets mode='managed'.
+      let reason = null;
+      if (!handle) {
+        reason = {
+          code: 'no_handle',
+          title: 'You need an address before you can connect',
+          detail: pendingHandle()
+            ? `You picked @${pendingHandle()}, but it was never claimed — so nothing can reach you yet.`
+            : 'Connecting sends your handle so the other vault can reach you back.',
+          pane: 'connections',
+        };
+      } else if (rc.remoteMode === 'off') {
+        reason = {
+          code: 'remote_off',
+          title: 'Your vault is not reachable from the internet',
+          detail: `You hold @${handle}, but remote access is switched off, so other vaults cannot reach yours to deliver or accept an invitation.`,
+          pane: 'connections',
+        };
+      }
+      ok(res, {
+        ready: !reason, handle, pendingHandle: pendingHandle(),
+        publicHost: rc.publicHost || null, remoteMode: rc.remoteMode, reason,
+      });
+    } catch {
+      ok(res, { ready: true, handle: null, pendingHandle: null, publicHost: null, remoteMode: 'unknown', reason: null });
+    }
   });
   // count of pending INBOUND requests — feeds the nav badge.
   router.get('/connections/count', async (_req, res) => {

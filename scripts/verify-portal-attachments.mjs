@@ -14,6 +14,7 @@
 //   PA9-PA13 ?format=wav playback: a recording PAST the old 15-minute cap is served WHOLE, streamed
 //            rather than buffered, Range-exact, and a cut decode fails the transfer instead of
 //            completing a short body that sounds finished
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 process.env.MYCELIUM_UPLOADS_ROOT = 'data/verify-portalatt-uploads';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, existsSync } from 'node:fs';

@@ -6,6 +6,7 @@
 //      un-evadable) — and it is actually mounted in server-http.js.
 //   B. networked logout REVOKES the better-auth session (no false logout): the
 //      shim forwards cookie+Origin to /api/auth/sign-out; the old cookie dies.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import express from 'express';
 import { toNodeHandler } from 'better-auth/node';

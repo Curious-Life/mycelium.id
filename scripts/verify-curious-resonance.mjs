@@ -2,6 +2,7 @@
 // Invokes the route handler with a mock db + auth; asserts (1) a territory whose
 // centroid equals a figure's own centroid surfaces that figure #1 (correctness),
 // (2) the response carries NO raw centroid (security — CLAUDE.md §7), (3) shape.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import fs from 'node:fs';
 import { portalMeasurementRouter } from '../src/portal-measurement.js';
 

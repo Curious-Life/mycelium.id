@@ -5,6 +5,7 @@
 // health states honestly; (2) the portal router validates models, persists the
 // choice, and proxies /download; (3) transcribeAudio prefers Whisper when
 // healthy, falls back to the LLM path on whisper failure, and never throws.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createServer } from 'node:http';
 import express from 'express';
 

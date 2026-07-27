@@ -540,22 +540,44 @@ fn main() {
             let key_source =
                 std::env::var("MYCELIUM_KEY_SOURCE").unwrap_or_else(|_| "keychain".into());
             let data_dir: Option<PathBuf> = app.path().app_data_dir().ok();
-            // DEV BUILD ("Mycelium Dev", identifier id.mycelium.app.dev): run against
-            // the PRODUCTION vault (id.mycelium.app) AND enable the fail-closed
-            // pre-migration snapshot — so the dev app can be the daily driver on the
-            // real vault while every schema change is snapshotted first. Detected by
-            // the data-dir suffix (no config plumbing); production (non-.dev) is
-            // byte-for-byte unaffected.
-            let is_dev = data_dir
+            // D-082 (2026-07-27): a NON-RELEASE BUILD MUST NOT RESOLVE THE PRODUCTION
+            // VAULT. This used to do the exact opposite — a ".dev" bundle was rewritten
+            // onto id.mycelium.app so the dev app could be "the daily driver on the real
+            // vault". Combined with D-080 that meant an unsigned local build could open,
+            // and re-initialise, the production vault with no confirmation. The hazard
+            // had already been recognised for the SCHEMA (at-rest is forced off under
+            // `cargo tauri dev`, below) and not for the vault's IDENTITY.
+            //
+            // Two independent ways a build is non-release, because either alone leaks:
+            //   · the bundle identifier ends in `.dev` (the `Mycelium Dev` bundle), and
+            //   · debug_assertions — a plain `cargo tauri build`/`dev` of the PRODUCTION
+            //     config, which keeps the production identifier and is what an unsigned
+            //     local build actually is.
+            // Each resolves to its own sibling directory, so the production vault is
+            // reachable only from a release build of the production bundle.
+            let is_dev_bundle = data_dir
                 .as_ref()
                 .and_then(|d| d.file_name())
                 .map(|n| n.to_string_lossy().ends_with(".dev"))
                 .unwrap_or(false);
-            let data_dir: Option<PathBuf> = if is_dev {
-                data_dir.map(|d| d.with_file_name("id.mycelium.app"))
+            let is_dev = is_dev_bundle || cfg!(debug_assertions);
+            let data_dir: Option<PathBuf> = if is_dev && !is_dev_bundle {
+                data_dir.map(|d| {
+                    let name = d.file_name().map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "id.mycelium.app".into());
+                    d.with_file_name(format!("{name}.dev"))
+                })
             } else {
                 data_dir
             };
+            if is_dev {
+                if let Some(d) = &data_dir {
+                    eprintln!(
+                        "[mycelium] NON-RELEASE BUILD — using the development vault at {} (the production vault is not touched)",
+                        d.display()
+                    );
+                }
+            }
             let pidfile: Option<PathBuf> = data_dir.as_ref().map(|d| d.join("sidecars.pids"));
 
             // Reap any sidecars orphaned by a prior hard crash BEFORE spawning new ones.
@@ -665,9 +687,11 @@ fn main() {
                         if let Some(d) = &r_data {
                             cmd.env("MYCELIUM_DATA_DIR", d);
                         }
-                        if r_dev {
-                            cmd.env("MYCELIUM_SNAPSHOT_ON_BOOT", "1");
-                        }
+                        // D-081: the pre-boot snapshot is DEFAULT-ON in the node layer
+                        // now (src/account/snapshot-on-boot.js). It is deliberately NOT
+                        // set here any more — this dev-only setter is exactly why the
+                        // production app, the one users run, had no local backup.
+                        let _ = r_dev;
                         // Child diagnostics survive a Finder launch (see child_log).
                         if let Some(f) = child_log(&r_data, "server-rest.log") {
                             if let Ok(out) = f.try_clone() {
@@ -781,9 +805,8 @@ fn main() {
                                 http.env("MYCELIUM_AT_REST", "1");
                                 http.env("MYCELIUM_SEARCH_BACKEND", "sqlite"); // on-disk search (see server-rest spawn)
                             }
-                            if sup_dev {
-                                http.env("MYCELIUM_SNAPSHOT_ON_BOOT", "1");
-                            }
+                            // D-081: default-on in the node layer; see the server-rest spawn.
+                            let _ = sup_dev;
                             if !public_host.is_empty() {
                                 http.env("MYCELIUM_BASE_URL", format!("https://{public_host}"));
                             }

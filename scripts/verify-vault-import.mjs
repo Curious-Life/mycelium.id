@@ -15,6 +15,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>. Design:
 // the vault-import design
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';

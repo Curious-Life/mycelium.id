@@ -25,6 +25,7 @@
 //   N6  the notice send failing (Bot API 500) → fail-soft: no throw, the lane
 //       keeps running turns, and the episode stays one-notice
 // PASS/FAIL ledger; exit 0 only on full GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { buildDaemon } from '../packages/channel-daemon/index.js';

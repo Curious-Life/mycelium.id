@@ -59,11 +59,39 @@ function makeDb({ grantState = { granted: true, connId: 'cid', peerId: PEER_DID 
   };
 }
 
+// ⚠️ THE INJECTED `lookup` IS WHAT MAKES THIS TEST HERMETIC, AND ITS ABSENCE ONCE TURNED THE WHOLE
+// SUITE RED WITH NO CODE CHANGE AT ALL.
+//
+// safeFetch (src/federation/ssrf.js) is fail-CLOSED: before it will fetch an attacker-influenced
+// URL it resolves the host and requires at least one PUBLIC address, so an unresolvable host throws
+// `refusing to fetch an unresolvable host`. That guard runs even when a test injects `fetch` — by
+// design, and it must keep running here, because it is the SSRF property this file is partly about.
+//
+// `lo.mycelium.id` is a FAKE host. With no `lookup` injected the guard consulted REAL PUBLIC DNS,
+// so the verdict of a security-critical gate depended on whether a wildcard record happened to
+// resolve on the machine running it. On 2026-07-27 that flipped mid-afternoon: main's CI run passed
+// this file at 14:40 and a PR's run — same code, a diff touching only mindscape UI — failed all six
+// subtests at 15:18, every one a 401 `unresolvable did`. Nothing in the repo had changed.
+//
+// That is the green-for-the-wrong-reason family this repo keeps finding: the gate was green because
+// an external DNS record resolved, not because the code was correct — and equally, its red said
+// nothing about the code either.
+//
+// Injecting a resolver that maps the fake hosts to a PUBLIC literal keeps the guard fully armed
+// (it still resolves, still rejects private addresses) while making the answer independent of the
+// internet. This mirrors scripts/verify-federation.mjs's `testLookup`, which is the established
+// pattern here — every other federation test and gate already does it; this file and
+// federation-handlers.test.js were the two that did not.
+const testLookup = async (host) => {
+  if (/\.mycelium\.id$/.test(host)) return [{ address: '93.184.216.34', family: 4 }];
+  throw new Error(`testLookup: unmapped host ${host}`);
+};
+
 function handlers(db) {
   return createFederationHandlers({
     db, userId: 'me', identity: LOCAL,
     getHost: () => LOCAL_HOST, getHandle: () => 'hi',
-    fetch: fetchPeerDid,
+    fetch: fetchPeerDid, lookup: testLookup,
   });
 }
 

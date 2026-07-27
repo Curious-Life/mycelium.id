@@ -11,6 +11,7 @@
 // differs when it lags (so the is_current gate is necessary, not decorative), then asserts
 // the endpoint reports is_current and the view gates the chip on it + fails closed.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { baselineZ } from '../src/metrics/baseline-z.js';
 

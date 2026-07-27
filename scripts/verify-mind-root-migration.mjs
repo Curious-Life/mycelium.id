@@ -8,6 +8,7 @@
 // the move is byte-only + decrypt-safe, idempotent, crash-resumable, fail-closed,
 // never clobbers a newer capsule, and that the destroy wipe now gets an ABSOLUTE
 // mind root. Ends with a VERDICT line; exits non-zero on any FAIL.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import * as realFs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import path from 'node:path';

@@ -7,6 +7,7 @@
 //
 // detectSources({home}) is pure (takes a home dir) — no boot needed.
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { rmSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';

@@ -2,6 +2,7 @@
 // verify:channel-access — per-channel access policy (B1). Pure decideAccess truth
 // table + a real-vault round-trip (set/get/decide) + encryption-at-rest of the
 // allowlist. PASS/FAIL; exit 0 on GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import crypto from 'node:crypto';

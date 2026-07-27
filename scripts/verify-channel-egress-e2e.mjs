@@ -14,6 +14,7 @@
 //   - the egress-audit endpoint rejects any payload carrying plaintext
 //   - ZERO-PLAINTEXT: no egress_audit row contains the message body
 // PASS/FAIL ledger; exit 0 only on full GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

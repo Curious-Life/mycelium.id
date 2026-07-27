@@ -1,6 +1,7 @@
 // MCP-server proof (Wave 1, milestone 2): boot the real server, connect a real
 // MCP client over an in-memory transport pair, and drive tools/list + a
 // tools/call round-trip. PASS/FAIL ledger; exits 0 only on full GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

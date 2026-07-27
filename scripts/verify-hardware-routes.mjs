@@ -10,6 +10,7 @@
 // Mounts the router on a throwaway app with INJECTED detect + a mock Ollama fetch
 // + (where relevant) an injected daemon. No real network; CWD-independent. Never
 // logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import { portalHardwareRouter } from '../src/portal-hardware.js';
 import { CATALOG } from '../src/hardware/catalog.js';

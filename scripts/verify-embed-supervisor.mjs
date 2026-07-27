@@ -14,6 +14,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { EventEmitter } from 'node:events';
 import { startEmbedSupervisor, getEmbedderHealth, getEmbedSupervisor, _resetEmbedSupervisor } from '../src/embed/supervisor.js';
 

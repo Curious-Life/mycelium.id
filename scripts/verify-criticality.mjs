@@ -6,6 +6,7 @@
 // event_type/severity) stay plaintext, and that a read through the adapter
 // auto-decrypts them to usable numbers. Runs the REAL stage via spawnSync.
 // Honest-stub check: ml_transition_score is always NULL. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

@@ -8,6 +8,7 @@
 //   C. networked + no Bearer → 401 (owner-gated, fail-closed)
 //   D. loopback → captured (desktop unaffected)
 //   E. missing events[] → 400
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

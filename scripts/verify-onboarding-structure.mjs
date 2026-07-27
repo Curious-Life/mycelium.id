@@ -21,6 +21,7 @@
 //   Restored the settings-path import → O4 GREEN. This is the anti-fork guard: a divergent
 //   channel-connect copy is the exact D-031 failure the check exists to catch.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";

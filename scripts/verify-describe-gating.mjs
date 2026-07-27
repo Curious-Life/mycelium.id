@@ -12,6 +12,7 @@
 //      (copies ciphertext story to chronicle-less successor; never overwrites)
 //   G8 jobs.js wiring: search refresh + chronicle single-flight present
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';

@@ -8,6 +8,7 @@
 //   S6 advanceOverdue pushes overdue next_run forward
 //   S7 putSummary/getSummary round-trip; summary ENCRYPTED at rest
 //   S8 updateTask re-encrypts prompt on UPDATE
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

@@ -42,23 +42,104 @@
 //     content to a cloud provider already cleared §4g/consent for that content;
 //     this widens nothing (no new destination, no new field class).
 
-/** Per-message clamp so one long transcript can't crowd out the whole briefing. */
-export const MAX_ATTACHMENT_TEXT = 4000;
+// text-limits.js is pure constants + one pure function (no I/O, no express) — safe for the
+// stdio MCP tool path that imports this module. transcript-coverage.js is likewise pure
+// parsing (readCoverage NEVER throws; malformed metadata reads as "no coverage recorded").
+import { DERIVED_TEXT_MAX_CHARS } from '../enrich/text-limits.js';
+import { readCoverage } from '../enrich/transcript-coverage.js';
 
-// AGGREGATE budget (QA 2026-07-22, round 2): the per-message clamp above bounds ONE
-// transcript, but a batch has no total — 40 messages × a 4000-char clamp = 160KB of
-// transcript in a single briefing (~40k tokens, 8× the pre-PR size). That silently
-// evicts claims/reflections/cycles AND the very history this PR populated, because
-// history is appended AFTER getContext and trimToTokenBudget is TAIL truncation.
-// So the resolver spends an aggregate budget MOST-RECENT-FIRST: the newest transcripts
-// get their full (clamped) text, and once the budget is spent, older ones degrade to a
-// POINTER line ("transcript stored (N chars) … ask me to read it") — a 4th honest
-// state, never a silent drop. Budgets are per call site (a day-review can afford more
-// than a turn preamble); the default is a fail-closed constant, never Infinity.
-export const TRANSCRIPT_BUDGET_BRIEFING = 6000;  // getContext getContext preamble (every turn)
-export const TRANSCRIPT_BUDGET_HISTORY = 8000;   // channel-turn / portal-chat history hydration
-export const TRANSCRIPT_BUDGET_DAILY = 24000;    // getDailyMessages day review (user-initiated, larger)
-export const DEFAULT_TRANSCRIPT_BUDGET = 12000;  // fail-closed default when a caller forgets — finite, never Infinity
+// ════════════════════════════════════════════════════════════════════════════════════════
+//  A PARTIAL TRANSCRIPT MUST NOT READ AS A COMPLETE ONE (D-076, #386 — added 2026-07-26)
+// ════════════════════════════════════════════════════════════════════════════════════════
+// #386 exists because "a partial transcript had NO representation, so it read as complete":
+// a 30-minute recording transcribed part-way and the system recorded it as finished. The fix
+// was a REPRESENTATION — `attachments.metadata.transcription` coverage, where `complete` is an
+// assertion that must be EARNED and an unearned row stays eligible for resume.
+//
+// That honesty layer stopped at the DB. This module renders the stored transcript to the AGENT,
+// and rendering a half-transcribed recording as bare text re-creates the same lie one layer up —
+// worse now that the text is no longer clamped, because there is no truncation marker left to
+// hint that anything is missing. So when coverage says INCOMPLETE we still show the full text
+// (the operator's call: no rationing) and we PREFIX what the text actually covers.
+//
+// Absence of coverage is NOT incompleteness: legacy rows predate the marker and carry good
+// transcripts. `incomplete && !complete` mirrors both isCoverageIncomplete() and the SQL drain
+// predicate, so a legacy row renders exactly as before.
+//
+// §1: numbers and booleans only — seconds, counts, a gap count. Never a fault string (which can
+// carry a service error), never an excerpt, never a filename beyond the one already rendered.
+const dur = (sec) => {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+};
+
+/** Honest coverage prefix for a transcript, or '' when the row is complete/legacy. */
+function coverageNote(att) {
+  const c = readCoverage(att?.metadata);
+  // Null-safe throughout, not just at the guard: this predicate is the ONE thing standing
+  // between "legacy row with a good transcript" and "every pre-#386 transcript smeared as
+  // partial", so it must stay legible and total rather than depending on an early return to
+  // protect the reads below it.
+  if (!c?.incomplete || c?.complete) return '';
+  const of = c?.durationSec > 0 ? ` of ${dur(c.durationSec)}` : '';
+  const covered = c?.coveredSec > 0 ? `covers ${dur(c.coveredSec)}${of}` : 'is partial';
+  const gaps = c?.gaps?.length ? `, with ${c.gaps.length} un-transcribed gap${c.gaps.length > 1 ? 's' : ''} inside it` : '';
+  return ` — INCOMPLETE: transcription was interrupted and this text ${covered}${gaps}; the recording continues past it and a resume is pending, so treat silence past the end as MISSING, not as nothing said`;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+//  FULL CONTENT — DoS CEILINGS ONLY (operator decision 2026-07-26; supersedes the 4000-char
+//  per-message clamp and the tiered 6000/8000/24000 aggregate rationing)
+// ════════════════════════════════════════════════════════════════════════════════════════
+// D-076 made long-audio transcription actually COMPLETE (chunk + stitch), so a 30-minute
+// recording now yields a ~27,000-char transcript. Under the old clamp the model read 4,000
+// of them — ~15% of the recording — and the remainder was reachable only through a pointer
+// line that named a retrieval route WHICH DOES NOT EXIST. No MCP tool reads
+// attachments.transcript: the whole tool surface touches attachments in exactly three files
+// (tools/context.js + tools/messages.js — this join — and tools/ingest.js, which only WRITES
+// attachment_id). Transcripts are deliberately not Library documents (internal-router.js:505
+// — "a single canonical Library presence"), so getDocument/findDocuments cannot reach one,
+// and db/search.js indexes territory_profiles/realms/semantic_themes, not attachments. A
+// budget whose overflow path is a dead end is not a budget; it is a silent cap with a note.
+//
+// The rationing was also sized against the WRONG number: LOCAL_DEFAULT's 8192-token window
+// (model-profile.js:38) is only the FLOOR used when the Ollama probe fails. Real windows are
+// 40k-200k (model-registry.js) and a successful probe replaces the default with the model's
+// true contextLength. A 30-minute transcript is ~6,750 tokens — 3% of a 200k window.
+//
+// So: show the full transcript. What remains is a DoS ceiling in the exact sense
+// text-limits.js means it — "far above any real content so we never silently lose a user's
+// data" — and never a model-context budget.
+//
+// ⚠️ THE CONSEQUENCE THIS TRADES FOR, STATED PLAINLY: on a SMALL-window model (the unprobed
+// 8192 floor, or gemma2/qwen3.5 at 8192) a full transcript can push the assembled system
+// prompt past inputBudget, and run-turn.js:233 trims the prompt by TAIL truncation — so the
+// sections getContext appends AFTER RECENT MESSAGES are what a small window now loses. That
+// is a deliberate trade (full content beats rationed content), not an oversight.
+
+/** Per-message DoS ceiling — NOT a content limit. Set to the PERSISTENCE ceiling, which
+ *  every transcript write already passes through (clampStored: transcribe-audio.js:92/175/180,
+ *  transcribe-attachment.js:212/218, portal-attachments.js:209). Nothing that reaches this
+ *  module can exceed it, so the clamp below PROVABLY never fires and the message renders its
+ *  full transcript. Kept as a ceiling rather than deleted so a future write path that forgets
+ *  clampStored still cannot put an unbounded string in front of a model. */
+export const MAX_ATTACHMENT_TEXT = DERIVED_TEXT_MAX_CHARS;
+
+// AGGREGATE DoS ceiling. One transcript is bounded above; a BATCH still needs a total,
+// because 40 messages × the 200k persistence ceiling is ~8MB of string assembled in memory
+// and handed to a model — a decompression-bomb shape, not a briefing. 1,000,000 chars
+// ≈ 250k tokens, above EVERY context window in model-registry.js except gpt-4.1's, so no
+// real batch reaches it; a pathological one degrades to POINTER lines, never silence.
+//
+// The three per-surface tiers are RETIRED — they WERE the rationing. The names are kept so
+// the four call sites (tools/context.js:205, agent/channel-turn.js:154, portal-chat.js:559,
+// tools/messages.js:87) read unchanged, and so the seam stays threaded if a future decision
+// re-introduces genuine per-surface budgets.
+export const TRANSCRIPT_DOS_CEILING = 1_000_000;
+export const TRANSCRIPT_BUDGET_BRIEFING = TRANSCRIPT_DOS_CEILING;
+export const TRANSCRIPT_BUDGET_HISTORY = TRANSCRIPT_DOS_CEILING;
+export const TRANSCRIPT_BUDGET_DAILY = TRANSCRIPT_DOS_CEILING;
+export const DEFAULT_TRANSCRIPT_BUDGET = TRANSCRIPT_DOS_CEILING;
 
 const KIND_LABEL = { voice: 'Voice note', image: 'Image', video: 'Video', file: 'File' };
 
@@ -72,9 +153,14 @@ export function attachmentKindOf(fileType) {
   return 'file';
 }
 
+// Unreachable in practice (see MAX_ATTACHMENT_TEXT — persistence clamps at the same value).
+// The marker is SELF-DESCRIBING so that if it ever does fire, it reads unmistakably as the
+// ceiling rather than as a content decision — the same discipline as clampStored's marker.
 const clamp = (s) => {
   const t = String(s).trim();
-  return t.length > MAX_ATTACHMENT_TEXT ? `${t.slice(0, MAX_ATTACHMENT_TEXT)}… (truncated)` : t;
+  return t.length > MAX_ATTACHMENT_TEXT
+    ? `${t.slice(0, MAX_ATTACHMENT_TEXT)}\n[… truncated at ${MAX_ATTACHMENT_TEXT} chars — DoS ceiling, not a content limit]`
+    : t;
 };
 
 /** The derived text attachmentContextLine WOULD render for this attachment (before the
@@ -98,16 +184,25 @@ function budgetCost(att) {
   return len > MAX_ATTACHMENT_TEXT ? MAX_ATTACHMENT_TEXT : len;
 }
 
-/** The 4th honest state: derived text EXISTS but was left out to keep this briefing
- *  short (aggregate budget spent by more-recent attachments). A pointer, never silence —
- *  the agent is told the transcript is retrievable and how to get it. */
+/** The 4th honest state: derived text EXISTS but was left out because the batch hit the
+ *  aggregate DoS ceiling (pathological only — see TRANSCRIPT_DOS_CEILING). A pointer, never
+ *  silence.
+ *
+ *  WORDING (fixed with the 2026-07-26 decision): this line used to end "ask me to read it",
+ *  which named a retrieval path that does not exist — there is NO tool that reads
+ *  attachments.transcript, so an agent that followed the instruction had nowhere to go, and
+ *  the "me" contradicted the sibling pending line's voice ("you" = agent, "them" = human).
+ *  It now points at Media, which is the only route that actually exists today. */
 export function attachmentPointerLine(att) {
   const kind = attachmentKindOf(att.file_type);
   const label = KIND_LABEL[kind] || 'File';
   const name = att.file_name ? `: ${att.file_name}` : '';
   const noun = (kind === 'voice' || kind === 'video') ? 'transcript' : 'text';
   const chars = derivedText(att).length.toLocaleString('en-US');
-  return `[${label}${name} — ${noun} stored (${chars} chars), not included here to keep this briefing short; ask me to read it.]`;
+  // Carry the incompleteness into the pointer too — "transcript stored (N chars)" would
+  // otherwise read as a complete recording that merely wasn't inlined.
+  const note = coverageNote(att);
+  return `[${label}${name}${note ? ` (${note.replace(/^ — /, '')})` : ''} — ${noun} stored (${chars} chars), not included here: this batch hit the aggregate size ceiling. You can ask them to open it in Media.]`;
 }
 
 // Don't say the same thing twice: the channel inbound path already folds the
@@ -147,7 +242,14 @@ export function attachmentContextLine(att, { content = '' } = {}) {
 
   if (kind === 'voice' || kind === 'video') {
     if (transcript) {
-      return alreadyCarries(content, transcript) ? null : `[${head} — transcript: "${clamp(transcript)}"]`;
+      // The coverage note rides OUTSIDE the dedup check: a channel-inbound message that already
+      // folded the transcript into content still needs to be told the text is partial, so the
+      // note is what makes this line worth emitting even when the words themselves are a dup.
+      const note = coverageNote(att);
+      if (alreadyCarries(content, transcript)) {
+        return note ? `[${head}${note}]` : null;
+      }
+      return `[${head}${note} — transcript: "${clamp(transcript)}"]`;
     }
     // Pending ≠ impossible. "unavailable" reads as permanent and makes the agent
     // give up; the honest state is that transcription has not produced text YET.
@@ -169,11 +271,13 @@ export function attachmentContextLine(att, { content = '' } = {}) {
  * Fail-soft but HONEST: if the attachment read throws, every attachment-bearing
  * row still gets the "could not be loaded" line (never silence).
  *
- * AGGREGATE BUDGET: `budget` chars of derived text are spent across the batch
+ * AGGREGATE DoS CEILING: `budget` chars of derived text are spent across the batch
  * MOST-RECENT-FIRST (created_at desc — NOT array order: selectRecent hands rows
  * newest-first but selectPaginated/selectByConversation hand them oldest-first, so
- * we sort by real recency). The newest attachments render their full (clamped) text;
- * once the budget is spent, older ones degrade to a POINTER line (never a silent drop).
+ * we sort by real recency). At the ceiling's real value every transcript in any realistic
+ * batch renders IN FULL; the spend loop exists so that a pathological batch (a bomb, not a
+ * briefing) degrades to POINTER lines rather than silence — and so it degrades the OLDEST
+ * first, never the message the human just sent.
  * Pending/undescribed attachments cost 0 and always render their short honest line.
  *
  * SCOPE NOTE (MINOR-2, round 2): `attachments` ∈ SCOPE_AWARE_TABLES (crypto-local.js),

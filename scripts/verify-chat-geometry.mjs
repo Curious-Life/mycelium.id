@@ -163,6 +163,7 @@
 //   true` whenever the thread is non-empty, instead of once per ticket increment) → R10 REDs ("the
 //   user's collapse click did not collapse the chat") and R9 REDs ("the chat expanded WITHOUT the
 //   explicit request"). R8 stayed green, which is precisely R9's job.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';

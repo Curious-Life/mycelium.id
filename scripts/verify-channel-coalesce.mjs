@@ -5,6 +5,7 @@
 //   - separate chats coalesce independently
 //   - flushAll drains pending buffers
 // PASS/FAIL ledger; exit 1 on any fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createCoalescer } from '../packages/channel-daemon/transport/coalescer.js';
 
 const ledger = [];

@@ -10,6 +10,7 @@
 //  • §7 FAIL-SAFE: the payload carries ZERO content/ciphertext — no decryption path
 //  • the /streams/history endpoint is wired and returns the same shape
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import express from 'express';
 import http from 'node:http';

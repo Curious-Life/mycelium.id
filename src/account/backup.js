@@ -30,6 +30,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { assertEntryCount } from '../ingest/import-parsers.js';
 import { resolveDbKeyHex } from '../db/open.js';
+import { vaultPresence } from './vault-presence.js';
 
 export const ARCHIVE_VERSION = 1;
 export const ARCHIVE_EXT = '.myvault';
@@ -471,7 +472,11 @@ export async function restoreVaultArchive({ buffer, dbPath, kcvPath, uploadsRoot
   if (!v.ok) { const e = new Error(v.error); e.code = 'invalid_archive'; throw e; }
   const { zip, manifest } = v;
 
-  if (existsSync(kcvPath) && !overwrite) {
+  // D-080: ask the DATA, not just the sidecar. This was existsSync(kcvPath) alone,
+  // so a vault whose verifier was missing skipped the confirmation entirely and got
+  // replaced without the user ever being asked. The bytes survived (the moveAside
+  // below is unconditional), but consent for replacing a vault is not optional.
+  if (vaultPresence({ dbPath, kcvPath }).any && !overwrite) {
     const e = new Error('a vault already exists here — pass overwrite to replace it.');
     e.code = 'vault_exists';
     throw e;

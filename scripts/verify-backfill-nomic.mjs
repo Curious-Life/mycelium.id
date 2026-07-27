@@ -11,6 +11,7 @@
 //   - the endpoint's SECURITY gates: isTrustedLoopback (loopback-only, XFF rejected)
 //     + the named-target allowlist (unknown / partial → rejected)
 // @see the SQLCipher Nomic backfill-job design
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync } from 'node:fs';
 import { tmpdir } from 'node:os';

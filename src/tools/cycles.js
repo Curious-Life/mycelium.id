@@ -130,11 +130,21 @@ export function createCyclesDomain({ db, userId, saveDocument = realSaveDocument
       const patch = built.patch;
       if (!Object.keys(patch).length) return 'Nothing to update — pass prompt, schedule, and/or enabled.';
 
-      try { await db.harness.updateTask(userId, task.id, patch); }
+      // authorTrust:'model' (the default, spelled out): this is a MODEL-driven edit, so patching
+      // the cycle's instructions CLEARS its write provenance (db/harness.js). Without that, a
+      // trusted cycle is repurposable — rewrite the integration cycle's prompt and it still fires
+      // with editMindFile/writeMindFileWhole. The owner's own portal edit keeps the trust.
+      try { await db.harness.updateTask(userId, task.id, patch, { authorTrust: 'model' }); }
       catch { return 'Error: could not save the change.'; }
       const changed = Object.keys(patch).filter((k) => k !== 'next_run');
       const note = patch.status === 'paused' ? ' It will not run until you re-enable it.' : '';
-      return `Updated ${def.name} (${changed.join(', ')}). Takes effect at the next run.${note}`;
+      // Say the capability loss out loud. A silently-dropped tool that only fails at fire time,
+      // with nobody present, is the D-076 failure mode this codebase keeps paying for.
+      // Recoverable, and the wording says so truthfully: the portal PATCH route re-arms the trust
+      // (portal-reflection.js), because an authenticated owner saving their own cycle is the
+      // human-in-the-loop this boundary is built around.
+      const demoted = patch.prompt ? ' Note: because the instructions changed here, this cycle can no longer write to your vault — open Settings → Reflection and save it to restore that.' : '';
+      return `Updated ${def.name} (${changed.join(', ')}). Takes effect at the next run.${note}${demoted}`;
     },
 
     updatePersona: async (args = {}) => {

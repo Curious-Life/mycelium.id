@@ -198,6 +198,10 @@ export function createChannelTurnRouter({ db, userId, tools = [], handlers = {},
           userMessage: input,
           systemExtra: ownerTrusted ? OWNER_SYSTEM : CHANNEL_SYSTEM,
           enabledTools: ownerTrusted ? [...OWNER_CHANNEL_TOOLS] : [...UNTRUSTED_CHANNEL_TOOLS],
+          // The vault-WRITE tier now needs an explicit answer, not just the names above
+          // (autonomy-tools.js). Same single `ownerTrusted` the grant list uses: naming a write
+          // tool and being allowed to hold it must never diverge.
+          writeTrusted: ownerTrusted,
           // The SECOND condition for the destructive tier (`forget`) — see
           // autonomy-tools.js OWNER_DESTRUCTIVE_TOOLS. Derived from the SAME single
           // token-gated `ownerTrusted` as the grant + the untrusted-wrap decision, so the

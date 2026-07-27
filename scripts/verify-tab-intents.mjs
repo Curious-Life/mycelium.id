@@ -24,6 +24,7 @@
 //       on the first leaf; the unfocused pane's tab is untouched throughout.
 //       (Discriminator for the firstLeaf-instead-of-focused mutation, which
 //       stayed green against the single-pane scenarios where first == focused.)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 

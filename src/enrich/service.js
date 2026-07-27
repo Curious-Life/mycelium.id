@@ -30,6 +30,7 @@ import { EMBED_DIM } from '../embed/client.js';
 import { TAXONOMY_VERSION } from './categories-prompt.js';
 import { getMindSearch } from '../search/registry.js';
 import { extract } from './extract.js';
+import { embedTextOf } from './derived-text.js';
 
 // ── Bounded, outage-safe retry for stuck rows (2026-07-18) ─────────────────────
 // A transient embed failure (null vector) used to leave a row pending with NO
@@ -151,30 +152,43 @@ export function createEnrichmentService(deps) {
     const EMBED_CHUNK = 12;
     for (let start = 0; start < rows.length; start += EMBED_CHUNK) {
       const chunk = rows.slice(start, start + EMBED_CHUNK);
+      // ⚠️ EMBED THE MESSAGE *PLUS* ITS ATTACHMENT'S DERIVED TEXT, never `row.content`
+      // alone (2026-07-26). On the import path a voice note's content is "File: memo.ogg"
+      // and the spoken words live on `attachments.transcript`, which selectPendingEnrichment
+      // now LEFT JOINs in — so embedding content alone vectorised the FILENAME. ONE
+      // composition (enrich/derived-text.js) feeds every embed call below, including the
+      // per-row fallback and the rescue retry: a second copy of this rule is how the rescue
+      // silently re-embeds a different string from the batch it is rescuing.
+      const texts = chunk.map((r) => embedTextOf(r));
       let vectors;
       try {
         vectors = typeof embed.embedBatch === 'function'
-          ? await embed.embedBatch(chunk.map((r) => r.content), 'document')
-          : await Promise.all(chunk.map((r) => embed.embed(r.content, 'document')));
+          ? await embed.embedBatch(texts, 'document')
+          : await Promise.all(texts.map((t) => embed.embed(t, 'document')));
       } catch {
         // Whole-chunk embed failed — retry per row so one bad/slow row can't sink
         // the others; a row that still fails gets a null vector → handled by the
         // bounded attempt accounting below (pending, counted only against a
         // provably-up service — never blind-poisoned).
         vectors = [];
-        for (const r of chunk) {
-          try { vectors.push(await embed.embed(r.content, 'document')); }
+        for (const t of texts) {
+          try { vectors.push(await embed.embed(t, 'document')); }
           catch { vectors.push(null); }
         }
       }
 
       for (let i = 0; i < chunk.length; i++) {
         const row = chunk[i];
+        const text = texts[i];
         const vec = vectors[i];
         // Empty/blank content can't embed — TERMINAL SKIP (nlp_processed=1) so it
         // leaves the backlog for good. Was: stuck at nlp_processed=0 forever,
         // keeping enrichmentPending > 0 and starving the "settled → generate" gate.
-        if (!row.content || !String(row.content).trim()) {
+        // ⚠️ THE TEST IS THE COMPOSED TEXT, NOT `row.content`: a message whose body is
+        // whitespace but whose attachment carries a transcript has something real to
+        // embed, and terminal-skipping it would strand the transcript permanently
+        // (nlp_processed = 1 is never re-selected). A row with neither still skips.
+        if (!text || !text.trim()) {
           await messages.updateEnrichment(row.id, userId, { nlpProcessed: 1 });
           skipped++;
           continue;
@@ -188,7 +202,9 @@ export function createEnrichmentService(deps) {
         // === 'object'), which the drainer's self-heal skipped forever, stranding
         // valid msgs.
         if (vec == null) {
-          transientRows.push({ id: row.id, content: row.content, prior: embedAttemptsOf(row.nlp_error) });
+          // Carry the COMPOSED text, not row.content — the rescue below must re-embed
+          // exactly what this pass tried to embed.
+          transientRows.push({ id: row.id, text, prior: embedAttemptsOf(row.nlp_error) });
           continue;
         }
         try {
@@ -256,7 +272,7 @@ export function createEnrichmentService(deps) {
       // failure) lands instead of burning an attempt. Only reached for rows failing
       // against a provably-up service, once per cycle — never during an outage.
       let rescued = null;
-      try { rescued = await embed.embed(t.content, 'document', { timeoutMs: EMBED_RESCUE_TIMEOUT_MS }); }
+      try { rescued = await embed.embed(t.text, 'document', { timeoutMs: EMBED_RESCUE_TIMEOUT_MS }); }
       catch { rescued = null; }
       if (Array.isArray(rescued) && rescued.length === EMBED_DIM) {
         try {

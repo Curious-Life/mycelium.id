@@ -6,6 +6,7 @@
 //
 // Adapted from the OAuth spike probe (verified GO). The server runs in its own
 // process — the proven spike topology.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';

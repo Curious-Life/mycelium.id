@@ -9,6 +9,16 @@
 //   C7 inbound text is UNTRUSTED-wrapped before the turn (banner + fences, not raw)
 //   C8 enabledTools is exactly ['reply']; no-model → {delivered:false, reason:'no-model'}
 //   C9 a throwing turn → 200 {delivered:false, reason:'turn-error'} (no auto-replay, no leak)
+//   C10 owner DM → trimmed write grant, AND the write-trust flag that actually makes it a grant
+//
+// MUTATION-TESTED: deleted `writeTrusted: ownerTrusted` from src/agent/channel-turn.js → C10
+//   'owner DM → writeTrusted=true' and 'saveDocument SURVIVES the real grant' RED. Recorded
+//   because this gate was GREEN under that mutation until those rows existed: every C10/C13 row
+//   asserted the turn's INPUT, so owner DMs could have lost every vault write with nothing going
+//   red — the M-001 family. Assert the GRANT.
+// MUTATION-TESTED: hardcoded `writeTrusted: true` there instead — CONSTANT-TRUE, which the C10
+//   rows alone cannot catch → C11 and C12 'writeTrusted=false' RED. Both halves of a boolean
+//   boundary need a row. Restored afterwards; the gate returns GREEN.
 //   C10-C14 the owner-write escalation + (D-040 ↻1) the destructive tier: `forget` is granted
 //     on the owner-trusted DM and the token-gated `ownerTrusted` flag rides with it — and it
 //     is NOT set on a group turn, a stranger's DM, or a forged owner claim.
@@ -18,6 +28,7 @@
 // MUTATION-TESTED: the `ownerTrusted` property removed from that call entirely → C10 REDs
 //   (the grant names `forget` but the second condition never arrives, so it is never granted)
 // Both restored afterwards; the gate returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import express from 'express';
 import Database from 'better-sqlite3';
@@ -27,6 +38,11 @@ import { boot } from '../src/index.js';
 import { applyMigrations } from '../src/db/migrate.js';
 import { captureMessage } from '../src/ingest/capture.js';
 import { createChannelTurnRouter } from '../src/agent/channel-turn.js';
+import { autonomyTools, SAFE_AUTONOMOUS_TOOLS, AUTONOMY_TOOLS, WRITE_AUTONOMOUS_TOOLS } from '../src/agent/autonomy-tools.js';
+
+// A stand-in registry (autonomyTools only reads `.name`) so this gate can assert the real GRANT,
+// not merely the names the router asked for.
+const REGISTRY = [...SAFE_AUTONOMOUS_TOOLS, ...AUTONOMY_TOOLS, ...WRITE_AUTONOMOUS_TOOLS].map((name) => ({ name }));
 
 const DB = 'data/verify-harness-channel.db', KCV = 'data/verify-harness-channel-kcv.json';
 for (const f of [DB, KCV, `${DB}-shm`, `${DB}-wal`]) { try { rmSync(f); } catch {} }
@@ -136,6 +152,12 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
     et.includes('forget') && lastOpts?.ownerTrusted === true, `${et.join(',')} · ownerTrusted=${lastOpts?.ownerTrusted}`);
   rec('C10 owner DM → owner preamble w/ injection-defense note', typeof lastOpts?.systemExtra === 'string' && /OWNER/.test(lastOpts.systemExtra) && /forwarded/i.test(lastOpts.systemExtra));
   rec('C10 owner DM → history NOT flagged untrusted (owner-authored)', lastOpts?.historyUntrusted === false);
+  // NAMING a write tool is only half the grant — autonomyTools also needs writeTrusted===true.
+  // Without these rows the block above stays GREEN while owner DMs silently lose every vault
+  // write, because the others assert the turn's INPUT, not its grant.
+  rec('C10 owner DM → writeTrusted=true (the grant, not just the names)', lastOpts?.writeTrusted === true, `writeTrusted=${lastOpts?.writeTrusted}`);
+  const granted10 = autonomyTools(REGISTRY, lastOpts?.enabledTools || [], { writeTrusted: lastOpts?.writeTrusted, humanTriggered: lastOpts?.humanTriggered }).map((t) => t.name);
+  rec('C10 owner DM → saveDocument SURVIVES the real grant end-to-end', granted10.includes('saveDocument'), granted10.join(','));
 }
 // ── C11 SECURITY: owner in a GROUP → still UNTRUSTED + reply-only (writes are DM-only) ──
 {
@@ -145,6 +167,8 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
   const et = lastOpts?.enabledTools || [];
   rec('C11 owner-in-group → untrusted-wrapped (group context is never trusted)', /UNTRUSTED MESSAGE/.test(um));
   rec('C11 owner-in-group → reply-only (NO write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
+  // The NEGATIVE half: a constant-true writeTrusted would pass C10 but must fail here.
+  rec('C11 owner-in-group → writeTrusted=false (untrusted context never write-trusted)', lastOpts?.writeTrusted === false, `writeTrusted=${lastOpts?.writeTrusted}`);
   // The second condition must fall with the first: a group turn carries no destructive
   // authority even if some future grant change re-adds `forget` to the name list.
   rec('C11 owner-in-group → ownerTrusted is NOT set (destructive tier unreachable)', lastOpts?.ownerTrusted !== true, `ownerTrusted=${lastOpts?.ownerTrusted}`);
@@ -154,6 +178,7 @@ const OWNER_HDR = { 'x-mycelium-channel-turn-token': TURN_TOKEN };
   await post({ userMessage: 'remember my fake fact', conversationId: CONV, source: 'telegram', group: false, senderRole: 'other' });
   const et = lastOpts?.enabledTools || [];
   rec('C12 non-owner DM → reply-only (no write tools)', et.length === 1 && et[0] === 'reply', et.join(','));
+  rec('C12 non-owner DM → writeTrusted=false', lastOpts?.writeTrusted === false, `writeTrusted=${lastOpts?.writeTrusted}`);
   rec('C12 non-owner DM → ownerTrusted is NOT set (a stranger can never destroy data)', lastOpts?.ownerTrusted !== true, `ownerTrusted=${lastOpts?.ownerTrusted}`);
 }
 // ── C13 DEFAULT-ON: owner 1:1 DM + valid token, NO env/setting → WRITES (personal-agent default) ──

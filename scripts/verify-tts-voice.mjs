@@ -38,6 +38,7 @@
 // remove the backoff (V10), revert dirBytes to a top-level-only scan (V11) —
 // and the matching row goes FAIL. Falsifications are
 // run out-of-band with a cp-snapshot restore (NEVER `git checkout --`).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import os from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';

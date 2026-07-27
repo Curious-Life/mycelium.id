@@ -5,6 +5,7 @@
 // referential "system status" meta-reports are suppressed, and delivery is idempotent.
 // The four real production samples (2026-07-05..07) are asserted directly.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import {
   isSkipSentinel, looksLikeMetaReport, finalizeCycleOutput, cycleDeliveryId,
 } from '../src/agent/cycle-output.js';

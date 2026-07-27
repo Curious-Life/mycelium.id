@@ -16,6 +16,7 @@
 // a PROJECTION, and projections have been satisfied by their own comments twice in this build —
 // D2 itself was a regex until a reviewer dead-coded the CTA and it still said GO. The store's
 // mapping and the user's screen are two different claims, and this file must make both.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 

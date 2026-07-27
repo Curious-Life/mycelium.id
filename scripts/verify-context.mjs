@@ -1,6 +1,7 @@
 // getContext (D5 preamble) verifier. Proves the entry-point tool lists, returns
 // a briefing, and — critically — surfaces an item written via flagForDiscussion
 // (the round-trip that makes flagForDiscussion meaningful).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

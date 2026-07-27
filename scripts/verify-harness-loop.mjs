@@ -7,6 +7,7 @@
 //   L4 watchdog stall: no first token within ttfb → aborts + onStall fires
 //   L5 client-gone: pre-aborted external signal → no model call, clientGone
 //   L6 send passthrough: events reach the sink in order
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createAgentLoop } from '../src/agent/loop.js';
 import { classifyProviderError } from '../src/agent/provider-errors.js';
 import { parseRetryAfterMs } from '../src/inference/cloud.js';

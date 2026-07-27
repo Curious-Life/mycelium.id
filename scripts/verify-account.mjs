@@ -5,6 +5,7 @@
 // an OS-assigned port. Exercises: status, the 503 guard before setup, POST
 // /setup (one recovery key), re-setup 409, recovery-key view, then a new-machine
 // RESTORE (Keychain cleared, vault files remain) with wrong/malformed/right keys.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';

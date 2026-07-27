@@ -13,6 +13,7 @@
 //   T6 a REVOKED token → rpc dispatch returns 401 (gate re-checks every request)
 //   T7 the wire (frame) carries no plaintext path/token
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import express from 'express';
 import { createIdentity } from '../src/identity/identity.js';

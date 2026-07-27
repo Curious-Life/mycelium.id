@@ -1,5 +1,9 @@
 <!--
-	Reflection Cycles settings section (Settings → Intelligence).
+	Reflection Cycles section — the "Rhythms" card on the Agents page.
+
+	(It is named for, and still lives under, components/settings/ because it began as a
+	Settings → Intelligence section; its only importer is now RhythmsCard on the Agents
+	page, which pairs it with the scheduled tasks the reflection filter excludes.)
 
 	The control surface for the agent's autonomous wake cycles: a master opt-in toggle,
 	the timezone they fire in, a per-cycle list (schedule · status · next fire · last run)
@@ -15,6 +19,7 @@
 		id: string; name: string; schedule: string; humanSchedule: string;
 		status: string; essential: boolean; outputTarget: string;
 		nextRun: string | null; nextRunHuman: string; lastRun: string | null; lastStatus: string | null;
+		canWriteVault?: boolean;
 	};
 	type CheckIn = { id: string; role: string; content: string; at: string | null; model: string | null };
 	type ModelHealth = { configured: boolean; toolsCapable: boolean; model: string | null };
@@ -183,7 +188,7 @@
 	{:else}
 		<!-- model-health banner: cycles need a tool-capable model to read the day + write memory -->
 		{#if modelHealth && !modelHealth.configured}
-			<div class="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+			<div class="mt-4 rounded-lg border border-aurum/40 bg-aurum/10 p-3">
 				<p class="text-xs text-[var(--color-text-primary)]">
 					<span class="font-medium">No model set for reflection.</span>
 					Your cycles are on, but they can't run until you pick a model in
@@ -191,7 +196,7 @@
 				</p>
 			</div>
 		{:else if modelHealth && !modelHealth.toolsCapable}
-			<div class="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+			<div class="mt-4 rounded-lg border border-aurum/40 bg-aurum/10 p-3">
 				<p class="text-xs text-[var(--color-text-primary)]">
 					<span class="font-medium">Your reflection model can't read your memory.</span>
 					{modelHealth.model ? `“${modelHealth.model}” doesn't support tool use` : 'The selected model doesn’t support tool use'},
@@ -201,7 +206,7 @@
 		{/if}
 
 		<!-- timezone -->
-		<div class="mt-4 flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] p-3">
+		<div class="mt-4 flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2">
 			<p class="text-xs text-[var(--color-text-secondary)]">
 				Cycles run in your local time: <span class="font-medium text-[var(--color-text-primary)]">{timezone}</span>
 			</p>
@@ -215,11 +220,11 @@
 		<!-- per-cycle list -->
 		<div class="mt-3 space-y-2">
 			{#each cycles as c (c.id)}
-				<div class="rounded-lg border border-[var(--color-border)] p-3">
+				<div class="rounded-lg border border-[var(--color-border)] px-3 py-2">
 					<div class="flex items-start justify-between gap-3">
 						<div class="min-w-0">
 							<div class="flex items-center gap-2">
-								<span class="text-sm font-medium text-[var(--color-text-primary)]">{c.name}</span>
+								<span class="text-[0.82rem] font-medium text-[var(--color-text-primary)]">{c.name}</span>
 								{#if c.essential}<span class="text-[0.6rem] uppercase tracking-wide text-[var(--color-text-tertiary)]">check-in</span>{/if}
 							</div>
 							<div class="mt-0.5 text-xs text-[var(--color-text-secondary)]">
@@ -228,6 +233,11 @@
 								{#if c.status === 'active' && c.nextRunHuman}· next {c.nextRunHuman}{/if}
 								{#if c.lastStatus}· last {c.lastStatus}{/if}
 							</div>
+							{#if c.canWriteVault === false}
+								<div class="mt-1 text-xs text-aurum">
+									Can't update your vault — its instructions changed since setup. Open Edit and save to restore that.
+								</div>
+							{/if}
 						</div>
 						<div class="flex items-center gap-3 whitespace-nowrap">
 							<button class="text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]"
@@ -252,9 +262,9 @@
 								<textarea class="w-full rounded border border-[var(--color-border)] bg-transparent px-2 py-1 text-xs font-mono"
 									rows="8" bind:value={editPrompt}></textarea>
 							</label>
-							{#if editErr}<p class="text-xs text-red-500">{editErr}</p>{/if}
+							{#if editErr}<p class="text-xs text-coral">{editErr}</p>{/if}
 							<div class="flex gap-2">
-								<button class="rounded bg-[var(--color-accent)] px-3 py-1 text-xs text-white disabled:opacity-60"
+								<button class="rounded bg-[var(--color-accent)] px-3 py-1 text-xs text-[var(--color-bg)] disabled:opacity-60"
 									disabled={editBusy} onclick={() => saveEdit(c)}>Save</button>
 								<button class="text-xs text-[var(--color-text-secondary)]" onclick={closeEdit}>Cancel</button>
 							</div>
@@ -270,7 +280,7 @@
 				<h4 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">Recent activity</h4>
 				<div class="flex flex-wrap gap-1.5">
 					{#each runs.slice(0, 12) as run}
-						<span class="rounded px-1.5 py-0.5 text-[0.6rem] border {isProblem(run.status) ? 'border-red-500/40 text-red-500' : 'border-[var(--color-border)] text-[var(--color-text-tertiary)]'}"
+						<span class="rounded px-1.5 py-0.5 text-[0.6rem] border {isProblem(run.status) ? 'border-coral/40 text-coral' : 'border-[var(--color-border)] text-[var(--color-text-tertiary)]'}"
 							title={`${run.cycle ?? ''} · ${run.at ? new Date(run.at).toLocaleString() : ''}${run.error ? ' · ' + run.error : ''}`}>
 							{run.cycle ?? 'cycle'}: {run.status ?? '—'}
 						</span>
@@ -283,7 +293,7 @@
 		{#if checkins.length}
 			<div class="mt-4">
 				<h4 class="text-xs font-medium text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
-					Recent check-ins{#if unread > 0}<span class="ml-2 rounded-full bg-[var(--color-accent)] px-1.5 py-0.5 text-[0.6rem] text-white">{unread} new</span>{/if}
+					Recent check-ins{#if unread > 0}<span class="ml-2 rounded-full bg-[var(--color-accent)] px-1.5 py-0.5 text-[0.6rem] text-[var(--color-bg)]">{unread} new</span>{/if}
 				</h4>
 				<div class="space-y-2">
 					{#each checkins.slice(-5).reverse() as m (m.id)}
@@ -298,6 +308,6 @@
 	{/if}
 
 	{#if error}
-		<p class="mt-3 text-sm text-red-500">{error}</p>
+		<p class="mt-3 text-sm text-coral">{error}</p>
 	{/if}
 </div>

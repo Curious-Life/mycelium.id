@@ -4,6 +4,7 @@
 // model only when given; the vision-model probe degrades to null when Ollama is
 // down / has no vision model; and describeImage NEVER throws (it returns null so
 // the upload path falls back to the filename).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { localInfer } from '../src/inference/local.js';
 import { describeImage, pickVisionModel } from '../src/enrich/describe-image.js';
 

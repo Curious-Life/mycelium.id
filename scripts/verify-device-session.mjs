@@ -23,6 +23,7 @@
 // MUTATION-TESTED: accept the /device-session/web owner session without the CSRF check → W2a REDs
 // MUTATION-TESTED: remove the backing-token revoke in POST /auth/logout → L1 REDs (session still authenticates after logout)
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

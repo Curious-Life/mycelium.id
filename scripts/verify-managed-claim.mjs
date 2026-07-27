@@ -5,6 +5,7 @@
 //   MC4 invalid handle / short nonce / unknown action → buildClaim throws
 //   MC5 ACTION-CONFUSION blocked: a provision claim does NOT verify as a release
 // Pure crypto; no network; CWD-independent. Never logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { buildClaim, claimMessage } from '../src/remote/managed-claim.js';
 import { verifyWithPublicKey } from '../src/identity/identity.js';

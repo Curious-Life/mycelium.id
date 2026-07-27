@@ -12,6 +12,7 @@
 // Everything is in-process + a child server on a throwaway data dir — no real
 // Keychain, no network, CI-portable. PASS/FAIL ledger; exit 0 only on full GO.
 // Never logs a secret value (CLAUDE.md §1).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import { rmSync, mkdirSync, statSync } from 'node:fs';

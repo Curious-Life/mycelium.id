@@ -2,6 +2,49 @@ import { createHash } from 'node:crypto';
 import { assertSafeColumns, clampLimit } from './column-guard.js';
 import { buildAgentIdFilter, resolveAgentIds } from '../agent-id-aliases.js';
 import { bustMindscapePoints } from '../mindscape-cache.js';
+
+/**
+ * The statement `markForReembed` runs. EXPORTED so `verify:reembed-derived-text` can EXPLAIN
+ * QUERY PLAN the SQL THAT SHIPS rather than a hand-copied lookalike — a gate that plans against
+ * its own copy stays green through any future edit to the real WHERE, including one that drops
+ * `user_id` and full-scans (this repo's rule: "the gate exercises the statement that ships, not
+ * a copy", enrich/drainer.js).
+ *
+ * ⛔ THE CATEGORIZE STAGE IS RESET WITH THE EMBED STAGE, AND IT IS NOT COSMETIC (D-047 ↻1).
+ * `selectPendingCategories` enforces "embed before categorize" only for rows that are still
+ * UNTAGGED — an already-tagged row (`categories_processed = 1`) is never re-selected, so nulling
+ * its vector alone mints a row counted as `tagged` and NOT counted as `embedded`:
+ * `tagged > embedded` produced directly by the DAL, with no scheduler involved. That is exactly
+ * what `updateContent` was fixed to stop doing (gate verify:compute-lanes C17b) and what
+ * `restoreTable` was fixed to stop doing (C17c). This writer is the fourth path into that state
+ * and must not reopen it. Adversarial review, 2026-07-27, reproduced as `tagged=2 embedded=1`.
+ *
+ * ⚠️ BUT THE LABEL VALUES ARE KEPT, DELIBERATELY DIVERGING FROM `updateContent`. There, the
+ * message CONTENT changed, so the labels were "stale by definition". Here the body is untouched —
+ * only the attachment's derived text arrived — and `selectPendingCategories` projects `content`
+ * alone, so re-running L1 recomputes the SAME domain/register from the SAME input. Nulling them
+ * would blank a still-correct answer and leave the note unlabelled in the UI until L1 came back
+ * around. So: the FLAG is reset (the invariant is structural and must hold), the VALUES ride
+ * until the re-run overwrites them, and `categorized_at` is cleared because the old timestamp
+ * would no longer describe the current attempt.
+ *
+ * ⚠️ `content != ''` MIRRORS THE DRAIN PREDICATE. `selectPendingEnrichment` requires non-empty
+ * content, so re-queueing a content-empty row would strand it: nulled, never re-selected, and
+ * invisible to all three backlog counters (which carry the same clause) — the
+ * verify:enrich-backlog-parity bug class. Such rows exist: full-export-import's vector pass can
+ * land a vector on one, and local-files-import writes `content: ''` for media files.
+ */
+export const MARK_FOR_REEMBED_SQL =
+  `UPDATE messages
+      SET embedding_768 = NULL, nlp_processed = 0, nlp_error = NULL,
+          nlp_processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+          categories_processed = 0, categorized_at = NULL
+    WHERE user_id = ?
+      AND attachment_id = ?
+      AND forgotten_at IS NULL
+      AND embedding_768 IS NOT NULL
+      AND content IS NOT NULL AND content != ''
+  RETURNING id`;
 import { purgeDerived } from '../core/delete-cascade.js';
 import { unlinkBlobIfUnreferenced } from '../ingest/blob-store.js';
 
@@ -114,9 +157,12 @@ export function createMessagesNamespace(deps) {
   //
   // LOAD-BEARING INVARIANT: a row can never be counted in BOTH `embedded` and `pending`,
   // because embedding_768 and nlp_processed are always written TOGETHER. updateEnrichment
-  // ENFORCES it (`nlpProcessed` is required — it throws otherwise), and the only other
-  // writer of messages.embedding_768 is full-export-import's vector pass, which is the one
-  // table it calls with flipNlp=true (vector + nlp_processed=1 in a single UPDATE). If that
+  // ENFORCES it (`nlpProcessed` is required — it throws otherwise); full-export-import's
+  // vector pass calls this one table with flipNlp=true (vector + nlp_processed=1 in a single
+  // UPDATE); and `markForReembed` below — the third and newest writer (2026-07-26, late
+  // transcripts) — sets `embedding_768 = NULL` and `nlp_processed = 0` in the SAME statement
+  // for exactly this reason. That row then counts as `pending` and NOT as `embedded`, which
+  // is the honest reading: its old vector described the filename, not the speech. If that
   // invariant is ever broken, such a row would inflate both counts and `unprocessable`
   // would clamp at 0 (hence the Math.max) — the drainer would then re-embed it and heal
   // the state on its next cycle. Tests must set both columns; a raw UPDATE that sets only
@@ -375,6 +421,28 @@ export function createMessagesNamespace(deps) {
      * Oldest-first so a backlog drains in arrival order. The state predicate
      * runs on the (unencrypted) nlp_processed column at SQL level.
      *
+     * ⚠️ THE JOIN IS PART OF WHAT GETS EMBEDDED (2026-07-26). A message that owns an
+     * attachment carries its DERIVED TEXT — the voice transcript, the image caption,
+     * the extracted document text — on the ATTACHMENT row, not in `content`. On the
+     * import path `content` is literally "File: memo.ogg", so embedding content alone
+     * produced a vector describing the FILENAME while the spoken words sat one join
+     * away. The composition itself lives in ONE place (enrich/derived-text.js
+     * `embedTextOf`) so the drain, the rescue retry and any future reader cannot
+     * disagree about what a message's embeddable text is.
+     *
+     * ⛔ SELECT THE ENCRYPTED COLUMNS SEPARATELY — NEVER CONCATENATE THEM IN SQL.
+     * `attachments.transcript` and `.description` are in ENCRYPTED_FIELDS, and the
+     * adapter's autoDecryptResults decrypts envelope-shaped VALUES per column. A SQL
+     * `content || transcript` joins two base64 envelopes into a string that is no
+     * longer an envelope, so it silently decrypts to nothing and the derived text is
+     * dropped. That exact bug shipped twice on the search loader (d1-loader.js: the
+     * documents source, then territory/realm/theme). Aliases are safe — the decrypt
+     * keys on value SHAPE, not on column name — and neither alias may ever be added
+     * to NEVER_AUTO_DECRYPT_COLUMNS.
+     *
+     * The join is bounded by the batch (≤ `limit` rows) and hits attachments by
+     * PRIMARY KEY, so it costs one indexed lookup per row.
+     *
      * @param {string} userId
      * @param {{limit?: number}} opts
      */
@@ -384,16 +452,92 @@ export function createMessagesNamespace(deps) {
       // count of failures already attributed to it against a provably-up service.
       // Plaintext marker state, never content (ENCRYPTED_FIELDS.messages is []).
       const result = await d1Query(
-        `SELECT id, content, scope, nlp_error FROM messages
-           WHERE user_id = ?
-             AND forgotten_at IS NULL
-             AND (nlp_processed = 0 OR nlp_processed IS NULL)
-             AND content IS NOT NULL AND content != ''
-           ORDER BY created_at ASC
+        `SELECT m.id AS id, m.content AS content, m.scope AS scope, m.nlp_error AS nlp_error,
+                a.transcript AS attachment_transcript, a.description AS attachment_description
+           FROM messages m
+           LEFT JOIN attachments a ON a.id = m.attachment_id AND a.user_id = m.user_id
+           WHERE m.user_id = ?
+             AND m.forgotten_at IS NULL
+             AND (m.nlp_processed = 0 OR m.nlp_processed IS NULL)
+             AND m.content IS NOT NULL AND m.content != ''
+           ORDER BY m.created_at ASC
            LIMIT ?`,
         [userId, limit],
       );
       return result.results || [];
+    },
+
+    /**
+     * A derived-text write landed on `attachmentId` — RE-QUEUE every already-embedded
+     * message that owns it, so the drain recomputes `embedding_768` over content + the
+     * new transcript/description. Returns how many rows were re-queued.
+     *
+     * ⚠️ `embedding_768 IS NOT NULL` IS THE WHOLE GUARD, and it is doing three jobs:
+     *   • a still-PENDING row needs nothing — the drain has not reached it yet and will
+     *     pick the derived text up on its own via the join above. Re-queueing it would
+     *     clear its `embed-retry:N` marker and hand a repeat-failer a fresh budget
+     *     every time a progressive transcript save fired.
+     *   • an attempt-CAPPED row (-1, no vector) stays capped: its recovery contract is
+     *     the boot reclaim + POST /portal/enrichment/retry-failed, not this path.
+     *   • in the overwhelmingly common case (transcription finished before the drain
+     *     got there) this UPDATE matches ZERO rows and costs one indexed probe.
+     *
+     * ⚠️ THE VECTOR IS NULLED, NOT LEFT STALE. Keeping the old vector while flipping
+     * `nlp_processed` back to 0 would look cheaper (search keeps a vector meanwhile),
+     * and it is the trap: a re-embed that then FAILS lands at nlp_processed = -1 WITH a
+     * vector, and every recovery path in the codebase keys on `-1 AND embedding_768 IS
+     * NULL` (selfHealStrandedEmbeds, reclaimGaveUpRows, resetEnrichmentGiveUps). Such a
+     * row would be stranded forever while still COUNTING as `embedded`. Nulling puts the
+     * row back into a state the pipeline already understands end to end.
+     *
+     * ⚠️ AND IT KEEPS D-047 (↻1) TRUE BY CONSTRUCTION. `selectPendingCategories`
+     * requires `embedding_768 IS NOT NULL`, so a row awaiting re-embed is automatically
+     * held back from the categorize stage and rendered as `blockedOnEmbed`, never as a
+     * silent `done`. Flipping only `nlp_processed` would leave the row categorisable
+     * while un-embedded — reopening the "tagged > embedded" symptom from a new door.
+     *
+     * `nlp_error` is cleared with the state: this is NEW work (new text), not a retry of
+     * the old failure, so it gets a full attempt budget. Marker state only, never
+     * content. userId REQUIRED in the WHERE (unfiltered-UPDATE guard); forgotten rows
+     * are excluded so a re-embed can never resurrect one into the index.
+     *
+     * ⚠️ ACCEPTED COST, STATED SO IT IS NOT REDISCOVERED AS A BUG: `nlp_processed = 0` is
+     * the ONLY state selectPendingEnrichment selects, so a row that had already reached
+     * L2 (nlp_processed = 1) walks the machine again — 0 → 2 → 1 — and re-runs
+     * `enrichNlpOnce` over UNCHANGED text (selectPendingNlp still projects `content`
+     * alone; L2's input is deliberately not widened here). For the rows this touches
+     * that pass is cheap — their body is a ~10-token "File: memo.ogg" — and it is
+     * bounded: one re-run per attachment whose derived text lands, in the background
+     * BULK-governed lane. Widening L2 to see the derived text would make the re-run
+     * VALUABLE rather than merely cheap; it is a separate change with its own prompt
+     * and numCtx questions, not a line to slip in here.
+     *
+     * @param {string} userId
+     * @param {string} attachmentId
+     * @returns {Promise<number>}
+     */
+    async markForReembed(userId, attachmentId) {
+      if (!userId || !attachmentId) return 0;
+      const r = await d1Query(MARK_FOR_REEMBED_SQL, [userId, attachmentId]);
+      const ids = (r?.results || []).map((row) => row.id).filter(Boolean);
+      if (!ids.length) return 0;
+      // ── THE STALE MINDSCAPE POINT MUST GO WITH THE STALE VECTOR ────────────────────────────
+      // Same second half `updateContent` already has, and for the same reason. A message's 256D
+      // clustering point (`clustering_points.nomic_embedding`) is a PROJECTION of the vector we
+      // just deleted — on the import path, of the filename. `sync-clustering-points.js` only
+      // INSERTS where no point exists, so without this delete the note keeps sitting in the
+      // territory/realm/theme its filename put it in, forever, while search quietly gets it
+      // right. Fisher/novelty/frequency read that same stale point. Deleting it is safe by the
+      // argument `updateContent` relies on: cluster.py's `has_reembed_backlog()` defers the
+      // liveness prune while any `embedding_768 IS NULL` row exists, so the point is re-added
+      // from the NEW vector rather than treated as a dead node.
+      const placeholders = ids.map(() => '?').join(', ');
+      await d1Query(
+        `DELETE FROM clustering_points WHERE user_id = ? AND source_type = 'message' AND source_id IN (${placeholders})`,
+        [userId, ...ids],
+      );
+      bustMindscapePoints(userId); // clustering_points changed → drop BOTH points + full caches
+      return ids.length;
     },
 
     /**

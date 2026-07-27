@@ -10,6 +10,7 @@
 //   - a normal string/number param + a normal TEXT cell are untouched (no mis-tag)
 //   - the file stays ciphertext at rest
 // @see the SQLCipher 768-anchor vectors design
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, openSync, readSync, closeSync } from 'node:fs';

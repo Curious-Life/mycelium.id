@@ -18,6 +18,7 @@
 //      and the text panels (territories) + point-derived decor (centroids,
 //      activity) are present — the split changed no surfaced data
 //   B3 §7: the /points payload carries zero content/ciphertext
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import express from 'express';
 import http from 'node:http';

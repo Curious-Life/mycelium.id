@@ -9,6 +9,7 @@
 //
 // Pure unit test: fetch + getHealth are injected, no real service, no vault.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { transcribeLongAudio } from '../src/enrich/transcribe-long.js';
 import { TRANSCRIBE_FAULT_MESSAGE, portalAttachmentsRouter } from '../src/portal-attachments.js';
 import { transcribeAttachment } from '../src/enrich/transcribe-attachment.js';

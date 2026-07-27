@@ -4,6 +4,7 @@
 //       and the raw plaintext bytes do NOT appear in it
 //   BL3 binary-safe — a non-UTF8 byte buffer survives the round-trip
 //   BL4 fail-closed — with no master key, putBlob refuses (no plaintext written)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { rmSync, mkdirSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { importMasterKey } from '../src/crypto/crypto-local.js';

@@ -3,6 +3,7 @@
 // harness now speaks Ollama's NATIVE /api/chat (so it can size num_ctx) instead of
 // the OpenAI-compatible /v1 surface (which ignores num_ctx). Also checks the cloud
 // path is unchanged, usage is captured, and the floor (no provider) routes native.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createAgentHarness } from '../src/agent/harness.js';
 
 const enc = new TextEncoder();

@@ -6,6 +6,7 @@
  * /labels/run-cvp full verdict path, and body validation (unknown axis → 400). CVP
  * correctness itself is covered by verify:cvp-labeling; this proves the HTTP layer.
  */
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';

@@ -12,6 +12,7 @@
 //   F8 report doc             imports/full-export-report-* persisted + decrypts
 //   F9 idempotent             re-import → 0 new rows
 //   F10 bad format            wrong manifest.format → 400
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync, readdirSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';

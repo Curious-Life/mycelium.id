@@ -6,6 +6,7 @@
 // that reads through the adapter (db.topology.getLatestAudit / getAuditFindings)
 // return decrypted/usable values (with the message_count ORDER BY moved to JS).
 // Runs the REAL stage via spawnSync(node …). PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

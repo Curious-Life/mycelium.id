@@ -7,6 +7,7 @@
 //   SB6 pre-token cloud failure → local fallback (the 'allowed' attempt is audited)
 //   SB7 streamed assembled text === buffered infer() text (consistency)
 // Pure; no network (mock fetch); CWD-independent. Never logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createInferenceRouter } from '../src/inference/router.js';
 import { cloudStream } from '../src/inference/cloud.js';
 import { localStream } from '../src/inference/local.js';

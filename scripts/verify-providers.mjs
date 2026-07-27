@@ -3,6 +3,7 @@
 // drives the full lifecycle: create → list (metadata only, no key) → setActive
 // (one-active-per-type) → connectivity test (mocked fetch) → bad-key category →
 // custom-needs-base_url → Claude-OAuth refused (ToS) → delete. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';

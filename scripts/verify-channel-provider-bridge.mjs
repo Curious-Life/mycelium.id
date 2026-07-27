@@ -9,6 +9,7 @@
 //   - a manual CHANNEL_* backend   → SUPPRESSES the derive (operator override wins)
 // Plus the daemon-side wiring: applyChannelConfigToEnv → CHANNEL_OPENAI_*, and
 // selectRuntime() picks the right backend. PASS/FAIL; exit 0 on GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

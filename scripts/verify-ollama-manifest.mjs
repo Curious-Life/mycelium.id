@@ -2,6 +2,7 @@
 //   M1 recordPulledModel writes a tag; readPulledModels returns it; idempotent
 //   M2 missing/garbled manifest reads as []
 //   M3 makeDeleteOllamaModels: ok/notFound → removed; throw/!ok → failed; best-effort
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { recordPulledModel, readPulledModels, makeDeleteOllamaModels } from '../src/hardware/ollama-manifest.js';

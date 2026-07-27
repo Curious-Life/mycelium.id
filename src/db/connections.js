@@ -277,6 +277,9 @@ export function createConnectionsNamespace(deps) {
   // and works while the peer is fully OFFLINE (the relay holds the sealed envelope).
   async function federationDeliver({ remoteDomain, remoteHandle, remoteDid, connId }, subpath, payload) {
     const peerDid = remoteDid || `did:web:${remoteDomain}`;
+    // Set when the relay path was attempted and failed — the direct transport below is then
+    // a FALLBACK rather than the primary choice (see the fall-through note in the catch).
+    let relayError = null;
     if (sign && selfDid) {
       // Read the cached inbox + seal key (if any) and whether it's within the TTL.
       let cachedInbox = null, cachedKey = null, fresh = false;
@@ -307,15 +310,43 @@ export function createConnectionsNamespace(deps) {
         try { await enqueueSealed(inbox, peerDid, key, payload); return 'relay'; }
         catch (e) {
           // A relay reject means the cached inbox is dead (moved relay / gone) — CLEAR the cache
-          // so the next send re-resolves, and surface the failure (the caller keeps the row + retries).
+          // so the next send re-resolves.
           if (connId) { try { await d1Query(`UPDATE connections SET remote_relay_inbox = NULL, remote_key_agreement = NULL, remote_keys_cached_at = NULL WHERE id = ?`, [connId]); } catch { /* */ } }
-          throw e;
+          // ...then FALL THROUGH to the direct transport instead of throwing.
+          //
+          // This used to `throw e`, which made a relay outage a TOTAL, PERMANENT federation
+          // outage: every managed box advertises its control plane as #relay-inbox, so both
+          // peers plan 'relay', and a relay that answers 404/5xx failed every connect, accept
+          // and DM — with no attempt at the direct path that was sitting right below, and no
+          // recovery on retry (the re-resolve re-reads the same advertisement and re-picks
+          // relay). That is exactly what a 7-week-stale control plane with no /v1/queue/*
+          // produced: "Couldn't reach @x right now" forever, on a peer that was reachable
+          // directly the whole time.
+          //
+          // Falling back is safe, not a privacy downgrade: the relay exists to hide the
+          // SENDER FROM THE RELAY and to tolerate an offline peer — it is not a secrecy layer
+          // between the two peers, who authenticate each other by DID either way. Direct
+          // simply requires the peer to be online right now; if it isn't, the direct error
+          // is the honest one to surface (classifyDeliveryFailure keeps it 'unreachable',
+          // so the pending row survives for re-delivery).
+          relayError = e;
         }
       }
     }
-    const endpoint = await transport.resolveEndpoint(remoteDomain, remoteHandle);
-    await transport.send(endpoint, subpath, payload);
-    return 'direct';
+    try {
+      const endpoint = await transport.resolveEndpoint(remoteDomain, remoteHandle);
+      await transport.send(endpoint, subpath, payload);
+    } catch (directError) {
+      // Both transports failed. Surface the DIRECT error (it carries the not-found signal
+      // classifyDeliveryFailure keys on) but keep the relay cause attached + logged, so a
+      // relay outage is diagnosable and never silently reads as "no such user".
+      if (relayError) {
+        console.warn(`[federation] relay delivery failed (${relayError.message}); direct fallback also failed (${directError.message})`);
+        directError.relayCause = relayError;
+      }
+      throw directError;
+    }
+    return relayError ? 'direct-fallback' : 'direct';
   }
 
   async function requestRemote(fromUserId, remoteHandle, remoteDomain) {
@@ -555,6 +586,16 @@ export function createConnectionsNamespace(deps) {
       // Only accept is propagated to the peer in Tier-0b (reject stays local-silent,
       // matching the re-request-permitted semantics). Local-only rows have no remote.
       if (action === 'accept' && row.remote_instance && row.remote_user_handle && sign && did) {
+        // Mark the ack OWED before attempting delivery, and pin the nonce once so every retry
+        // reuses it (the peer dedups on (sender_did, nonce) — see migration 0060). Doing this
+        // first means a crash or a swallowed failure mid-send leaves a row the accept-outbox
+        // will pick up, instead of the peer being stranded on "Sent" forever with no record
+        // anywhere that we owed them a response.
+        const ackNonce = row.accept_ack_nonce || randomUUID();
+        await d1Query(
+          `UPDATE connections SET accept_ack_pending = 1, accept_ack_nonce = ? WHERE id = ?`,
+          [ackNonce, connectionId],
+        ).catch(() => {});
         try {
           // include our own public bio so the peer can render us in their list
           const me = (await d1Query(`SELECT signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
@@ -571,15 +612,72 @@ export function createConnectionsNamespace(deps) {
             from_did: did(),
             to_handle: row.remote_user_handle,
             action: 'accept',
-            nonce: randomUUID(),
+            nonce: ackNonce, // pinned + reused across retries → the peer dedups a re-delivery
             ts: Date.now(),
             profile: respProfile,
           });
+          // Delivered → the handshake is complete; stop owing an ack.
+          await d1Query(`UPDATE connections SET accept_ack_pending = 0 WHERE id = ?`, [connectionId]).catch(() => {});
         } catch (e) {
-          console.warn(`[federation] connect-response POST failed: ${e.message}`);
+          // Leave accept_ack_pending = 1. federationAcceptOutbox() re-delivers on the next
+          // background sweep. This used to be the whole handler — a warn and nothing else —
+          // which is why a single failed accept stranded the initiator permanently.
+          console.warn(`[federation] connect-response delivery failed (will retry): ${e.message}`);
         }
       }
       return connectionId;
+    },
+
+    /**
+     * ACCEPT-ack outbox (federation transport P5b) — the connect-response sibling of
+     * federationOutbox(). Re-delivers the signed accept to peers we accepted but could not
+     * reach, so a transient outage at accept time cannot leave the two sides permanently
+     * disagreeing about whether they are connected.
+     *
+     * Bounded exactly like the DM outbox: attempt counted BEFORE the network call (so a
+     * persistently failing peer climbs toward the cap and sinks in priority rather than being
+     * retried forever), capped at OUTBOX_MAX_ATTEMPTS, and batched.
+     */
+    async federationAcceptOutbox(userId, { limit = 20 } = {}) {
+      if (!sign || !did) return { retried: 0, delivered: 0 };
+      const owed = (await d1Query(
+        `SELECT id, remote_instance, remote_user_handle, remote_did, accept_ack_nonce, accept_ack_attempts
+           FROM connections
+          WHERE (user_a = ? OR user_b = ?) AND status = 'accepted' AND accept_ack_pending = 1
+            AND accept_ack_attempts < ?
+          ORDER BY accept_ack_attempts ASC, accepted_at ASC LIMIT ?`,
+        [userId, userId, OUTBOX_MAX_ATTEMPTS, limit],
+      )).results || [];
+      let delivered = 0;
+      for (const c of owed) {
+        if (!c.remote_instance || !c.remote_user_handle) continue; // local-only row: nothing to send
+        try {
+          await d1Query(`UPDATE connections SET accept_ack_attempts = accept_ack_attempts + 1 WHERE id = ?`, [c.id]);
+          const me = (await d1Query(`SELECT signature FROM user_profiles WHERE user_id = ?`, [userId])).results?.[0] || {};
+          const respProfile = { signature: me.signature ?? null };
+          if (hasVectorKey(respProfile)) throw new Error('refusing to federate a vector/embedding field (CLAUDE.md §7)');
+          await federationDeliver({ remoteDomain: c.remote_instance, remoteHandle: c.remote_user_handle, remoteDid: c.remote_did, connId: c.id }, 'connect-response', {
+            $type: 'social.mycelium.connect-response.v1',
+            from_handle: requireSelfHandle(),
+            from_instance: (selfInstance && selfInstance()) || '',
+            from_did: did(),
+            to_handle: c.remote_user_handle,
+            action: 'accept',
+            nonce: c.accept_ack_nonce || randomUUID(), // legacy rows (no pinned nonce) fall back
+            ts: Date.now(),
+            profile: respProfile,
+          });
+          await d1Query(`UPDATE connections SET accept_ack_pending = 0 WHERE id = ?`, [c.id]);
+          delivered++;
+        } catch (e) {
+          // Still unreachable → stays pending for the next sweep; don't block the batch.
+          // LOG it: a silently swallowed retry is how D-082 hid an entire dead receive path.
+          // At the cap this is the last word on a peer we will stop chasing, so say so.
+          const last = (c.accept_ack_attempts ?? 0) + 1 >= OUTBOX_MAX_ATTEMPTS;
+          console.warn(`[federation] accept-ack retry failed for ${c.remote_user_handle}@${c.remote_instance}: ${e.message}${last ? ' — attempt cap reached, giving up' : ''}`);
+        }
+      }
+      return { retried: owed.length, delivered };
     },
 
     /**

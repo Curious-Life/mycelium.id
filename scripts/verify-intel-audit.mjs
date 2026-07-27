@@ -3,6 +3,7 @@
 //       vs IA2 listModels(apiKey) → x-api-key (BYOK, unchanged).
 //   IA3 ollama.deleteModel → DELETE /api/delete {model,name}; 404 → notFound; invalid name throws.
 //   IA4 readClaudeAccount → parses ~/.claude.json oauthAccount (email/plan); null when absent.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { listModels } from '../src/inference/models.js';
 import { createOllamaClient } from '../src/hardware/ollama.js';
 import { readClaudeAccount } from '../src/inference/claude-oauth.js';

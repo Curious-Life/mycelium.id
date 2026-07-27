@@ -4,6 +4,7 @@
 // (phase, window_*, counts, low_confidence) stay plaintext, AND that the JS
 // adapter auto-decrypts + fisher.js coerces on read so the pillar still works.
 // Runs the REAL pipeline/compute-fisher.py writer. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

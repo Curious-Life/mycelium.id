@@ -7,6 +7,7 @@
 //   W4 coverage-aware skip: a named territory with NO new content is skipped (not re-narrated)
 //   W5 the realm turn's ledger references the territory described just before it
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

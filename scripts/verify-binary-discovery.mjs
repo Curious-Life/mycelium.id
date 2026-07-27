@@ -1,6 +1,7 @@
 // scripts/verify-binary-discovery.mjs — gate for A4c: cross-platform binary
 // discovery in claude-bin.js + ollama-daemon.js. Exercises win32 + posix by
 // injecting platform + existsSync (existence-only probe). VERDICT: GO / exit 0.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { resolveClaudeBin } from '../src/inference/claude-bin.js';
 import { findOllamaBinary } from '../src/hardware/ollama-daemon.js';
 

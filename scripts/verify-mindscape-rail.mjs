@@ -65,6 +65,11 @@
 //   C1  D-072: `controls.target` is initialised from the computed point-cloud centroid at mount,
 //       and the intro-cancel path snaps the target home instead of stranding it mid-lerp.
 //
+// MUTATION-TESTED: moved the Refresh control INSIDE the {#if expanded} block → M2 REDs. This is
+//   the one that matters: a collapsed section would hide the only way to restart a stuck stage.
+// MUTATION-TESTED: `expanded` reduced to plain `userExpanded` (no longer derived) → M3 REDs — a
+//   remembered "collapsed" would survive a family going into quarantine underneath it.
+// MUTATION-TESTED: re-mounted the split MeasureControl + MeasurementHealthSection → M1 REDs.
 // MUTATION-TESTED: D-034 ↻1 (2026-07-26) — `.nav-rail`'s `min-height: 0` deleted from
 //   MindscapeView.svelte — the EXACT #350-class trap, one level out → S2 REDs ("`.nav-rail` must
 //   declare min-height: 0"). S1/S3/S4 stayed green, so S2 owns this.
@@ -156,8 +161,9 @@
 // runs this gate, prints the REDs, and restores. It exits non-zero if any mutation is NOT caught,
 // so this record cannot silently rot — and its edits refuse to no-op, so a mutation whose anchor
 // has drifted fails loudly instead of passing as "caught".
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 const ledger = [];
@@ -376,7 +382,7 @@ t('S5. ⭐ the markup matches the contract: every rail section is INSIDE `.nav-r
   assert.ok(ext, 'MindscapeView must render a `.nav-rail` element with a matching close tag');
   const handle = src.view.indexOf('class="resize-handle"');
   assert.ok(handle !== -1, 'the resize handle must still exist');
-  for (const section of ['<PipelineStatus', '<MindscapeDetail', '<MeasureControl', '<MeasurementHealthSection', '<NarrateControl']) {
+  for (const section of ['<PipelineStatus', '<MindscapeDetail', '<MeasureSection', '<NarrateControl']) {
     const at = src.view.indexOf(section);
     assert.ok(at !== -1, `${section} must still be mounted in the rail`);
     assert.ok(at > ext.open && at < ext.close,
@@ -514,6 +520,43 @@ t('C1. ⭐ D-072: the camera is framed on the point-cloud CENTROID at mount, and
   assert.match(src.scene, /if \(introCancelled\) \{[\s\S]{0,1800}?camera\.position\.copy\(endTarget\)\.add\(camOffset\)/,
     'and it must move the camera with the target, so an abort settles instead of teleporting the view');
 });
+
+// ── M1-M3: the measure stage is ONE section, and its REMEDY is never collapsible ─────────────
+// Operator, QA9: "refresh analysis and measurement health should be in one section, and right now
+// it got stuck in loading." They were two rail siblings — a button, and the thing the button
+// produces, presented as unrelated neighbours. Merged per the layout rule in
+// the pipeline-sprint design §4.1: a section is a STAGE; its controls are that stage's
+// verbs; its status is that stage's outcome.
+{
+  const ms = readFileSync('portal-app/src/lib/components/mindscape/MeasureSection.svelte', 'utf8');
+
+  // M1 — ONE section. The split components must be GONE, not merely unmounted: a file left behind
+  // is a second place for this surface to drift back into.
+  const mounted = src.view.includes('<MeasureSection');
+  const splitGone = !/<MeasureControl|<MeasurementHealthSection/.test(src.view);
+  const filesGone = !existsSync('portal-app/src/lib/components/mindscape/MeasureControl.svelte')
+    && !existsSync('portal-app/src/lib/components/mindscape/MeasurementHealthSection.svelte');
+  rec('M1 the measure control and its health are ONE section (the split components are deleted)',
+    mounted && splitGone && filesGone,
+    `mounted=${mounted} splitUnmounted=${splitGone} filesDeleted=${filesGone}`);
+
+  // M2 — ⭐ THE SAFETY PROPERTY. The run control (the REMEDY) sits OUTSIDE the collapsible detail.
+  // Hiding a diagnosis is the user's choice; hiding the FIX is how a stuck stage becomes
+  // unrecoverable from the UI. Same asymmetry D-025 protects on the pipeline card, where an
+  // unsettled pipeline renders no toggle at all.
+  const iCollapse = ms.indexOf('{#if expanded}');
+  const iBtn = ms.indexOf('onclick={start}');
+  rec('M2 ⭐ the Refresh control renders OUTSIDE the collapsible detail — a collapsed section never hides the remedy',
+    iBtn > 0 && iCollapse > 0 && iBtn < iCollapse,
+    `control@${iBtn} collapseBlock@${iCollapse}`);
+
+  // M3 — a section that CAN hide a problem must not be allowed to. `expanded` is DERIVED, so a
+  // failing/quarantined family forces it open regardless of the user's last collapse.
+  const derived = /const expanded = \$derived\(needsAttention \|\| userExpanded\)/.test(ms);
+  const byWorst = /needsAttention = \$derived\([\s\S]{0,200}?quarantined[\s\S]{0,120}?failing/.test(ms);
+  rec('M3 attention FORCES the detail open, and is driven by the worst state (not an average)',
+    derived && byWorst, `derivedExpanded=${derived} worstState=${byWorst}`);
+}
 
 const failed = ledger.filter((p) => !p).length;
 console.log('\n================================================================');

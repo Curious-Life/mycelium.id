@@ -77,6 +77,7 @@
 //   R9 REDs (§1: the sanitizer's residual is bounded by that seam staying closed)
 // All restored afterwards; the suite returns GREEN on the restored tree (67 pass · 0 fail).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

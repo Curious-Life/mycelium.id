@@ -150,7 +150,14 @@ export function createAttachmentsNamespace(deps) {
       const effectiveUserId = userId || process.env.MYA_USER_ID || process.env.USER_ID;
       const placeholders = ids.map(() => '?').join(', ');
       const result = await d1Query(
-        `SELECT id, r2_key, stream_uid, file_name, file_type, file_size, transcript, description FROM attachments WHERE user_id = ? AND id IN (${placeholders})`,
+        // `metadata` carries D-076's transcription COVERAGE (transcript-coverage.js) — the
+        // record that says whether a stored transcript covers the whole recording. Without it
+        // projected here, every agent-facing read (src/agent/attachment-context.js, which
+        // resolves through getByIds) is structurally blind to partial-ness and renders a
+        // half-transcribed recording as if it were the complete one — the exact failure D-076
+        // built the coverage layer to end. Plaintext JSON (ENCRYPTED_FIELDS.attachments === [],
+        // crypto-local.js:313); numbers and booleans only, no transcript excerpt.
+        `SELECT id, r2_key, stream_uid, file_name, file_type, file_size, transcript, description, metadata FROM attachments WHERE user_id = ? AND id IN (${placeholders})`,
         [effectiveUserId, ...ids],
       );
       return result.results || [];

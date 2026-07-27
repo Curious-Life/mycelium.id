@@ -3,6 +3,7 @@
 // community popularity floor enforced; family-prior + EQ bonus rank warmth above
 // cool/cold; required fields present. The network script (generate-ollama-
 // catalog.mjs) just feeds real fetches into these same pure functions.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert';
 import { parseLibrary, buildCatalog, parsePulls } from '../src/hardware/catalog-gen.js';
 import { parseParamsB, familyOf, isExcluded, companionQuality } from '../src/hardware/catalog-meta.js';

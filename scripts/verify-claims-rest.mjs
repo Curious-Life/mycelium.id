@@ -5,6 +5,7 @@
 // server, then asserts /claims/current + /claims/series return 200 with real
 // values, an UNAUTH (forwarded) request is rejected (fail-closed), and NO
 // response body leaks a wrapped-DEK envelope. PASS/FAIL ledger; exit 0 iff all pass.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync } from 'node:fs';
 import Database from 'better-sqlite3';

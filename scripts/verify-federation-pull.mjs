@@ -7,6 +7,7 @@
 //   L6  TRANSIENT dispatch failure → NOT acked (left for retry); next cycle reprocesses
 //   L7  relay unreachable (pull throws) → cycle throws; tick backs off (skips cycles), never crashes
 // Real federation_seen sqlite + real openEnvelope + a fake queue client; receive* stubbed to record.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';

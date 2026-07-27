@@ -8,6 +8,7 @@
 //   - a body that overflows the 4096 cap chunks into multiple ordered sends
 //   - a non-400 error surfaces (httpStatus/partial) exactly as before
 // Pure DI — no network. PASS/FAIL ledger, exit 1 on any fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createTelegramApi } from '../packages/channel-daemon/telegram-api.js';
 
 const ledger = [];

@@ -21,6 +21,7 @@
 //   `i = skipString(src, i, c)` with `i++`, so string contents are scanned as code) →
 //   C2a AND C2b RED (a `//` and a `/*` inside a string get wrongly stripped), gate NO-GO.
 //   Restored → GO. Proves the OVER-strip/string-awareness half actually bites, not just C6.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert';
 import { stripComments, stripCommentsFor, langOf } from './lib/strip-comments.mjs';
 

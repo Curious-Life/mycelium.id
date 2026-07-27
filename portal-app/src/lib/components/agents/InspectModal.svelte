@@ -87,7 +87,10 @@
 				{:else}
 					<div class="flex flex-col gap-2">
 						{#each messages as m}
-							<div class="rounded-lg px-3 py-2 {m.role === 'assistant' ? 'bg-[var(--color-accent)]/5' : 'bg-[var(--color-hover)]'}">
+							<!-- bg-accent/5, not bg-[var(--color-accent)]/5 — the arbitrary-value form
+							     produces rgb(<full-color> / α), which is invalid CSS and silently
+							     dropped the tint (see the note in tailwind.config.js). -->
+							<div class="rounded-lg px-3 py-2 {m.role === 'assistant' ? 'bg-accent/5' : 'bg-[var(--color-hover)]'}">
 								<div class="text-[0.6rem] uppercase tracking-wide text-[var(--color-text-tertiary)] mb-0.5">{m.role}{m.source ? ` · ${m.source}` : ''}</div>
 								<p class="text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap break-words">{m.content}</p>
 							</div>

@@ -6,6 +6,7 @@
 // classified — i.e. cognitiveState movement is no longer hollow. Also proves
 // the era-skip optimization (second run skips) and sha256-seed determinism
 // (recompute is bit-identical). PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

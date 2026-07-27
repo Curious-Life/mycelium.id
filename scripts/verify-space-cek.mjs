@@ -7,6 +7,7 @@
 // rekey, a REMOVED member (whose ring lacks the new generation) cannot decrypt new
 // content, while surviving members can.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

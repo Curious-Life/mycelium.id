@@ -1,10 +1,10 @@
 // portal-app/src/lib/mind-probe-cap.ts
 //
-// The bound for MindscapeView's "Checking your mind…" readiness probe.
+// The bound for MindscapeView's "Checking your mindscape…" readiness probe.
 //
 // loadGenerated() re-probes /readiness?slices=mindscape every GEN_POLL_MS (~4s) while the answer
 // is not known-true, and on failure it holds `mindGenerated === null` — which renders the
-// "Checking your mind…" spinner. With no bound, a /readiness that KEEPS failing (a fresh machine
+// "Checking your mindscape…" spinner. With no bound, a /readiness that KEEPS failing (a fresh machine
 // whose vault the server cannot read) spins that indicator FOREVER. That is the same
 // unbounded-spinner class as generate.ts's `unknown` cap (#232): a failed READ must never
 // masquerade as an infinite "checking" — nor as an empty map (§3.2a: a failed read claims nothing).

@@ -10,6 +10,7 @@
 // enumeration/ordering/filtering; lineDiff is pure. Encrypted round-trip +
 // authorship + revert are covered downstream (verify:mindfiles, verify:character-rest).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as fsp from 'node:fs/promises';

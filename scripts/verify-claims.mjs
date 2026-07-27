@@ -6,6 +6,7 @@
 // to a Number, that scope is auto-tagged (SCOPE_AWARE_TABLES), and the regression
 // that internal_model_items no longer registers PHANTOM columns. PASS/FAIL ledger.
 // See the persona-claims design.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import crypto from 'node:crypto';

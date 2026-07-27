@@ -11,6 +11,7 @@
 // dedup (resend = no-op), capture-last-turn-only (never the whole history), context
 // injected as system (not miscaptured as user), no-header → zero capture, and a
 // throwing capture sink never breaks inference.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';

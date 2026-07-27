@@ -3,6 +3,7 @@
 // new member's resolved X25519 key; revoke ALLOWLIST-rekeys so the evicted peer can't read
 // new content. Fail-closed UX-soft: an unresolvable key never leaks plaintext.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

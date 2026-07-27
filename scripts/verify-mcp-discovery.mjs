@@ -8,6 +8,7 @@
 //
 // Spawns src/index.js --http on a throwaway in-memory auth db + a migrated
 // throwaway vault db (the verify-oauth topology). Never logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { rmSync, mkdirSync } from 'node:fs';

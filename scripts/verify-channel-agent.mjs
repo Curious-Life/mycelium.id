@@ -7,6 +7,7 @@
 //   - selectRuntime is config-implied (BYOK key → runtime; none → null)
 //   - the reply prompt carries the mandatory delivery contract
 // PASS/FAIL ledger; exit 1 on any fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createLane } from '../packages/channel-daemon/agent/lane.js';
 import { selectRuntime } from '../packages/channel-daemon/agent/runtime.js';
 import { buildReplySystemPrompt } from '../packages/channel-daemon/agent/prompt.js';

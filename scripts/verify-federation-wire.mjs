@@ -7,6 +7,16 @@
 //       zero-knowledge (no sender handle plaintext on the wire)
 //   W3  peer with NO #relay-inbox → request() falls back to a direct /federation/connect POST
 //   W4  a live DM to a relay-capable connection also routes via the queue
+//   W5  the relay is DOWN (enqueue 404) → delivery falls back to direct HTTP and succeeds
+//   W6  relay AND direct both down → honest transient error, never a false "no user found"
+//
+// MUTATION-TESTED: reverting the relay→direct fall-through in federationDeliver
+//   (`relayError = e` back to `throw e`, src/db/connections.js) → W5 REDs.
+// MUTATION-TESTED: removing the `!res.ok` delivery check in transport.send
+//   (src/federation/transport.js) → W6 REDs (the 502 reads as delivered, nothing throws).
+// Both restored → GO. Run 2026-07-27; W5/W6 were written against the live production
+// failure (a control plane serving no /v1/queue/*, which took federation down for ~9 days).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { createIdentity } from '../src/identity/identity.js';
 import { createConnectionsNamespace } from '../src/db/connections.js';
@@ -29,13 +39,26 @@ const DOCS = {
 };
 
 const captured = { enqueues: [], directConnects: [] };
+// Fault injection for W5/W6 (the relay-outage fallback). `relayDown` makes the relay's
+// /v1/queue/enqueue answer 404 — exactly what a control plane running a build without
+// /v1/queue/* returns, the real-world condition that took federation down. `directDown`
+// additionally fails the peer's own /federation/connect.
+const fault = { relayDown: false, directDown: false };
 const okJson = (obj, status = 200) => ({ ok: status >= 200 && status < 300, status, async json() { return obj; }, async text() { return JSON.stringify(obj); } });
 const notFound = () => okJson({ error: 'nf' }, 404);
 function shimFetch(urlStr, init = {}) {
   const u = new URL(urlStr);
   const body = init.body ? JSON.parse(init.body) : null;
-  if (u.pathname === '/v1/queue/enqueue') { captured.enqueues.push({ host: u.hostname, body }); return Promise.resolve(okJson({ ok: true, id: 'q1' })); }
-  if (u.pathname === '/federation/connect') { captured.directConnects.push({ host: u.hostname }); return Promise.resolve(okJson({ ok: true }, 202)); }
+  if (u.pathname === '/v1/queue/enqueue') {
+    captured.enqueues.push({ host: u.hostname, body });
+    if (fault.relayDown) return Promise.resolve(notFound()); // relay without /v1/queue/* mounted
+    return Promise.resolve(okJson({ ok: true, id: 'q1' }));
+  }
+  if (u.pathname === '/federation/connect') {
+    captured.directConnects.push({ host: u.hostname });
+    if (fault.directDown) return Promise.resolve(okJson({ error: 'down' }, 502));
+    return Promise.resolve(okJson({ ok: true }, 202));
+  }
   if (u.pathname === '/.well-known/did.json') { const d = DOCS[u.hostname]; return Promise.resolve(d ? okJson(d) : notFound()); }
   if (u.pathname === '/.well-known/webfinger') { // for the direct fallback (Carol)
     return Promise.resolve(okJson({ subject: `acct:${u.searchParams.get('resource')}`, links: [{ rel: 'https://mycelium.id/rel/federation', href: `https://${u.hostname}/federation` }] }));
@@ -92,6 +115,29 @@ try {
   rec('W4. DM to a relay-capable peer → enqueued (offline-tolerant); status delivered',
     !!dmEnq && dmEnq.body?.recipient === 'bob' && msg.status === 'delivered',
     `enqueued=${!!dmEnq} status=${msg.status}`);
+  // W5 — THE RELAY-OUTAGE FALLBACK. Bob still advertises #relay-inbox, but the relay answers
+  // 404 (a control plane without /v1/queue/* — the exact 2026-07 production condition). The
+  // send MUST fall through to the direct transport and SUCCEED, not throw. Before the fix
+  // this threw, so a relay outage was a total federation outage on a reachable peer.
+  captured.enqueues.length = 0; captured.directConnects.length = 0;
+  fault.relayDown = true;
+  let w5err = null;
+  try { await conns.request('alice-user', 'bob@bob.mycelium.id'); } catch (e) { w5err = e; }
+  rec('W5. relay enqueue fails → FALLS BACK to direct /federation/connect and succeeds',
+    !w5err && captured.enqueues.length > 0 && captured.directConnects.some((d) => d.host === 'bob.mycelium.id'),
+    `threw=${w5err ? w5err.message : 'no'} relayAttempts=${captured.enqueues.length} directConnects=${captured.directConnects.length}`);
+
+  // W6 — BOTH transports down → the failure must be reported as TRANSIENT ("couldn't reach"),
+  // never as "no user found". classifyDeliveryFailure keys on the DIRECT error, so a dead relay
+  // must not be able to masquerade as a non-existent peer and delete the pending row.
+  captured.enqueues.length = 0; captured.directConnects.length = 0;
+  fault.directDown = true;
+  let w6err = null;
+  try { await conns.request('alice-user', 'bob@bob.mycelium.id'); } catch (e) { w6err = e; }
+  rec('W6. relay AND direct both down → honest transient error, never "no user found"',
+    !!w6err && /couldn't reach/i.test(w6err.message) && !/no user/i.test(w6err.message),
+    `msg=${w6err ? w6err.message : '(did not throw)'}`);
+  fault.relayDown = false; fault.directDown = false;
 } catch (e) {
   rec('FATAL', false, String(e && e.stack || e));
 }

@@ -10,6 +10,7 @@
 //   config — a Telegram token ALONE boots (awaiting-pairing); nothing throws;
 //            Discord still needs its owner id up front.
 // PASS/FAIL ledger; exit 1 on any fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createPairingStore, PAIRING_KEY } from '../src/channels/pairing-store.js';
 import { createInboundHandler } from '../packages/channel-daemon/inbound.js';
 import { normalizeUpdate } from '../packages/channel-daemon/transport/normalize.js';

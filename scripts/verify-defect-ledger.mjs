@@ -34,6 +34,7 @@
 // MUTATION-TESTED: the QA7 plan repointed at a non-existent D-999 → L4 REDs
 // MUTATION-TESTED: "operator confirmation" stripped from the ledger → L5 REDs
 // All five were restored afterwards; the suite returns GREEN on the restored files.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 

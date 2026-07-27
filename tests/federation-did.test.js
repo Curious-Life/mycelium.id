@@ -8,6 +8,13 @@ import { createIdentity } from '../src/identity/identity.js';
 const id = createIdentity({ masterHex: 'c'.repeat(64), handle: 'alice' });
 const HOST = 'alice.mycelium.id';
 
+// safeFetch's SSRF guard resolves the host even when `fetch` is injected — that guard IS the
+// security property, and it stays fully armed here. `alice.mycelium.id` is a FAKE host, so without
+// an injected resolver these tests consult REAL PUBLIC DNS and their verdict tracks whether a
+// wildcard record happens to answer. Map it to a public literal so the guard runs and passes on
+// evidence we control. Same seam, same reason, as tests/federation-sharing.test.js.
+const publicLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+
 describe('multibase', () => {
   it('round-trips an ed25519 public key through publicKeyMultibase (0xed01 z-base58btc)', () => {
     const mb = toMultibase(id.publicKeyB64);
@@ -45,7 +52,11 @@ describe('buildDidDocument', () => {
 describe('resolveMatrixService', () => {
   const did = `did:web:${HOST}`;
   const fetchDoc = (doc) => async () => ({ ok: true, status: 200, async json() { return doc; } });
-  const noLookup = async () => []; // resolves "public" (empty → no private addr)
+  // The hardened assertResolvesPublic REJECTS an empty answer (src/federation/ssrf.js:119) — an
+  // empty resolver result is not "no private addresses", it is no information. This stub used to
+  // return [] with the comment "resolves public"; that was true of the older, permissive guard and
+  // silently stopped being true. Return a real PUBLIC literal so the guard runs fully and passes.
+  const noLookup = async () => [{ address: '93.184.216.34', family: 4 }];
   it('reads the peer MXID from their #matrix service', async () => {
     const { resolveMatrixService } = await import('../src/federation/did.js');
     const doc = buildDidDocument(HOST, id.publicKeyB64, '@bob:hs.example');
@@ -93,13 +104,20 @@ describe('resolveDidKey', () => {
 
   it('resolves a peer did:web key for inbound verification', async () => {
     const doc = buildDidDocument(HOST, id.publicKeyB64);
-    const key = await resolveDidKey(`did:web:${HOST}`, { fetch: fakeFetch(doc) });
+    const key = await resolveDidKey(`did:web:${HOST}`, { fetch: fakeFetch(doc), lookup: publicLookup });
     assert.equal(key, id.publicKeyB64);
   });
   it('rejects a malformed did, an IP/port host, and a doc id mismatch', async () => {
     await assert.rejects(() => resolveDidKey('did:key:zabc', { fetch: fakeFetch(null) }));
     await assert.rejects(() => resolveDidKey('did:web:127.0.0.1:8080', { fetch: fakeFetch(null) }));
+    // ⚠️ THE REASON IS PINNED, AND THAT IS NOT PEDANTRY — THIS ASSERTION WAS GREEN FOR THE WRONG
+    // REASON. `assert.rejects` with no matcher accepts ANY rejection. Without an injected `lookup`
+    // this call rejected with *"refusing to fetch an unresolvable host"* — the SSRF guard tripping
+    // on the fake host — and never reached the id check at all. Measured, not reasoned: the same
+    // call rejects with `did document id mismatch` once the resolver is stubbed. So the
+    // key-confusion protection this test is named for had never actually been exercised.
+    // Matching the message keeps it from silently reverting to a DNS-shaped pass.
     const wrong = buildDidDocument(HOST, id.publicKeyB64); wrong.id = 'did:web:evil.example';
-    await assert.rejects(() => resolveDidKey(`did:web:${HOST}`, { fetch: fakeFetch(wrong) }));
+    await assert.rejects(() => resolveDidKey(`did:web:${HOST}`, { fetch: fakeFetch(wrong), lookup: publicLookup }), /id mismatch/);
   });
 });

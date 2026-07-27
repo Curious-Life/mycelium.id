@@ -8,6 +8,7 @@
 // pick the SIGNING key), a full resolve round-trip via BU-RESOLVE's
 // resolveKeyAgreementKey, and backward-compat (no keyAgreement key → no #key-enc).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { createIdentity } from '../src/identity/identity.js';
 import { buildDidDocument, resolveDidKey, resolveKeyAgreementKey, fromMultibase, X25519_MULTICODEC } from '../src/federation/did.js';

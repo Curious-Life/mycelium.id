@@ -10,6 +10,7 @@
 // resolveDidKey returns the SIGNING key, resolveKeyAgreementKey the ENCRYPTION key;
 // fail-closed when a relationship/key is absent (un-upgraded peer).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import {
   toMultibase, fromMultibase, ED25519_MULTICODEC, X25519_MULTICODEC,

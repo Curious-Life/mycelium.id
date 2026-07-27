@@ -14,6 +14,7 @@
 // Pre-prune this gate MUST fail (illuminatingPeriod present) — that is the
 // falsifiability proof. Post-prune every ledger row passes AND svelte-check
 // (svelte-kit sync && svelte-check --fail-on-warnings) exits 0.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 

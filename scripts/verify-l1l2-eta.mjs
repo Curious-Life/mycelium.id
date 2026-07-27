@@ -25,6 +25,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 process.env.ENCRYPTION_MASTER_KEY ||= crypto.randomBytes(32).toString('hex');

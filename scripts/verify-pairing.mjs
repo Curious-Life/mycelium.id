@@ -13,6 +13,7 @@
 //   P6 channel confidentiality (encLabel + sealed carry no plaintext substring)
 //   P7 result needs proof-of-ck (no/wrong proof → 403)              [MUTATION: drop proof check → leaks]
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import express from 'express';
 import { ecdh, deriveChannel, sealDir, openDir, resultProof, proofEquals } from '../src/crypto/pair-channel.js';

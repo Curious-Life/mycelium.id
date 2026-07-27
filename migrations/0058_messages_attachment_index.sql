@@ -1,0 +1,24 @@
+-- 0058 — index messages by (user_id, attachment_id).
+--
+-- WHY: `messages.markForReembed(userId, attachmentId)` (src/db/messages.js) runs once
+-- per completed transcript/description write — it re-queues the already-embedded
+-- message that owns the attachment so the enrich drain recomputes embedding_768 over
+-- content + the newly-derived text. Without an index that UPDATE is a FULL TABLE SCAN
+-- of `messages`, and the call site is a per-attachment loop: an audio-heavy import
+-- (thousands of voice notes, a 76k-row messages table) would scan the whole table once
+-- per note. `attachment_id` had NO index at all before this — 0001_init.sql indexes
+-- agent_id, contact_id, conversation_id, created_at, scope and source, but not this
+-- column, because nothing queried by it until now (the display join goes the other way,
+-- attachments-by-id).
+--
+-- (user_id, attachment_id) rather than (attachment_id): every query on user data carries
+-- user_id in the WHERE (the unfiltered-statement guard), so the composite is the one the
+-- planner can use whole, and it matches the shape of the other composites added since
+-- (idx_messages_user_created, idx_messages_categories_pending).
+--
+-- SAFE TO RE-RUN: IF NOT EXISTS, and applyMigrations self-heals by re-applying files
+-- (src/db/migrate.js). Index-only — no data is read, written or moved.
+--
+-- ROLLBACK: DROP INDEX IF EXISTS idx_messages_user_attachment; — purely a performance
+-- structure, nothing depends on it for correctness.
+CREATE INDEX IF NOT EXISTS idx_messages_user_attachment ON messages(user_id, attachment_id);

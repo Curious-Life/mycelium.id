@@ -21,6 +21,7 @@
 //   E11 the hook receives the GATED master key, so a PRE-BOOT release can be
 //       signed at all (env.ENCRYPTION_MASTER_KEY is set only by boot(), while
 //       this route is mounted always) — review F1
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import { mkdirSync, rmSync, existsSync, writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';

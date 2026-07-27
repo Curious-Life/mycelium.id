@@ -8,6 +8,7 @@
 // read) round-trip with parity, AND that a raw-BLOB vector column crosses the bridge
 // as {__b64__} both ways (Stage A bidirectional BLOB transport — nomic_embedding and
 // embedding_768 are raw LE-f32 BLOBs now; the old TEXT-envelope-only guard is gone).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';

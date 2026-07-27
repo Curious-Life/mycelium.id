@@ -11,6 +11,7 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { normalize as gmailNormalize, gmailAdapter } from '../src/connectors/adapters/gmail.js';
 import { normalize as linearNormalize, linearAdapter } from '../src/connectors/adapters/linear.js';
 

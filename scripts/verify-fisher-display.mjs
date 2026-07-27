@@ -10,6 +10,7 @@
 // Plus the wiring contract: the endpoint surfaces the baseline-z headline AND keeps the
 // pooled-null z as the confidence gate; the chart toggle no longer exposes cumulative columns.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { baselineZ } from '../src/metrics/baseline-z.js';
 

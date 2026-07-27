@@ -11,6 +11,7 @@
 //     but NOT by the removed member (who never received the gen+1 seal) — while the
 //     removed member can STILL read the old gen-g content they legitimately held.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

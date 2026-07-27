@@ -12,6 +12,7 @@
 // prompt); stream:true terminal chunk; X-Mycelium-Sensitive hard-block → local
 // (no US egress) + a 'denied' audit row; static-bearer match + fail-closed;
 // /v1/models shape; validation envelopes. PASS/FAIL ledger → VERDICT.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';

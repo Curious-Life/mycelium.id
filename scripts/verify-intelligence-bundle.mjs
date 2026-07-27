@@ -6,6 +6,7 @@
 // Only the EDGES are injected (hardware, installed-models probe, disk headroom), each with
 // a control arm so a stub can never green a claim its real path would red (the
 // gates-fail-on-fixtures discipline).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import express from 'express';
 import { createServer } from 'node:http';

@@ -11,6 +11,7 @@
 //
 // This gate scans src/ + packages/ + pipeline/ for the fragile form and fails if
 // any returns, and positively proves the hazard + the fix on a spaced path.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

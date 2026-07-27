@@ -5,6 +5,7 @@
 // rest, (2) reads coerce them back to numbers (parseHealthRow), (3) a range
 // round-trips with values intact, (4) pre-fix PLAINTEXT rows still read as
 // numbers (backward-compat). PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

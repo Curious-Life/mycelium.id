@@ -14,6 +14,7 @@
 // INFERENCE CALLS — the assertion is behavioral, not a source grep. The job WRAPPER is driven
 // directly (startClusterNamingJob) with a fake capture/sleeper script to pin its env allowlist +
 // PRESERVE flag + single-flight. Every check is falsified by mutating the source (see the PR).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';

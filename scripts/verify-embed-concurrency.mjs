@@ -18,6 +18,7 @@
 // Boots the REAL service on a scratch port. Skips (exit 0) when the model isn't cached, so a
 // clean CI box doesn't fail on a 170MB download — but on a dev box with the cache it RUNS.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';

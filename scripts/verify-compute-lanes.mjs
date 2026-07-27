@@ -108,6 +108,7 @@
 // MUTATION-TESTED: RESIDENT_MAX raised 1 → 2 → C19 RED (`held=0 bgRefused=false`) plus C1, C2, C3,
 //   C4, C5, C7, C9, C6b, C15, C18, C18b, C20b — the headline mutation, now red across the suite.
 // All restored; the suite returns GREEN (27/27) on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, relative } from 'node:path';

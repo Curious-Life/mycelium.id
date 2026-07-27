@@ -5,6 +5,7 @@
 //   H3 the summary persists in conversation_summaries, ENCRYPTED at rest
 //   H4 a stored prior summary is loaded + handed to the summarizer to UPDATE (anti-thrash)
 //   H5 summarizer failure → fail-through (still returns a block, no throw)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

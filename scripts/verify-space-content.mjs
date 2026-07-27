@@ -6,6 +6,7 @@
 // ciphertext's generation/item — E6), ciphertext tamper, or wrong CEK. Per-item keys
 // (HKDF(CEK,item_id)) bound a single-item leak (E5).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { encryptSpaceItem, decryptSpaceItem, _internal } from '../src/crypto/space-content.js';
 

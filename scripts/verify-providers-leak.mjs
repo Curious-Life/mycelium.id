@@ -3,6 +3,7 @@
 // must NEVER appear in plaintext, and providers.list() must NEVER return the
 // `credentials` column. A hit = a leaked paid-account key at rest = FAIL.
 // Own DB file. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import crypto from 'node:crypto';

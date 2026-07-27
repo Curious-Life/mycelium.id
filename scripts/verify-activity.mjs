@@ -9,6 +9,7 @@
 //   reason stays on the authed getJob surface. Modelled on verify:import-activity's
 //   A2. Not an at-rest check — the vault is whole-file SQLCipher'd; this pins the
 //   CONTRACT, since recent() already SELECTs `error` and only shape() withholds it.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';

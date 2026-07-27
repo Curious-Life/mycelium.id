@@ -4,6 +4,7 @@
 // retention prune, and fail-closed-on-write-error. Plaintext db (dbKeyHex=null →
 // online .backup) so it needs no SQLCipher key; the keyed VACUUM-INTO branch is
 // covered by verify:backup / verify:at-rest.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,9 +35,17 @@ writeFileSync(path.join(migDir, '0001_init.sql'), 'CREATE TABLE IF NOT EXISTS t 
 }
 const args = { dbFile, dbKeyHex: null, migrationsDir: migDir, log: () => {} };
 
-// 1. flag unset → no-op
+// 1. EXPLICIT OPT-OUT → no-op. (D-081 inverted this: the flag used to be opt-IN
+// and only the dev build set it, so production users had no local backup at all.
+// Absence of the flag must now mean ON.)
+process.env.MYCELIUM_SNAPSHOT_ON_BOOT = '0';
+ok(maybeSnapshotBeforeMigrate(args) === null && snaps(dataDir).length === 0, 'explicit opt-out (=0) → no snapshot');
+
+// 1b. flag ABSENT → snapshot still happens (the D-081 default).
 delete process.env.MYCELIUM_SNAPSHOT_ON_BOOT;
-ok(maybeSnapshotBeforeMigrate(args) === null && snaps(dataDir).length === 0, 'flag unset → no snapshot');
+const baseline = maybeSnapshotBeforeMigrate(args);
+ok(baseline && existsSync(baseline), 'flag absent → snapshot written (default ON)', baseline ? path.basename(baseline) : '(none)');
+rmSync(path.join(dataDir, 'snapshots'), { recursive: true, force: true });
 
 // 2. flag set, fresh fingerprint → snapshot written + round-trips with the data
 process.env.MYCELIUM_SNAPSHOT_ON_BOOT = '1';

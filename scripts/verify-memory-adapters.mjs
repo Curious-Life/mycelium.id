@@ -6,6 +6,7 @@
 // (anomalyco/opencode @opencode-ai/plugin, openclaw plugin-SDK hook-types, hermes
 // turn hooks) and assert: context injected, and BOTH the user turn and the final
 // assistant reply captured. Adapters are fail-open by contract.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";

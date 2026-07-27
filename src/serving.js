@@ -117,6 +117,29 @@ export function precompressedStatic(buildRoot) {
 }
 
 /**
+ * Send ONE server-chosen file (the SPA shell, the pre-build favicon) by absolute
+ * path, immune to where the install happens to live on disk.
+ *
+ * WHY THIS EXISTS — `res.sendFile(abs)` with no `root` runs `send`'s dotfile
+ * policy (`dotfiles: 'ignore'`, the default) over the ENTIRE absolute path, so a
+ * single dot-prefixed DIRECTORY anywhere above the file 404s it. That silently
+ * kills the whole UI for any install under a hidden directory — an `npx` run
+ * (`~/.npm/_npx/<hash>/…`), a clone into `~/.local/share` or `~/.mycelium`, or a
+ * git worktree under `.claude/worktrees/` (which is how this repo's own tooling
+ * runs, and how it was found: verify:portal P6b + verify:portal-serve P2/P3 went
+ * RED from the checkout path alone, while every root-anchored `express.static`
+ * hit stayed green).
+ *
+ * Passing `root` is the fix, not `dotfiles: 'allow'`: with a root set, `send`
+ * applies the dotfile check to the RELATIVE part only — so the install path
+ * stops mattering while a genuinely dot-prefixed *filename* is still refused,
+ * and the send stays confined to that one directory.
+ */
+export function sendPortalFile(res, absPath) {
+  return res.sendFile(path.basename(absPath), { root: path.dirname(path.resolve(absPath)) });
+}
+
+/**
  * setHeaders callback for express.static. Preserves the existing rule (the SPA
  * shell must NEVER be cached, or a stale shell pins the old bundle) and ADDS the
  * immutable cache header for hashed assets so warm loads skip revalidation.

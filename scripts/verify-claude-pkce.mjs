@@ -11,6 +11,7 @@
 //   P8  flow store: per-user isolation, single-use, TTL expiry
 //
 // Pure + injected fetch — never talks to Anthropic.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { startPkceFlow, parsePastedCode, exchangeCode, refreshAccessToken, createPkceFlowStore, CLAUDE_OAUTH, ClaudePkceError } from '../src/inference/claude-pkce.js';
 
 const ledger = [];

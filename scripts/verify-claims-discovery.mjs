@@ -6,6 +6,7 @@
 // here — that needs Tier-3). Also asserts the in-process runDiscovery path with a
 // STUBBED model actually persists a claim end-to-end (proving the wiring, not the
 // model). PASS/FAIL ledger. See the persona-claims design.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

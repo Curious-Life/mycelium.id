@@ -1,0 +1,33 @@
+-- Durable ACCEPT acknowledgement (federation transport P5b).
+--
+-- THE BUG THIS CLOSES: `respondRemote` flipped the local row to 'accepted' and then fired the
+-- signed connect-response FIRE-AND-FORGET inside a try/catch whose only handler was a
+-- console.warn. If that delivery failed — peer offline, relay down, a transient 502 — the
+-- accepter showed "Connected" while the initiator stayed on "Sent" FOREVER: there was no
+-- retry, no sweep, and no surface anywhere that even recorded the response was owed. The
+-- only recovery was the initiator withdrawing and re-requesting, which nothing told them to
+-- do. This is the same one-sided handshake seen live on 2026-06-16 (`hi` pending / `lo`
+-- accepted), re-created by a different mechanism, and the DM outbox (0054) had no equivalent
+-- for the connect-response.
+--
+--   accept_ack_pending  — 1 from the moment we accept until the peer has been told. Set BEFORE
+--                         the send is attempted (not after a failure), so a crash mid-send
+--                         leaves the row owing an ack rather than silently dropping it.
+--   accept_ack_attempts — retry count. Deprioritises a repeatedly-failing peer
+--                         (ORDER BY ... ASC) and CAPS retries so a dead peer is eventually
+--                         left alone instead of swept forever.
+--   accept_ack_nonce    — the payload nonce chosen ONCE and REUSED on every retry, exactly as
+--                         send_nonce works for DMs (0054). The receiver's pull loop dedups on
+--                         (sender_did, nonce) in federation_seen, so reusing it makes a retry
+--                         idempotent end-to-end: if an earlier attempt DID land but its
+--                         response was lost, the retry is dropped rather than re-applied.
+--
+-- All three are routing/state metadata, not content, so they stay unencrypted like the other
+-- structural columns (cf. remote_nonce, send_nonce). No backfill: connections accepted before
+-- this migration default to accept_ack_pending = 0, i.e. treated as already acknowledged —
+-- correct for every row whose handshake completed, and for the rest the pre-existing manual
+-- re-request path is unchanged. We deliberately do NOT mass-set 1 on historical rows: that
+-- would blast a connect-response at every peer ever connected on the next boot.
+ALTER TABLE connections ADD COLUMN accept_ack_pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE connections ADD COLUMN accept_ack_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE connections ADD COLUMN accept_ack_nonce TEXT;

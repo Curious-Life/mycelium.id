@@ -7,6 +7,7 @@
 // The prune here executes the SAME two statements cluster.py issues (the Python
 // stage needs the full Tier-2 stack; SQL parity is asserted against the source).
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

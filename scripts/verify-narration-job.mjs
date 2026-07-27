@@ -11,6 +11,7 @@
 //       MYCELIUM_DESCRIBE_PRESERVE=1 by default — observed in the env the child
 //       actually received, not grepped from the source line
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs';
 import crypto from 'node:crypto';

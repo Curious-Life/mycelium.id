@@ -9,6 +9,7 @@
 //
 // Boots the REAL createHttpApp() (same harness as verify:passkey-enroll) so we assert
 // the actual bytes the browser receives, not a paper claim.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

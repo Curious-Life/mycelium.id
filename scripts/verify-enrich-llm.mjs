@@ -3,6 +3,7 @@
 // Hermetic (no Ollama): exercises the prompt/parser, the hybrid merge (regex structured +
 // model semantic), graceful degrade on a model outage, the enrichNlpOnce injection seam,
 // the 'enrich' task registration, and the default/override model resolver.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 const { buildEnrichPrompt, parseEnrichResponse } = await import('../src/enrich/enrich-prompt.js');
 const { createMessageEnricher } = await import('../src/enrich/enricher.js');
 const { createEnrichmentService } = await import('../src/enrich/service.js');

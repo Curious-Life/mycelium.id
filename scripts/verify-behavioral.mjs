@@ -5,6 +5,7 @@
 // scalars + the diurnal histogram JSON are CIPHERTEXT at rest while structural
 // columns stay plaintext, and that a read through the adapter auto-decrypts them
 // to usable values. Runs the REAL stage via spawnSync. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

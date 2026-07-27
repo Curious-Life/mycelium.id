@@ -10,6 +10,7 @@
 // node's spawn rejected the WHOLE turn before the model was reached. This proves the
 // boundary sanitizer strips NULs, preserves the text, and keeps spawn working.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createClaudeCliLoop } from '../src/agent/loop-claude-cli.js';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';

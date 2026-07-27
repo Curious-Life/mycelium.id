@@ -9,6 +9,7 @@
 //   - a capture failure is soft (runTurn still fires; no throw escapes)
 //   - runTurn receives the ActiveTurnContext the egress chokepoint resolves on
 // PASS/FAIL ledger; exit 1 on any fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { normalizeUpdate, maxUpdateId } from '../packages/channel-daemon/transport/normalize.js';
 import { createTelegramPoller } from '../packages/channel-daemon/transport/telegram-poller.js';
 import { createInboundHandler } from '../packages/channel-daemon/inbound.js';

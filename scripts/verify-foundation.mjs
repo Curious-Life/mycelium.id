@@ -4,6 +4,7 @@
 //   schema load -> two-key unlock + KCV -> encrypting adapter -> a real
 //   document write/read round-trip -> ciphertext-at-rest -> fail-closed on
 //   a wrong key (both KCV and data-read paths).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';

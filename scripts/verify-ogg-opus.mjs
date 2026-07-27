@@ -8,6 +8,7 @@
 //   G5 transcribeAudio transcodes ogg → sends format:"wav" to the model
 //   G16-G18 the granule probe: exact decoded length with no decode, fail-soft, O(pages)
 //   G19-G20 EOS on a granule-less page; the decoder-vs-granule bound on an end-trimmed container
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { oggOpusToWav, oggOpusToWavChunks, oggOpusProbe, AudioDecodeTruncatedError, WAV_HEADER_BYTES } from '../src/enrich/ogg-opus.js';
 import { transcribeAudio } from '../src/enrich/transcribe-audio.js';
 import { buildOggFixture, buildLongOggFixture, muxOggOpus, encodeSine, RATE, FRAME } from './lib/ogg-fixture.mjs';

@@ -18,6 +18,7 @@ import { transcribeAudio as realTranscribeAudio } from './enrich/transcribe-audi
 import { admitTranscribe, LIVE_DECODE_BUDGET_MS } from './enrich/transcribe-attachment.js';
 import { extractDocumentText as realExtractDocumentText, documentKindOf } from './enrich/extract-document.js';
 import { clampStored } from './enrich/text-limits.js';
+import { markMessagesForReembed } from './enrich/derived-text.js';
 import { createPairingStore } from './channels/pairing-store.js';
 import { createVoiceRenderer } from './tts/voice-render.js';
 
@@ -422,12 +423,41 @@ export function internalRouter({ db, userId, enrich = {}, voiceRenderer } = {}) 
         return null;
       };
 
+      // ── PERSIST DERIVED TEXT, THEN RE-QUEUE WHOEVER OWNS IT ────────────────────
+      // The seam for the two SINGLE-SHOT derived-text writes below — the image caption
+      // and the extracted document text — so neither can be added later without the
+      // second half. Any message already pointing at this attachment was embedded from
+      // its `content` alone; the drain must recompute that vector now the derived text
+      // exists (src/enrich/derived-text.js).
+      //
+      // ⚠️ THE AUDIO BRANCH DOES NOT USE THIS SEAM, and that is deliberate rather than an
+      // omission: a transcript write is not single-shot. It carries a D-076 coverage
+      // record and must not downgrade a more complete transcript written concurrently by
+      // the background drain, so it has its own compare-and-set write — and it marks only
+      // when the pass is COMPLETE. Caption and document extraction have no partial state:
+      // they either produced text or they did not.
+      //
+      // ⚠️ HONEST ABOUT WHAT THIS BUYS *HERE*: on the live channel path it normally
+      // matches ZERO messages, and that is correct, not a bug. This route's only
+      // caller is the channel daemon's media stage, which runs BEFORE capture — no
+      // message references the attachment yet, and the daemon then folds this very
+      // `contextText` into `msg.content`, so the message embeds WITH the transcript
+      // the first time. The mark matters on the re-run: a Media→Transcribe or a
+      // second /attachment-context call against an attachment a message already owns.
+      // The paths where a late transcript is the NORM (import, the portal Transcribe
+      // button, the background retry drain) are covered at their own chokepoint,
+      // transcribe-attachment.js. Never throws; see markMessagesForReembed.
+      const persistDerived = async (fields) => {
+        await db.attachments.update(attachmentId, fields);
+        await markMessagesForReembed(db, userId, attachmentId);
+      };
+
       if (kind === 'image') {
         // Explicit budget: describeImage defaults to 30s (portal-upload UX),
         // but a COLD 12B vision call takes ~110s live — the channel path is
         // async (placeholder degrades gracefully) so it can afford to wait.
         contextText = await withRetry('vision', () => describeImage({ bytes, timeoutMs: Number(process.env.MYCELIUM_VISION_TIMEOUT_MS) || 240_000 }));
-        if (contextText) await db.attachments.update(attachmentId, { description: contextText });
+        if (contextText) await persistDerived({ description: contextText });
       } else if (kind === 'audio' || kind === 'voice') {
         // ════════════════════════════════════════════════════════════════════════════════════
         //  THE LIVE VOICE-NOTE TURN — INTERACTIVE, and until now UNGOVERNED (D-068, D-001 family)
@@ -534,6 +564,14 @@ export function internalRouter({ db, userId, enrich = {}, voiceRenderer } = {}) 
               fault: liveCoverage?.complete === true ? null : (liveFault || 'live-budget'),
             }),
           });
+          // ── A COMPLETE LIVE TRANSCRIPT — RE-QUEUE THE MESSAGE THAT OWNS IT ────────────────
+          // Same rule as the drain's persist(): only a COMPLETE pass marks. A live decode is
+          // bounded (LIVE_DECODE_BUDGET_MS), so a long recording routinely ends here PARTIAL and
+          // is finished later by the background drain — which marks then. Marking each partial
+          // would re-queue the same message repeatedly and burn the BULK embed lane on text that
+          // is about to change. The downgrade-guard branch above marks nothing either: a write
+          // that did not land must not claim new text arrived.
+          if (liveCoverage?.complete === true) await markMessagesForReembed(db, userId, attachmentId);
         }
       } else if (kind === 'text') {
         const text = bytes.toString('utf8').replace(/\u0000/g, '').trim();
@@ -544,7 +582,7 @@ export function internalRouter({ db, userId, enrich = {}, voiceRenderer } = {}) 
       } else if (kind === 'file' && documentKindOf(fileType, fileName)) {
         // pdf/docx → unpdf/mammoth (pure-JS, fail-soft null on corrupt/scanned).
         contextText = await extractDocumentText({ bytes, mimeType: fileType, fileName });
-        if (contextText) await db.attachments.update(attachmentId, { description: contextText });
+        if (contextText) await persistDerived({ description: contextText });
       }
       // other binaries: honest null (stored + linked, no derived text).
 

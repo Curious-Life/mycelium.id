@@ -7,6 +7,7 @@
 //   N5 non-200 server → soft-fail {delivered:false, reason:'server-NNN'}
 //   N6 forward failure (no server) → {delivered:false, reason:'native-forward-failed'}
 //   N7 selectRuntime(channelRouter:'native') → the native runtime, no creds needed
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import { createNativeRuntime } from '../packages/channel-daemon/agent/backends/native.js';
 import { selectRuntime } from '../packages/channel-daemon/agent/runtime.js';

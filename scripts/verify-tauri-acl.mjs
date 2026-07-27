@@ -98,6 +98,7 @@
 //   the gate FAILS CLOSED (A0 + A3 + A8 RED) rather than reading zero permissions as
 //   "nothing to check"; restored → GREEN.
 // All restored afterwards; the gate returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve, extname } from 'node:path';

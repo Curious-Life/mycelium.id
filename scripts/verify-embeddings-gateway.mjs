@@ -6,6 +6,7 @@
 //   E5 embed-service down → 503 generic envelope (NO input/stack leak)
 //   E6 X-Mycelium-Embed-Task header → passed to the embed client (default 'document')
 // Pure; no network (stub embed client); CWD-independent. Never logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createEmbeddingsHandler, EMBED_MODEL_ID } from '../src/gateway/embeddings.js';
 
 const ledger = [];

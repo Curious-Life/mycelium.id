@@ -9,6 +9,7 @@
 //
 // Prints a [✓]/[✗] ledger and `VERDICT: GO` / exit 0 when all pass.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { createIdentity } from '../src/identity/identity.js';

@@ -6,6 +6,7 @@
 //   H5 detectHardware with INJECTED os/nvidia-smi/sysfs (NVIDIA · Apple unified · CPU-only)
 //   H6 ollama client: listInstalled, isUp, pullModel NDJSON progress, model-name validation
 // Pure; no network; CWD-independent. Never logs a secret.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert';
 import { estimateMemoryGb, fitScore, fitLevel, QUANT_BPP } from '../src/hardware/fit.js';
 import { recommendModels, availableMemoryGb } from '../src/hardware/recommend.js';

@@ -9,6 +9,7 @@
 // Fail-closed: an unrecognised token is 'checking', never 'ready'. Mutation-proved
 // by breaking the module (see the PR/handoff).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { serviceState, isRetryable, normalizeHealth } from '../src/system/service-state.js';
 import assert from 'node:assert/strict';
 

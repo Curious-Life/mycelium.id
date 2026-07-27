@@ -14,6 +14,7 @@
 // swapped file must open exactly as validated). Plus the safety-critical negative cases:
 // a legitimate crash-WAL must NEVER be quarantined.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { mkdtempSync, copyFileSync, rmSync, existsSync, readdirSync, writeFileSync, renameSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';

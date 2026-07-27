@@ -45,6 +45,7 @@
 //     real route and the real decision endpoints.
 //   It does NOT claim the `allow` rationales are CORRECT — that is human
 //   judgement this gate only forces to be recorded and reviewed.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';

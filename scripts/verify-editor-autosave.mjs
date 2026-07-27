@@ -166,6 +166,7 @@
 // NOT RED. Corrected here — of the mutations listed across all rounds, exactly two
 // (n7, n21) are declared non-RED-by-design and every other one was observed RED.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

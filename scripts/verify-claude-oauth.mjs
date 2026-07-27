@@ -9,6 +9,7 @@
 //   CO13-15 end-to-end streamTurn(subscription): request carries Bearer + beta + ua + x-app, NO x-api-key, system preamble-block-first
 //   CO16    apiKey streamTurn still sends x-api-key + plain string system (no regression)
 //   CO17    isTokenExpired skew
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { anthropicAuthHeaders, anthropicSystem, CLAUDE_CODE_PREAMBLE, CLAUDE_CODE_BETA, CLAUDE_CODE_UA } from '../src/inference/anthropic-wire.js';
 import { describeProvider, createAgentHarness } from '../src/agent/harness.js';
 import { resolveInferenceConfig, resolveInferenceConfigForTask, resolveProviderChain, _setSubscriptionTokenReaderForTests } from '../src/inference/resolve.js';

@@ -4,6 +4,7 @@
 // llm_usage row with correct dimensions, that summary() aggregates by area/
 // provider/model and splits input vs output, and the HARD invariant: NO prompt or
 // completion text ever lands in llm_usage (counts + dimensions only).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

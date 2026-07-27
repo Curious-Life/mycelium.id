@@ -18,6 +18,7 @@
 // takes no writer lock; safe beside a running app. On a corrupt verdict it appends to
 // the corruption ledger (a file BESIDE the vault, never inside it).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';

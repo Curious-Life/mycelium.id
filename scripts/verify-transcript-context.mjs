@@ -16,8 +16,10 @@
 //   T7  getDailyMessages exposes it
 //   T8  the join is USER-SCOPED (a foreign attachment id yields no text)
 //   T9  a message with NO attachment is untouched (no phantom lines)
-//   T10 the aggregate transcript budget is BOUNDED (COST) — 40 transcripts stay under a
-//       LITERAL char ceiling, exhausted entries POINTER (never silence), recency-first
+//   T10 FULL CONTENT reaches the agent (2026-07-26 decision — the 4000-char clamp and the
+//       tiered aggregate rationing are retired): every transcript renders whole, a 30-minute
+//       (27k-char) recording arrives verbatim, and only a 1M-char DoS ceiling bounds a
+//       pathological batch — degrading OLDEST-first to POINTERS, never to silence
 //   T11 channel-slice honesty (MINOR-1): a transcript past the 500-char content slice
 //       still emits, and alreadyCarries suppresses only on FULL containment
 //
@@ -28,6 +30,7 @@
 //   - src/agent/channel-turn.js: drop withAttachmentContext               → T6 FAIL
 //   - src/db/messages.js: remove attachment_id from selectPaginated       → T7 FAIL
 //   - attachment-context.js: return null instead of the "could not be loaded" line → T3 FAIL
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import http from 'node:http';
 import express from 'express';
@@ -187,21 +190,72 @@ await captureMessage(db, {
   rec('T9 a message with no attachment gets no line', lineFor({ content: 'plain message' }) === null);
 }
 
-// ── T10: aggregate transcript budget is BOUNDED (a COST gate, not a SHAPE gate) ──
-//  Round-2 blocker: MAX_ATTACHMENT_TEXT bounds ONE transcript but a batch had no total,
-//  so 40 messages × a 4000-char clamp = ~164KB / ~41k tokens in a single briefing — 8× the
-//  pre-PR size, silently evicting claims/reflections/cycles AND the history this PR added.
-//  Gates assert SHAPE, never COST: a per-message clamp is SHAPE; the
-//  firehose is COST. So we pin a LITERAL ceiling (never import the constant — a gate that
-//  follows the mutation can't catch it) and assert the TOTAL length.
+// ── T10: FULL CONTENT reaches the agent; only a DoS ceiling bounds a batch ──────────
+//  The 2026-07-26 decision INVERTED this section's contract. It used to assert COST (a
+//  4000-char per-message clamp + tiered 6000/8000/24000 aggregate rationing kept a 40-message
+//  briefing under ~11k chars). That rationing was sized against LOCAL_DEFAULT's 8192-token
+//  window — the FLOOR used only when the Ollama probe fails, not what anyone runs — and its
+//  overflow path pointed at a retrieval tool that does not exist. D-076 then made long-audio
+//  transcription complete, so the clamp was cutting ~85% of a 30-minute recording.
 //
-//  MUTATION PROOF (each must turn this gate RED):
-//    - attachment-context.js: delete the `included`/budget loop (everything full) → T10a FAIL
-//    - attachment-context.js: remove the finite-guard (`let remaining = budget`)  → T10e FAIL
-//      (a NON-finite budget must collapse to the default constant — NOT T10a: the getContext
-//       call site passes a finite briefing budget, so removing the guard leaves T10a green.)
-//    - attachment-context.js: pointer branch returns null (silent drop)           → T10b FAIL
-//    - attachment-context.js: byRecency spends in list order, not created_at desc → T10d FAIL
+//  The contract now: every stored transcript renders IN FULL. What survives is a DoS ceiling
+//  (TRANSCRIPT_DOS_CEILING = 1,000,000 chars) that no real batch reaches and that degrades a
+//  pathological one to POINTERS, never silence. So T10a/T10b assert CONTENT ARRIVES, and
+//  T10c/T10d/T10e assert the ceiling still has teeth at its SHIPPED value.
+//
+//  LITERALS, never the imported constants — a gate that follows the mutation cannot catch it.
+//
+// MUTATION-TESTED: six mutations, 2026-07-26 — RESULTS OBSERVED, not predicted. Each was
+// applied to src/agent/attachment-context.js, this gate run, then reverted:
+//   M1 `MAX_ATTACHMENT_TEXT = 4000` (restore the content clamp)
+//        → T10a, T10b RED (and T10c/T10d too: a 4000-char clamp shrinks 12×200k under the
+//          ceiling, so the pointer state never fires either).            15/19, NO-GO
+//   M2 `TRANSCRIPT_DOS_CEILING = 6000` (restore the rationing)
+//        → T10a, T10b RED (T10b as well as T10a: a 27k transcript exceeds a 6000 aggregate
+//          and degrades to a pointer — the exact regression this decision reverses). 17/19
+//   M3 neuter the ceiling loop (`included.add(id)` unconditionally)
+//        → T10c, T10d, T10e RED.                                        16/19, NO-GO
+//   M4 pointer branch returns null (silent drop)
+//        → T10c, T10d RED.                                              17/19, NO-GO
+//   M5 drop `.sort(created_at desc)` — spend in list order
+//        → T10d RED, ALONE (the recency claim is isolated).             18/19, NO-GO
+//   M6 drop the finite-guard (`let remaining = budget`)
+//        → T10e RED, ALONE — NOT T10a/T10c, whose call sites pass a finite ceiling, which is
+//          why T10e must call the resolver directly with Infinity.      18/19, NO-GO
+//   M7 src/search/d1-loader.js: messages source indexes content only (`textFrom: r => r.content`)
+//        → T12, T13 RED.                                                20/22, NO-GO
+//        ⚠️ M7 FIRST RAN GREEN AT 22/22 — recorded because it is the whole reason T12 is
+//          shaped the way it is. T12 originally built the search helpers with a STUB EMBEDDER
+//          and asserted `messages.length > 0`; a vector backend returns nearest neighbours for
+//          any query, so the check passed with the transcript absent from the index. T12 now
+//          runs BM25-only (no embedder) and asserts the specific message id from the raw
+//          ranked hits. Do not reintroduce an embedder here — it silently removes the teeth.
+//   M8 src/search/index.js: formatMessage ignores `_attachmentLine`
+//        → T13 RED, ALONE (T12 still green — the corpus match is independent of hydration).
+//                                                                       21/22, NO-GO
+//   M9 src/search/d1-loader.js: remove the messages source's `fallback` block
+//        → T14 RED.                                                     21/22, NO-GO
+//   M10 src/agent/attachment-context.js: coverageNote() always returns '' (a partial
+//       transcript renders as a complete one — the pre-#386 lie, one layer up)
+//        → T15a RED.                                                    24/25, NO-GO
+//   M11 src/db/attachments.js: getByIds drops `metadata` from its projection
+//        → T15a, T15c RED. This is the structural-blindness case: with metadata unprojected
+//          the resolver cannot see coverage AT ALL, and T15a alone would not tell you why.
+//                                                                       23/25, NO-GO
+//   M13 src/search/index.js formatMessage — the REBASE-CONFLICT pair, tested from BOTH sides:
+//        (a) resolve main's way, dropping the attachment line   → T13 RED.   24/25, NO-GO
+//        (b) resolve my way, dropping D-040 ↻1's `[msg:…]` ref  → T13 RED.   24/25, NO-GO
+//        A conflict resolved by picking a side leaves code that still looks correct; this is
+//        the check that makes the silent half-resolution loud.
+//   M12 attachment-context.js: absent coverage treated as incomplete (`if (c?.complete)`)
+//        → T15b AND T4 RED. T4 is the informative one: smearing legacy rows makes the line
+//          emit even when content already carries the transcript, so the dedup breaks too.
+//                                                                       23/25, NO-GO
+//        ⚠️ M12's first TWO attempts CRASHED the gate instead of failing a check (a null
+//          `c` hit `c.durationSec`, then `c.gaps`). A crash is not a RED for the stated
+//          reason, so coverageNote() was made null-safe THROUGHOUT and the mutation re-run.
+//          Recorded because "the gate went non-zero" is exactly the false comfort M-001 is
+//          about — the exit code was right and the reason was wrong.
 {
   const BIG = 8000, COUNT = 40, base = Date.now();
   for (let i = 0; i < COUNT; i++) {
@@ -217,41 +271,83 @@ await captureMessage(db, {
   const { handlers } = createContextDomain({ getDb: () => db, readMindFile: async () => null, userId: U });
   const out = await handlers.getContext({ include: ['messages'], recentMessages: 40 });
 
-  const CEILING = 20000; // LITERAL: measured ~10.9k WITH the budget; ~164k unbounded (8× over).
-  rec(`T10a getContext over 40× ${BIG}-char transcripts stays under ${CEILING} chars (COST)`,
-    out.length < CEILING, `actual ${out.length} chars / ~${Math.ceil(out.length / 4)} tokens`);
+  // EVERY transcript in a realistic batch arrives whole — the OLDEST as well as the newest
+  // (under the old tiering the oldest 30+ were pointers), and nothing is marked truncated.
+  rec(`T10a all 40× ${BIG}-char transcripts render IN FULL, oldest included, none truncated`,
+    out.includes(`MSG39 ${'x'.repeat(BIG)}`) && out.includes(`MSG00 ${'x'.repeat(BIG)}`)
+      && !/truncated/i.test(out) && !/aggregate size ceiling/.test(out),
+    `${out.length} chars / ~${Math.ceil(out.length / 4)} tokens`);
+}
 
-  // The 4th honest state: budget-exhausted transcripts become POINTERS, never silence.
-  const pointers = (out.match(/not included here to keep this briefing short/g) || []).length;
-  rec('T10b budget-exhausted transcripts degrade to a POINTER line (never silent)',
-    pointers >= 30 && /ask me to read it/.test(out), `${pointers} pointer lines`);
+// ── T10b: the literal D-076 case — a 30-MINUTE recording survives verbatim ───────────
+//  ~27,000 chars (150 wpm × 30 min × ~6 chars/word). The old 4000-char clamp delivered 15%
+//  of this. MUTATION: restore MAX_ATTACHMENT_TEXT = 4000 → the tail never arrives → RED.
+{
+  const HEAD = 'LONGFORM-OPENING-MARKER', TAIL = 'LONGFORM-CLOSING-MARKER';
+  const LONG30 = `${HEAD} ${'y'.repeat(27000)} ${TAIL}`;
+  const { attachmentId: aid } = await uploadAttachment(db, {
+    userId: U, bytes: Buffer.from('LONG30'), fileName: 'lecture.ogg', fileType: 'audio/ogg',
+  });
+  await db.attachments.update(aid, { transcript: LONG30 });
+  await captureMessage(db, {
+    userId: U, role: 'user', content: 'File: lecture.ogg', source: 'telegram',
+    conversationId: 'bulk', attachmentId: aid, createdAt: new Date(Date.now() + 60_000).toISOString(),
+  }, () => {});
+  const { handlers } = createContextDomain({ getDb: () => db, readMindFile: async () => null, userId: U });
+  const out = await handlers.getContext({ include: ['messages'], recentMessages: 5 });
+  rec('T10b a 30-minute (27k-char) transcript reaches getContext WHOLE — head, body and tail',
+    out.includes(LONG30) && out.includes(TAIL),
+    `head=${out.includes(HEAD)} tail=${out.includes(TAIL)} whole=${out.includes(LONG30)}`);
+}
 
-  // Recency-first: the NEWEST transcript is rendered in full; the OLDEST is a pointer.
-  rec('T10c newest transcript rendered in full, oldest pointed (recency-first)',
-    out.includes(`MSG39 ${'x'.repeat(500)}`) && !out.includes(`MSG00 ${'x'.repeat(500)}`),
-    'newest full inlined, oldest not');
+// ── T10c: the DoS ceiling still has teeth AT ITS SHIPPED VALUE ───────────────────────
+//  A batch that is a bomb, not a briefing: 12 × the 200k persistence ceiling = 2.4M chars,
+//  well past TRANSCRIPT_DOS_CEILING. The ceiling must bound it AND degrade to pointers.
+//  Stub db (no 2.4MB of real encrypted writes). LITERAL bound: 1,000,000 admits 5 × 200k.
+{
+  const N = 12, BOMB = 200_000;
+  const stub = { attachments: { getByIds: async (ids) => ids.map((id) => ({
+    id, file_type: 'audio/ogg', file_name: `${id}.ogg`, transcript: `${id} ${'z'.repeat(BOMB)}`,
+  })) } };
+  const rows = Array.from({ length: N }, (_, i) => ({
+    attachment_id: `bomb-${String(i).padStart(2, '0')}`, content: '.',
+    created_at: `2026-07-${String(i + 1).padStart(2, '0')}T00:00:00Z`,
+  }));
+  const lineFor = await attachmentLineResolver(rows, { db: stub, userId: U, budget: 1_000_000 });
+  const lines = rows.map((r) => String(lineFor(r) || ''));
+  const total = lines.reduce((n, s) => n + s.length, 0);
+  const pointers = lines.filter((s) => /aggregate size ceiling/.test(s)).length;
+  const silent = lines.filter((s) => !s.length).length;
+  rec('T10c a pathological 2.4M-char batch is bounded by the DoS ceiling, degrading to POINTERS',
+    total < 1_300_000 && pointers >= 5 && silent === 0,
+    `total ${total} chars, ${pointers} pointers, ${silent} silent`);
 }
 
 // ── T10d: recency is measured by created_at, NOT array order ─────────────────
-//  selectPaginated / selectByConversation hand rows OLDEST-FIRST. If the budget were
-//  spent in array order the OLDEST transcript would win the full text and the newest would
-//  be pointed — the opposite of what the agent needs. Stub db, budget sized to fit ONE.
+//  selectPaginated / selectByConversation hand rows OLDEST-FIRST. When the DoS ceiling DOES
+//  bind, whatever it drops must be the OLDEST — if the spend ran in array order the oldest
+//  would win the full text and the message the human just sent would be pointed, the exact
+//  opposite of what the agent needs. Stub db at the SHIPPED ceiling, bombed past it so the
+//  ceiling binds: 8 × 200k = 1.6M, of which 1,000,000 admits the 5 most recent.
 {
+  const BOMB = 200_000;
+  const body = (tag) => `${tag} ${tag[0].toLowerCase().repeat(BOMB)}`;
   const stub = { attachments: { getByIds: async (ids) => ids.map((id) => ({
-    id, file_type: 'audio/ogg', file_name: `${id}.ogg`,
-    transcript: id === 'att-new' ? `NEW ${'n'.repeat(4000)}` : id === 'att-mid' ? `MID ${'m'.repeat(4000)}` : `OLD ${'o'.repeat(4000)}`,
+    id, file_type: 'audio/ogg', file_name: `${id}.ogg`, transcript: body(id === 'att-new' ? 'NEW' : id === 'att-old' ? 'OLD' : 'MID'),
   })) } };
   const rowsOldestFirst = [
-    { attachment_id: 'att-old', content: '.', created_at: '2026-07-20T10:00:00Z' },
-    { attachment_id: 'att-mid', content: '.', created_at: '2026-07-21T10:00:00Z' },
+    { attachment_id: 'att-old', content: '.', created_at: '2026-07-10T10:00:00Z' },
+    ...Array.from({ length: 6 }, (_, i) => ({
+      attachment_id: `att-mid-${i}`, content: '.', created_at: `2026-07-1${i + 1}T10:00:00Z`,
+    })),
     { attachment_id: 'att-new', content: '.', created_at: '2026-07-22T10:00:00Z' },
   ];
-  const lineFor = await attachmentLineResolver(rowsOldestFirst, { db: stub, userId: U, budget: 4200 });
-  const newLine = lineFor(rowsOldestFirst[2]); // att-new — most recent, LAST in the array
-  const oldLine = lineFor(rowsOldestFirst[0]); // att-old — least recent, FIRST in the array
+  const lineFor = await attachmentLineResolver(rowsOldestFirst, { db: stub, userId: U, budget: 1_000_000 });
+  const newLine = lineFor(rowsOldestFirst[rowsOldestFirst.length - 1]); // most recent, LAST in the array
+  const oldLine = lineFor(rowsOldestFirst[0]);                          // least recent, FIRST in the array
   rec('T10d most-recent-first: the newest gets full text even when it is LAST in the array',
-    /NEW n{500}/.test(newLine || '') && /not included here to keep this briefing short/.test(oldLine || ''),
-    `new=${(newLine || '').slice(0, 12)}… old=${(oldLine || '').slice(0, 44)}…`);
+    /NEW n{500}/.test(newLine || '') && /aggregate size ceiling/.test(oldLine || ''),
+    `new=${(newLine || '').slice(0, 12)}… old=${(oldLine || '').slice(0, 60)}…`);
 }
 
 // ── T10e: a NON-FINITE budget FAILS CLOSED to the default constant (never the firehose) ──
@@ -264,19 +360,19 @@ await captureMessage(db, {
 //  MUTATION: `let remaining = budget;` (drop the finite-guard) → Infinity admits every transcript
 //  full → total blows past the ceiling → this reds.
 {
-  const N = 40, BIG = 8000;
+  const N = 12, BOMB = 200_000;
   const stub = { attachments: { getByIds: async (ids) => ids.map((id) => ({
-    id, file_type: 'audio/ogg', file_name: `${id}.ogg`, transcript: `${id} ${'z'.repeat(BIG)}`,
+    id, file_type: 'audio/ogg', file_name: `${id}.ogg`, transcript: `${id} ${'z'.repeat(BOMB)}`,
   })) } };
   const rows = Array.from({ length: N }, (_, i) => ({
     attachment_id: `inf-${String(i).padStart(2, '0')}`, content: '.',
-    created_at: `2026-07-${String((i % 27) + 1).padStart(2, '0')}T00:00:00Z`,
+    created_at: `2026-07-${String(i + 1).padStart(2, '0')}T00:00:00Z`,
   }));
   const lineFor = await attachmentLineResolver(rows, { db: stub, userId: U, budget: Infinity });
   const total = rows.reduce((n, r) => n + String(lineFor(r) || '').length, 0);
-  // LITERAL ceiling (never import the constant): DEFAULT_TRANSCRIPT_BUDGET=12000 admits ≤3 clamped
-  // transcripts (~12k) + N pointer lines (~110 chars each). Unbounded = ~N×4000 = ~160k, 8× over.
-  const CEILING = 20000;
+  // LITERAL bound (never import the constant): DEFAULT_TRANSCRIPT_BUDGET=1,000,000 admits 5 of
+  // the 12 × 200k transcripts + 7 pointer lines. Unbounded = 12 × 200k = 2.4M, 2× over.
+  const CEILING = 1_300_000;
   rec(`T10e a non-finite budget collapses to the default ceiling (total < ${CEILING}, not the firehose)`,
     total < CEILING, `total ${total} chars over ${N} rows / ~${Math.ceil(total / 4)} tokens`);
 }
@@ -307,6 +403,115 @@ await captureMessage(db, {
   );
   rec('T11b alreadyCarries suppresses only on FULL containment (partial content still emits)',
     typeof line2 === 'string' && line2.includes('lock the door'), JSON.stringify(line2).slice(0, 80));
+}
+
+// ── T12/T13: a voice note is FINDABLE by what was SAID, and the hit carries it ────────
+//  Before this, `attachments` was not a corpus source at all (d1-loader.js SOURCES: messages,
+//  territory_profiles, realms, semantic_themes, documents) — so a recording captured by the
+//  import path stored content "File: memo.ogg" and searching ANY spoken phrase returned
+//  nothing. The transcript was neither retrievable by a tool nor findable by search; the only
+//  way it ever reached the agent was landing in a recent window / history / day review.
+//
+//  ZORBLAX is the proof token: it exists ONLY in attachments.transcript and appears in no
+//  message body anywhere in this vault, so a hit on it can ONLY come from the indexed
+//  transcript. T13 then proves the HIT ITSELF carries the text — a corpus that matches on the
+//  transcript but hydrates content alone would answer the query with "File: memo.ogg".
+//
+//  ⚠️ NO EMBEDDER, DELIBERATELY — this gate is BM25-only, and that is what gives T12 teeth.
+//  The first draft built the helpers with createStubEmbedder() and asserted `messages.length
+//  > 0`. It passed even with the transcript REMOVED from the indexed text (mutation M7,
+//  observed): a vector backend returns nearest neighbours for ANY query, so "some hit came
+//  back" says nothing about what was indexed. Without an embedder the backend is pure BM25,
+//  so a hit on ZORBLAX can ONLY come from that token being in the corpus. T12 also asserts
+//  the SPECIFIC message id off the raw ranked hits — `search()` is the backend's own output,
+//  with no hydration in the path, so T12 cannot be satisfied by the hydrate join T13 covers.
+// MUTATION-TESTED: see the records above T10 — M7/M8 cover this pair.
+{
+  const { createSearchHelpers } = await import('../src/search/index.js');
+  const sh = createSearchHelpers({ db, userId: U }); // no embedder → BM25 only
+  const hits = await sh.search('ZORBLAX', { limit: 10 });
+  rec('T12 a voice note is FINDABLE by a word spoken ONLY in its transcript (corpus join)',
+    hits.some((h) => String(h.id) === String(voiceMsg.id)),
+    `${hits.length} hit(s): ${hits.map((h) => h.id).join(',').slice(0, 120)}`);
+
+  const found = await sh.bulkSearch({ query: 'ZORBLAX', limit: 5 });
+  const msgs = found?.messages || [];
+  // BOTH properties, in ONE assertion, because they met as a rebase CONFLICT in formatMessage
+  // (D-040 ↻1's addressable `[msg:…]` ref vs this transcript line) and resolving such a
+  // conflict by picking a side is silent — the survivor still looks right. A hit must be
+  // ADDRESSABLE (ref) *and* TRUTHFUL (what was actually said), or a voice note comes back as
+  // "File: memo.ogg" with a ref pointing at a body that says nothing.
+  rec('T13 the search hit CARRIES the transcript AND stays addressable (ref + derived text)',
+    msgs.some((m) => String(m).includes(TRANSCRIPT) && /\[msg:[^\]]+\]/.test(String(m))),
+    JSON.stringify(msgs[0] || null).slice(0, 200));
+}
+
+// ── T14: the corpus join is STRICTLY ADDITIVE — losing attachments must not lose messages ──
+//  Every catch in loadFromDb's source loop is SILENT ("table absent → skip this source"),
+//  which is survivable for a topology profile and an OUTAGE for messages: one missing column
+//  would drop the entire message layer out of search with no error anywhere. A db whose
+//  attachments table does not exist must still index messages via the fallback query.
+//  MUTATION: delete the `fallback` block from the messages source → RED.
+{
+  const { loadFromDb } = await import('../src/search/d1-loader.js');
+  const { createLocalBackend, createStubEmbedder } = await import('../src/search/index.js');
+  const backend = createLocalBackend({ embedder: createStubEmbedder(48), userId: U });
+  // Throws on the JOIN (no attachments table) exactly as the real adapter does — the verify
+  // stubs elsewhere swallow to `{results:[]}`, which cannot exercise the fallback at all.
+  const noAttachDb = {
+    rawQuery: async (sql) => {
+      if (/attachments/.test(sql)) throw new Error('no such table: attachments');
+      if (/FROM messages\b/.test(sql) && !/\bid IN \(/.test(sql)) {
+        return { results: [{ id: 'fb-1', text: 'PANGOLIN budget review', created_at: '2026-07-01T00:00:00Z' }] };
+      }
+      return { results: [] };
+    },
+  };
+  const stats = await loadFromDb({ backend, db: noAttachDb, userId: U });
+  rec('T14 a vault without an attachments table still indexes MESSAGES (additive, never an outage)',
+    (stats?.byKind?.message || 0) > 0, `byKind=${JSON.stringify(stats?.byKind || {})}`);
+}
+
+// ── T15: a PARTIAL transcript must not read as a complete one (D-076 / #386) ──────────
+//  #386 exists because "a partial transcript had NO representation, so it read as complete".
+//  It fixed that in the DB (attachments.metadata.transcription coverage). This gate holds the
+//  line at the AGENT boundary, which is where the lie actually lands — and which matters more
+//  now that the transcript is rendered in full, because there is no truncation marker left to
+//  hint that anything is missing. Three properties, each independently reversible:
+//    (a) an INCOMPLETE row says so, in the same line as the text;
+//    (b) a COMPLETE row and a LEGACY row (no coverage recorded at all) are UNCHANGED — absence
+//        of a marker is not incompleteness, or every pre-#386 transcript would be smeared;
+//    (c) getByIds PROJECTS metadata — without it the resolver is structurally blind and (a)
+//        silently degrades to (b) with nothing failing.
+// MUTATION-TESTED: M10/M11 — see the records above T10.
+{
+  const { attachmentId: partialId } = await uploadAttachment(db, {
+    userId: U, bytes: Buffer.from('PARTIAL'), fileName: 'long.ogg', fileType: 'audio/ogg',
+  });
+  await db.attachments.update(partialId, {
+    transcript: 'the first seven minutes of the lecture',
+    metadata: JSON.stringify({ transcription: { incomplete: 1, coveredSec: 440, durationSec: 1800, segments: 61 } }),
+  });
+  const rows = [{ attachment_id: partialId, content: 'File: long.ogg', created_at: '2026-07-26T12:00:00Z' }];
+  const lineFor = await attachmentLineResolver(rows, { db, userId: U });
+  const line = String(lineFor(rows[0]) || '');
+  rec('T15a an INCOMPLETE transcript is labelled as partial, with what it covers',
+    /INCOMPLETE/.test(line) && /7m20s/.test(line) && /30m00s/.test(line)
+      && line.includes('the first seven minutes of the lecture'),
+    JSON.stringify(line).slice(0, 210));
+
+  // (b) LEGACY row: the original memo.ogg has NO transcription coverage recorded at all.
+  const legacyRows = [{ attachment_id: attachmentId, content: 'File: memo.ogg', created_at: '2026-07-26T12:00:00Z' }];
+  const legacyFor = await attachmentLineResolver(legacyRows, { db, userId: U });
+  const legacyLine = String(legacyFor(legacyRows[0]) || '');
+  rec('T15b a LEGACY row (no coverage recorded) is NOT smeared as incomplete',
+    legacyLine.includes(TRANSCRIPT) && !/INCOMPLETE/.test(legacyLine), JSON.stringify(legacyLine).slice(0, 140));
+
+  // (c) the projection itself — the silent-blindness guard.
+  const [row] = await db.attachments.getByIds([partialId], U);
+  rec('T15c getByIds PROJECTS metadata (else the resolver cannot see coverage at all)',
+    row && row.metadata != null && /transcription/.test(String(row.metadata)),
+    `metadata=${row?.metadata ? 'present' : 'ABSENT'}`);
 }
 
 await close?.();

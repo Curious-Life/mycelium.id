@@ -8,6 +8,7 @@
 // Drives writer-lock.js against a FAKE canonical path (MYCELIUM_DB) in a temp dir — never
 // touches the real vault.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

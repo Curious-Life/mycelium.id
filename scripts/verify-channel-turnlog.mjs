@@ -17,6 +17,7 @@
 //   T4  leak-safety: a driven turn writes ONE line whose key set is exactly the
 //       allowed metadata set, and a canary message content NEVER reaches the file
 // PASS/FAIL ledger; exit 0 only on full GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { rmSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';

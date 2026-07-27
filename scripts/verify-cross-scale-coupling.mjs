@@ -7,6 +7,7 @@
 // across daily/weekly/monthly windows, runs the REAL harmonics stage (to create
 // the rows) then the REAL coupling stage (to enrich), both via spawnSync.
 // PASS/FAIL ledger; exit 0 only if all pass.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

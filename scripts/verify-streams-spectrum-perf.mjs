@@ -9,6 +9,7 @@
 //  P3 semantics preserved: dropping the unused total_all changed no surfaced field
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';

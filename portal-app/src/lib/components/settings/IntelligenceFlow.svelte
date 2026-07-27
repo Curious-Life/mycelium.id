@@ -670,7 +670,8 @@
 	}
 	// The 'add-sample' action for a downloaded-but-mute voice: route to the character page, where
 	// the record/upload capture already lives (CharacterView) — no forked capture UI here, just the
-	// nav (R2-VOICEBTN). openFromRoute replaces the active tab in place (same pattern as AgentRow).
+	// nav (R2-VOICEBTN). openFromRoute replaces the active tab in place (same pattern as
+	// the Agents page's AgentHero character link).
 	function openCharacter() {
 		workspace.openFromRoute('character', { id: 'personal-agent' });
 	}

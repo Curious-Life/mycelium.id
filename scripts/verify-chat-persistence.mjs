@@ -12,6 +12,7 @@
 // The model is the unreliable half of this transaction; the human's typed words are not.
 // This gate pins the invariant: capture-on-receipt, independent of the model's fate.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import { portalChatRouter } from '../src/portal-chat.js';
 import assert from 'node:assert/strict';

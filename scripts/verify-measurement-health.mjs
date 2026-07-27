@@ -3,6 +3,7 @@
 // a real booted vault, that the recorded failure reason is bounded + content-free,
 // and that pipeline/lib/stage-result.js finalize() drives the recorder on both the
 // clean and the incomplete path. PASS/FAIL ledger; exits 0 only if all pass.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

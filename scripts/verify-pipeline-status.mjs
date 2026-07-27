@@ -27,6 +27,7 @@
 //
 // Each load-bearing assertion is mutation-falsified in scripts/mutate-pipeline-status.sh — a claim a
 // mutation to the slice logic cannot red is decoration ([[gates-fail-on-fixtures-not-assertions]]).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { createReadiness } from '../src/readiness.js';
 

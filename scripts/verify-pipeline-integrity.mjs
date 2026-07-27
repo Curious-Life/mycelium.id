@@ -2,6 +2,7 @@
 // design 2026-06-16): null content never enters the pipeline, the embed-backlog
 // counter reflects reality (never sticks), the search index skips content-NULL,
 // and the index build YIELDS the event loop (no freeze on large vaults).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

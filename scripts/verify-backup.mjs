@@ -6,6 +6,7 @@
 // never runs), ephemeral Keychain service names, OS-assigned ports. The keychain
 // namespace is process-global, so "new machine" is simulated with deleteKeychain()
 // (same trick as verify-account).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync, existsSync, readdirSync, mkdirSync, writeFileSync, readFileSync, symlinkSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';

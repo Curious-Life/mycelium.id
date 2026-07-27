@@ -19,6 +19,7 @@
 //      can distinguish "nothing to release" from "could not release"
 //   L6 bounded retry: a transient failure is retried; a success on attempt 2 wins;
 //      a not-applicable verdict is NOT retried (no point burning the budget)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';

@@ -6,7 +6,7 @@
 	import { sidebarWidth, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX } from '$lib/stores/sidebar';
 	import { workspace } from '$lib/workspace/store';
 	import { auth } from '$lib/stores/auth';
-	import { vaultDisplayLabel } from '$lib/vault-label';
+	import { vaultDisplayLabel, handleFromProfileResponse, avatarFromProfileResponse, type ProfileResponse } from '$lib/vault-label';
 	import PeopleNav from '$lib/components/people/PeopleNav.svelte';
 	import LibraryNav from '$lib/components/library/LibraryNav.svelte';
 	import {
@@ -65,10 +65,15 @@
 	let userAvatar = $state<string | null>(null);
 	$effect(() => {
 		if (!browser) return;
-		apiGet<{ handle: string | null; avatar_url?: string | null }>('/portal/profile')
+		// ⚠️ The route replies { profile: { handle, avatar_url } } — NESTED. This read used to be
+		// `d?.handle` / `d?.avatar_url` at the top level, which is always undefined, so the footer
+		// showed "My Mycelium" for every user with a claimed handle and no avatar ever rendered.
+		// Both failed silently: optional chaining on a missing key looks exactly like "not set".
+		// The shape now lives in $lib/vault-label beside the label chain, and is gated.
+		apiGet<ProfileResponse>('/portal/profile')
 			.then((d) => {
-				userHandle = (d?.handle || '').trim() || null;
-				userAvatar = (d?.avatar_url || '').trim() || null;
+				userHandle = handleFromProfileResponse(d);
+				userAvatar = avatarFromProfileResponse(d);
 			})
 			.catch(() => {});
 	});

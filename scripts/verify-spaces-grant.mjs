@@ -12,6 +12,7 @@
 // Adversarial coverage: #2 revoked-grant, #3 deleted-space (the HIGH regression),
 // #6 did/handle spoof — from the shared-spaces design §6.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

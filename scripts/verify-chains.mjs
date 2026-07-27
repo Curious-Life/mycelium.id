@@ -33,9 +33,21 @@
 //     `body.includes(f)` accepted as a reference.
 // Hence: chains are DECLARED not sniffed, and reachability means EXECUTED.
 //
+//   C7  every tests/*.test.js is EXECUTED by `npm run verify`  — added 2026-07-27
+//       after this gate was found blind to 11 of the repo's 16 test files. See C7's
+//       own block below for what was hiding in them.
+//
 // An unrun gate is worse than no gate: it reads as coverage. This gate is the
 // reason that can no longer happen quietly — it runs FIRST in `verify`, so the
 // suite goes red on divergence before spending 10 minutes on the real gates.
+//
+// MUTATION-TESTED (C7, 2026-07-27): removed `npm run verify:federation-ssrf` from the chain while
+//   leaving the gate registered → C7 REDs naming the orphaned file (C2 REDs alongside it, which is
+//   the registered-gate half of the same fact).
+// MUTATION-TESTED (C7, 2026-07-27): deleted the `verify:vault-integrity` script entirely so the
+//   test file is referenced by nothing at all → C7 REDs. This is the case C2 CANNOT see — there is
+//   no registered gate to be orphaned — and it is exactly the state all eleven files were in.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -126,6 +138,48 @@ for (const g of inVerify) for (const f of executedMjs(scripts[g])) reachableMjs.
     unreached.length
       ? `${unreached.length} gate script(s) NOT executed by the suite — they read as coverage but run never:\n      ${unreached.map((f) => `scripts/${f}`).join('\n      ')}`
       : `${files.length} gate scripts, all reached by the chain`);
+}
+
+// ── C7. every tests/*.test.js is EXECUTED by `npm run verify` ───────────────
+// ⚠️ THE BLIND SPOT THIS GATE HAD, FOUND 2026-07-27. C3 audits `scripts/verify-*.mjs` and nothing
+// else. A bare `tests/*.test.js` — run by `node --test`, wired through an npm script or not — was
+// entirely outside this file's view, so the gate whose whole claim is "no gate is silently unrun"
+// could not see eleven of the sixteen test files in the repo. It said GO while they ran never.
+//
+// What was actually sitting in there, invisible:
+//   · `federation-ssrf.test.js` — the SSRF guard's own tests, 1 RED. And it was red the DANGEROUS
+//     way: it asserted `assertResolvesPublic` ALLOWS an unresolvable host, which was true of an
+//     earlier, permissive guard. The guard has since been hardened to fail closed. So the file
+//     asserted a WEAKER security property than the code enforced, and the obvious way to "fix" that
+//     red — make the guard permissive again — would have re-opened the hole while turning the suite
+//     green.
+//   · `federation-did.test.js` (4 RED) and `federation-integration.test.js` (2 RED) — same
+//     hardening, same staleness.
+//   · `vault-integrity`, `vault-safe-copy`, `vault-disk-guard` — green, but unrun on the exact
+//     surface D-080 destroyed 80,000 datapoints on.
+//
+// This is worse than C3's failure mode. An unrun `verify-*.mjs` at least *looks* like a gate nobody
+// wired. An unrun test file looks like coverage AND can quietly disagree with the product about
+// what the security contract is. Absence of a red is not evidence of a green if nothing ran.
+{
+  const files = readdirSync(resolve(ROOT, 'tests')).filter((f) => /\.test\.js$/.test(f));
+  // Reached = executed by the suite, on the same EXECUTED-not-mentioned standard C3 uses.
+  const reachedTests = new Set();
+  for (const g of gatesIn('verify')) {
+    for (const m of (scripts[g.replace(/^npm run /, '')] || scripts[g] || '').matchAll(/tests\/([\w.-]+\.test\.js)/g)) {
+      reachedTests.add(m[1]);
+    }
+  }
+  const excusedTests = new Set();
+  for (const g of Object.keys(excluded)) {
+    for (const m of (scripts[g] || '').matchAll(/tests\/([\w.-]+\.test\.js)/g)) excusedTests.add(m[1]);
+  }
+  const unreached = files.filter((f) => !reachedTests.has(f) && !excusedTests.has(f)).sort();
+  rec('C7. every tests/*.test.js is EXECUTED by `npm run verify`',
+    unreached.length === 0,
+    unreached.length
+      ? `${unreached.length} test file(s) NOT executed by the suite — they read as coverage but run never:\n      ${unreached.map((f) => `tests/${f}`).join('\n      ')}`
+      : `${files.length} test files, all executed by the chain`);
 }
 
 // ── C5. only the declared chains may compose gates ──────────────────────────

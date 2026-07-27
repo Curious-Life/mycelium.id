@@ -47,6 +47,7 @@
 // MUTATION-TESTED: F7 — installer stderr never leaks in the returned error:
 //   - runToVerdict restored to append `': ' + err.slice(-160)` (leaks stderr) → I7 REDs
 // All mutations restored; the suite returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

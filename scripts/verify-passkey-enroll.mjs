@@ -18,6 +18,7 @@
 //   - the enrol endpoint the button calls stays session-gated (no unauth enrol).
 // The actual biometric ceremony (navigator.credentials.create) is the operator
 // device smoke — not deterministically scriptable (same as verify:passkey).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';

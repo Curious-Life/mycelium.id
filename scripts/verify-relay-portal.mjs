@@ -5,6 +5,7 @@
 // (edgeRouteFor) AND on the rendered Caddyfile: the control surfaces 404 at the
 // edge (V-1 layer a), OAuth/MCP/gateway/ingest → :4711, and everything else
 // (incl. the now-authenticated portal) → :8787. Pure functions — no server boot.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { edgeRouteFor, renderCaddyfile } from '../src/remote/runtime.js';
 
 let pass = 0, fail = 0;

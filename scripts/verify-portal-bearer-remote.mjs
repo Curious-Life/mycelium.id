@@ -14,6 +14,7 @@
 //   • CONTROL regression: the Bearer must NOT reach the recovery-key / account /
 //     remote surfaces — those stay loopback-only (self-gated). A networked Bearer
 //     request to /account/recovery-key must NEVER return 200.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

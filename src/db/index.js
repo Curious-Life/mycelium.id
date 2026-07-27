@@ -30,6 +30,7 @@ import { createAuditNamespace } from './audit.js';
 import { createLlmUsageNamespace } from './llm-usage.js';
 import { createActivityFeedNamespace } from './activity-feed.js';
 import { createPipelineStateNamespace } from './pipeline-state.js';
+import { createPipelineRunsNamespace } from './pipeline-runs.js';
 import { createHarnessNamespace } from './harness.js';
 import { createSpacesNamespace } from './spaces.js';
 import { createSpaceKnowledgeNamespace } from './space-knowledge.js';
@@ -122,6 +123,9 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     // recorder that pipeline/lib/stage-result.js finalize() writes — last success/
     // failure, streak, quarantine. Backs era-resolution rung 1 + /measurement-health.
     pipelineState: createPipelineStateNamespace({ d1QueryAdmin }),
+    // Durable RUN history (0059). pipelineState answers "is this metric family healthy NOW?";
+    // pipelineRuns answers "what did run X do?" — different questions, joined on stage_name.
+    pipelineRuns: createPipelineRunsNamespace({ d1QueryAdmin }),
     // Native agent harness state (Phase 5): scheduled_tasks (encrypted prompt) +
     // harness_runs (content-free run lifecycle/recovery/dedup) + conversation_summaries
     // (encrypted compaction). @see src/db/harness.js, migrations/0018_harness.sql.

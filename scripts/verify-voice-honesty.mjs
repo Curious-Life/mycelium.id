@@ -7,6 +7,7 @@
 // decryptability is what keeps the top-line honest (Finding 1). Also proves the
 // payload-agentId binding rejects a swapped/case-collided sample (crypto audit).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 process.env.ENCRYPTION_MASTER_KEY = crypto.randomBytes(32).toString('hex');
 

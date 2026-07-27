@@ -9,6 +9,7 @@
 //   A5  migration is idempotent + non-destructive (keeps the .pre-cipher copy)
 //   A6  Python-via-bridge reads/writes the encrypted vault; bridge rejects proxied req
 //   A7  two write semantics: /query raw (no encrypt) vs /batch_encrypted (AES-GCM envelope)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';

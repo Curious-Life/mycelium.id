@@ -15,6 +15,7 @@
 // Drives the REAL buildDaemon against a stub vault server whose /internal/agent/
 // model-status flips hasModel false → true mid-run. No mocks of the daemon itself.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import { buildDaemon } from '../packages/channel-daemon/index.js';

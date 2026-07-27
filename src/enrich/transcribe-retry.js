@@ -22,6 +22,15 @@
 //
 // Bounded per cycle. Gated on the transcriber being READY (health ok) so an unconfigured vault
 // touches nothing. Every collaborator is injectable so the gate drives it offline + deterministically.
+//
+// RE-EMBED ON A LATE TRANSCRIPT — INHERITED, DELIBERATELY NOT REPEATED HERE. This drain is the
+// path a late transcript most often takes, so the message that owns the attachment is almost
+// always ALREADY embedded (from `content` alone — "File: memo.ogg" on the import path) by the
+// time the decode lands. Re-queueing it for embedding is therefore mandatory, and it happens
+// exactly once, inside `transcribeAttachment` at the transcript write itself
+// (transcribe-attachment.js → markMessagesForReembed). Do NOT add a second mark in this loop:
+// `doTranscribe` is injectable, so a mark here would fire against a stub in the gates and would
+// double-write on the real path for no gain.
 
 const DEFAULT_INTERVAL_MS = 20000;
 const PER_CYCLE = Number(process.env.MYCELIUM_TRANSCRIBE_RETRY_BATCH) || 2; // decodes are heavy — a couple per cycle

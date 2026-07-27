@@ -13,6 +13,7 @@
 //    decryption path exists, so no content/title/preview/embedding can leak
 //  • the /streams/spectrum endpoint is wired and returns the same shape
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import express from 'express';
 import http from 'node:http';

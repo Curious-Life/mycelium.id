@@ -165,7 +165,7 @@ for (const [name, entry] of Object.entries(REAL)) {
 // the invite) render their own facts and none of them owns a `.loading-3d` node, so inert stubs
 // are faithful. Mindscape3D in particular would drag in THREE.js.
 const STUB = '<script>let { ...rest } = $props();</script><div class="stub-child"></div>';
-const CHILDREN = ['MindscapeDetail', 'NarrateControl', 'MeasureControl', 'MeasurementHealthSection',
+const CHILDREN = ['MindscapeDetail', 'NarrateControl', 'MeasureSection',
   'MindscapeBackground', 'MindscapeInvite', 'PipelineStatus', 'Mindscape3D'];
 for (const name of CHILDREN) {
   const out = compile(STUB, { generate: 'client', name, css: 'injected' });

@@ -9,6 +9,7 @@
 //   T6 an IMPORTED theme chronicle is PRESERVED (has a name → not re-narrated)
 //   T7 theme name/story ciphertext at rest (no plaintext narrative leak)
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

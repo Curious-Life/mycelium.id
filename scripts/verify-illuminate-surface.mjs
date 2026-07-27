@@ -28,6 +28,7 @@
 // the REAL activity store — portal-app/test/mount-illuminate-card.mjs), because a source
 // regex cannot prove reachability (mount-generate-render's M4 lesson). Every clause was
 // falsified by mutating the source — see the PR's falsification table.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';

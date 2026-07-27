@@ -1,6 +1,7 @@
 // scripts/verify-platform-env.mjs — gate for src/system/platform-env.js (A4a).
 // Exercises BOTH the win32 and posix branches on any host by injecting platform.
 // VERDICT: GO / exit 0 on pass; exit 1 on any failure.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import {
   splitPath, homeDir, exeName, exeNames, findExecutable,
   venvPythonPath, bundledPythonPath, systemPython,

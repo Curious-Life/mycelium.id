@@ -2,6 +2,7 @@
 // (markdown strip, chunking, config/provider/voice resolution, isEnabled,
 // error classes, disabled + short-text paths). The provider HTTP calls + ffmpeg
 // remux are host-verified (need API keys + ffmpeg). PASS/FAIL; exit 1 on fail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { stripMarkdownForTTS } from '../packages/channel-daemon/tts/shared/markdown.js';
 import { splitTextForTTS } from '../packages/channel-daemon/tts/shared/chunking.js';
 import { resolveProvider, resolveVoice, isEnabled } from '../packages/channel-daemon/tts/config.js';

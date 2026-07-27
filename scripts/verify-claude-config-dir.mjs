@@ -7,6 +7,7 @@
 //   CD4 no token → no file (nothing to seed)
 //   CD5 the CLI loop injects CLAUDE_CONFIG_DIR into the spawned child's env when configDir set
 //   CD6 no configDir → CLAUDE_CONFIG_DIR is NOT forced (machine default preserved)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { seedClaudeConfigDir, readClaudeConfigDirToken, claudeConfigCredsPath,
   claudeKeychainService, readClaudeConfigDirLiveToken, refreshClaudeConfigDirToken,
   startProactiveTokenRefresh, stopProactiveTokenRefresh, claudeSpawnEnv,

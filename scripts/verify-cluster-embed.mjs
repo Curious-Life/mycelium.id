@@ -3,6 +3,7 @@
 // the first 2000 chars). Spawns the venv python on the pure property test in
 // pipeline/lab/cluster_embed_test.py (no ONNX model, no D1). Mirrors the
 // python-gate pattern used by verify:fisher et al.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 

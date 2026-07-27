@@ -38,6 +38,7 @@ import {
 } from './lib/narrate-sample.js';
 import { buildContextCapsule, renderCapsule, describedPeriodFor } from './lib/narrate-context.js';
 import { isPlaceholderName, NAME_MAX_OUT_TOKENS } from './lib/naming-facts.js';
+import { createStageResult } from './lib/stage-result.js';
 
 const USER_ID = process.env.MYCELIUM_USER_ID || 'local-user';
 const DB_PATH = process.env.MYCELIUM_DB || './data/vault.db';
@@ -218,6 +219,20 @@ async function run() {
     );
     const total = realmIds.length + terrIds.length;
     console.log(`[describe] ${realmIds.length} realms · ${terrIds.length} territories`);
+
+    // STAGE ACCOUNTING (Gap #3). ⚠️ THE SKIP/FAIL LINE IS THE WHOLE JUDGEMENT HERE, and it is
+    // NOT the same as in a compute stage:
+    //   ok()   a name+essence was written from a real narration
+    //   skip() a PRESERVE/unchanged skip, or a consent refusal (namingBlocked) — both are
+    //          legitimate steady states, not malfunctions. The pipeline's own refusal to run an
+    //          unapproved model is a CHOICE (drainer §3.5 no_model); counting it as failure is
+    //          what makes a consent gate feel like a bug and get "fixed" by fail-open.
+    //   fail() a WRITE that threw — the row should have persisted and did not
+    // So a vault with no approved model reports attempted=0 and stays quiet, while a vault whose
+    // writes are systematically failing goes loud. That distinction is the point.
+    const res = createStageResult('describe-clusters', {
+      record: db.pipelineState?.recorderFor?.(USER_ID, 'describe-clusters'),
+    });
     if (feedId) { try { await db.activityFeed.heartbeat(feedId, { totalSteps: total }); } catch { /* */ } }
 
     let skippedRealms = 0;
@@ -243,7 +258,7 @@ async function run() {
       // name (D10) — never let it satisfy this skip, or a naming pass no-ops on the
       // rows it was spawned to name.
       if (!FORCE && existing?.name && !isPlaceholderName(existing.name) && (PRESERVE || existing.describe_input_hash === sig)) {
-        skippedRealms += 1;
+        skippedRealms += 1; res.skip();
         if (DRY_RUN) { console.log(`[describe] (dry) realm ${realm_id} unchanged — skip`); continue; }
         await query(
           `UPDATE realms SET territory_count = ?, message_count = ?, updated_at = datetime('now')
@@ -287,7 +302,7 @@ async function run() {
            territory_count = excluded.territory_count, message_count = excluded.message_count,
            describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
         [USER_ID, realm_id, name, essence, counts.tc ?? 0, counts.mc ?? 0, described ? sig : null],
-      ).catch(err => console.error(`[describe] realm ${realm_id} write failed:`, err.message));
+      ).then(() => res.ok(), (err) => { res.fail(err); console.error(`[describe] realm ${realm_id} write failed:`, err.message); });
       if (described) {
         // Persist the covered span (what this essence is based on) + activity histogram.
         const dp = describedPeriodFor('realm', members);
@@ -327,7 +342,7 @@ async function run() {
       // in). Refresh the coverage % on the way past so the UI stays honest. A
       // PLACEHOLDER name is not a name (D10) — never let it satisfy this skip.
       if (!FORCE && existing?.name && !isPlaceholderName(existing.name) && (PRESERVE || (existing.describe_input_hash === sig && unseen === 0))) {
-        skippedTerr += 1;
+        skippedTerr += 1; res.skip();
         if (DRY_RUN) { console.log(`[describe] (dry) territory ${territory_id} unchanged + fully covered — skip`); await tick(total); continue; }
         await query(
           `UPDATE territory_profiles SET explored_count = ?, explored_percent = ?, updated_at = datetime('now')
@@ -373,7 +388,7 @@ async function run() {
            realm_id = excluded.realm_id, explored_count = excluded.explored_count, explored_percent = excluded.explored_percent,
            describe_input_hash = excluded.describe_input_hash, updated_at = datetime('now')`,
         [USER_ID, territory_id, realm_id, name, essence, tc.mc ?? total_pts, seenCount, ep, described ? sig : null],
-      ).catch(err => console.error(`[describe] territory ${territory_id} write failed:`, err.message));
+      ).then(() => res.ok(), (err) => { res.fail(err); console.error(`[describe] territory ${territory_id} write failed:`, err.message); });
       if (described) {
         // Persist the covered span (now includes this pass's freshly-seen members) +
         // the activity histogram, so the NEXT narration knows what was already folded.
@@ -417,6 +432,9 @@ async function run() {
         : `[describe] WARNING: named 0 realms — the model (${narrator.label}) returned nothing usable. Check Settings → Intelligence.`);
     }
     if (feedId) { try { await db.activityFeed.finish(feedId, { status: failedAll ? 'error' : 'done' }); } catch { /* */ } }
+    // pipeline_state + the fail-loud decision. AFTER the feed row so the feed's own verdict is
+    // unaffected by a throw here; BEFORE close() because the recorder needs the db open.
+    await res.finalize();
   } finally {
     if (hbTimer) clearInterval(hbTimer);
     close();

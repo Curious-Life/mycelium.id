@@ -15,7 +15,8 @@
 	// model-approval, portal-intelligence.js:265); this component only FIRES the remedy, it does not
 	// re-derive the block.
 	import { pipeline, type Stage } from '$lib/pipeline';
-	import { fmtSeconds, start } from '$lib/generate';
+	import { countText, driftNote, producesText } from '$lib/stage-count';
+	import { fmtSeconds, start, rebuild } from '$lib/generate';
 	import { apiPost } from '$lib/api';
 	import { goto } from '$app/navigation';
 	// D-067: the shared whole-header disclosure, extracted from the live process indicator
@@ -50,12 +51,10 @@
 	const labelFor = (key: string) => STAGE_LABEL[key] ?? key;
 	const reasonText = (reason?: string) => (reason ? REASON_TEXT[reason] ?? reason : '');
 
-	// "3,200 / 76,000" — counts only, localised. Absent total ⇒ a bare done count.
-	function countText(c?: { done: number; total?: number }): string {
-		if (!c) return '';
-		const done = (c.done ?? 0).toLocaleString();
-		return c.total != null ? `${done} / ${(c.total).toLocaleString()}` : done;
-	}
+	// P8b — count rendering lives in $lib/stage-count so a gate can DRIVE it rather than
+	// pattern-match this file. See that module's header: the first version of these two functions
+	// lived here, and gutting `countText` to `return done` left the gate fully green, because
+	// "the source mentions a unit" and "the function returns one" are different claims.
 
 	// The remedy is LIVE. Every button is enabled and honestly disabled ONLY while its OWN action is
 	// in-flight — keyed so co-located buttons (a stage's Stop AND its Restart, or the two stages'
@@ -126,6 +125,34 @@
 	const hasControls = (stage: Stage) =>
 		CONTROLLED.has(stage.key)
 		&& (stage.state === 'running' || stage.paused === true || stage.reason === 'waiting_embed');
+
+	// ── P8b: the cluster row's own verb — REBUILD ────────────────────────────────────────
+	// Deliberately NOT folded into CONTROLLED: those buttons POST /portal/enrichment/<key>/<kind>,
+	// which has no `cluster` arm at all. A rebuild is the GENERATE lifecycle (start({force:true})),
+	// so it carries real progress, ETA, stall detection and cancel rather than being a fire-and-forget.
+	//
+	// ⚠️ IT IS AVAILABLE ON EVERY BUILT MAP, NOT ONLY A STALE ONE, AND THAT IS LOAD-BEARING. This
+	// control is the surviving half of the card P8b retires, and D-004 symptom 2 was precisely that a
+	// rebuild existed but had no reachable trigger ("it shows me a text saying map already built;
+	// pass ?force=1 to rebuild. this i cant do from the UI as a user"). The automatic rebuild only
+	// fires ABOVE the staleness tolerance (>=10 messages AND >10%); a user with five new messages, or
+	// one whose automatic attempt already failed, would otherwise have no path at all. Deleting the
+	// section must not delete the remedy — hiding a fix behind a condition the user cannot verify is
+	// the exact regression the sprint handoff warned this unit against.
+	const canRebuild = (stage: Stage) => stage.key === 'cluster' && stage.state === 'done';
+
+	async function onRebuild() {
+		const bkey = 'cluster:rebuild';
+		if (busy.has(bkey)) return;
+		busy = new Set(busy).add(bkey);
+		try {
+			await rebuild();
+		} catch {
+			/* the next readiness poll re-derives the stage; a failed rebuild just re-enables the button */
+		} finally {
+			busy = new Set([...busy].filter((k) => k !== bkey));
+		}
+	}
 
 	// ── D-025: COLLAPSE WHEN SETTLED ────────────────────────────────────────────────────
 	// The operator's words: "your pipeline is up to date. when it is up to date, it should
@@ -233,7 +260,7 @@
 					{#if state === 'running'}
 						<!-- Progress: counts + the reused activity-feed ETA (fmtSeconds). -->
 						<span class="pipe-stage-detail running">
-							{#if stage.count}{countText(stage.count)}{:else}Working…{/if}{#if stage.etaSeconds != null && stage.etaSeconds > 0} · ~{fmtSeconds(stage.etaSeconds)} left{/if}
+							{#if stage.count}{countText(stage.count, stage.key)}{:else}Working…{/if}{#if stage.etaSeconds != null && stage.etaSeconds > 0} · ~{fmtSeconds(stage.etaSeconds)} left{/if}
 						</span>
 					{:else if state === 'blocked'}
 						<!-- The remedy, inline: the reason text AND the action as a LIVE button (Unit 4).
@@ -248,7 +275,19 @@
 							</span>
 						{/if}
 					{:else if state === 'done'}
-						<span class="pipe-stage-detail done">{#if stage.count}{countText(stage.count)}{:else}Done{/if}</span>
+						<!-- P8b: the cluster row names its unit ("1,014 points") and, when the vault has
+						     outgrown the map, states the drift as its OWN separate fact rather than inviting
+						     the reader to subtract two numbers that come from different tables. -->
+						<!-- P8c: a stage whose NAME is a verb the UI reuses elsewhere states what it
+						     PRODUCED, so "Describe" cannot be mistaken for the per-area "Add more
+						     detail" or for "Name your areas" — it is the stage that runs both. -->
+						<span class="pipe-stage-detail done">{#if stage.count}{countText(stage.count, stage.key)}{:else}{producesText(stage.key) || 'Done'}{/if}{#if driftNote(stage.drift)} · {driftNote(stage.drift)}{/if}</span>
+						{#if stage.stale}
+							<!-- The automatic rebuild is armed by the SAME `stale` flag this line reads
+							     (MindscapeView's edge-triggered effect), so this describes what is actually
+							     about to happen — not a reassurance the code does not back. -->
+							<span class="pipe-stage-detail pending">Rebuilding automatically to place them.</span>
+						{/if}
 					{:else}
 						<!-- pending — muted; a pending reason (waiting_embed / map_unknown) says WHY it waits. -->
 						<span class="pipe-stage-detail pending">{stage.reason ? reasonText(stage.reason) : 'Waiting'}</span>
@@ -273,6 +312,20 @@
 							{/if}
 							<button class="pipe-ctrl icon" type="button" data-ctrl="restart" title="Restart {labelFor(stage.key)}" aria-label="Restart {labelFor(stage.key)}" disabled={isBusy(`${stage.key}:restart`)} aria-busy={isBusy(`${stage.key}:restart`)} onclick={() => onStageControl(stage, 'restart')}>
 								<!-- ↻ reload → re-queue gave-up rows -->
+								<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
+							</button>
+						</span>
+					{/if}
+
+					<!-- P8b: the cluster row's Rebuild — the surviving half of the retired MapFreshness
+					     card. Present on EVERY built map, not only a stale one: the automatic rebuild
+					     only fires above the staleness tolerance, so this is the path for a user with a
+					     handful of new messages, or one whose automatic attempt already failed. Same
+					     quiet icon vocabulary as the ↻ above; a different route and a different verb. -->
+					{#if canRebuild(stage)}
+						<span class="pipe-ctrls">
+							<button class="pipe-ctrl icon" type="button" data-ctrl="rebuild" title="Rebuild your map" aria-label="Rebuild your map" disabled={isBusy('cluster:rebuild')} aria-busy={isBusy('cluster:rebuild')} onclick={onRebuild}>
+								<!-- ↻ reload → re-place every point -->
 								<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
 							</button>
 						</span>

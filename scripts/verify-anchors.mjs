@@ -16,6 +16,7 @@
 //       touch it; only the typed consumer decrypts it).
 // Network-free, model-free: ANCHOR_EMBEDDER=stub. PASS/FAIL ledger; exit 0 only
 // if all pass.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

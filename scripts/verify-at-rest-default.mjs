@@ -15,6 +15,7 @@
 //   T4. THE REAL LAUNCH: `node src/index.js` on an existing PLAINTEXT vault with NO
 //       MYCELIUM_AT_REST migrates it to ciphertext (the entry-point default-on, e2e).
 // PASS/FAIL ledger. @see the pre-freeze security design, src/index.js.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdtempSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';

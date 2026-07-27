@@ -18,6 +18,7 @@
 //   C*  categorize cap matrix: progress-aware counting, terminal at K, outage
 //       counts nothing, a gave-up row does not wedge the batch
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
 import { createEnrichmentService, EMBED_MAX_ATTEMPTS, EMBED_CAPPED_MARK, EMBED_RETRY_MARK, EMBED_RESCUE_TIMEOUT_MS, LABEL_MAX_ATTEMPTS, embedAttemptsOf } from '../src/enrich/service.js';

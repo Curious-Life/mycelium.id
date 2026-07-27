@@ -33,6 +33,7 @@
  */
 
 import { createLocalBackend } from './backend/local.js';
+import { attachmentLineResolver } from '../agent/attachment-context.js';
 import { createSqliteBackend } from './backend/sqlite.js';
 import { loadFromDb, ID_PREFIX, stripPrefix } from './d1-loader.js';
 import { setMindSearch } from './registry.js';
@@ -212,16 +213,28 @@ export function createSearchHelpers(deps = {}) {
   // in-RAM index, but hydration is a second read path — a forgotten row must
   // never surface here even if the index is briefly stale). `excludeSensitive`
   // additionally drops sensitive=1 rows for proactive recall (relatedTo) — §3.6.
+  // A hit MUST carry what the message says, not just what its body column holds. The corpus
+  // indexes a voice note's transcript alongside its message (d1-loader.js), so a query can
+  // now MATCH on spoken words — and hydrating content alone would then return "File: memo.ogg"
+  // as the answer to a query it matched only via the transcript. `attachment_id` is selected
+  // and run through the ONE derived-text seam (src/agent/attachment-context.js), which brings
+  // the four honest states, the aggregate DoS ceiling (so a 40-hit result set can't dump 40
+  // full transcripts) and the recency ordering with it, rather than a second implementation.
+  // contentLimit 240 matches formatMessage's snippet, so the dedup never suppresses a
+  // transcript that the snippet itself cuts off (the T11a lesson).
   async function hydrateMessages(ids, { excludeSensitive = false } = {}) {
     const msgIds = ids.filter((id) => !id.includes(':'));
     if (msgIds.length === 0) return new Map();
     const placeholders = msgIds.map(() => '?').join(',');
     const sensitiveClause = excludeSensitive ? ' AND sensitive = 0' : '';
     const rows = await rawRows(
-      `SELECT id, content, agent_id, created_at FROM messages WHERE user_id = ? AND id IN (${placeholders}) AND forgotten_at IS NULL${sensitiveClause}`,
+      `SELECT id, content, agent_id, created_at, attachment_id FROM messages WHERE user_id = ? AND id IN (${placeholders}) AND forgotten_at IS NULL${sensitiveClause}`,
       [userId, ...msgIds],
     );
-    return new Map(rows.map((r) => [String(r.id), r]));
+    // Fail-soft: the resolver never throws, and a db without an attachments namespace yields
+    // the honest "could not be loaded" line rather than silently dropping derived text.
+    const lineFor = await attachmentLineResolver(rows, { db, userId, contentLimit: 240 });
+    return new Map(rows.map((r) => [String(r.id), { ...r, _attachmentLine: lineFor(r) }]));
   }
 
   // Profile ids in the index are kind-prefixed (`territory:1`); the DB pk is
@@ -426,10 +439,21 @@ function snippet(text, n = 240) {
 // so a searchMindscape hit was un-addressable — the agent could see a memory it had no way
 // to forget/mark/link, and guessing produced a success-shaped miss. The ref is the compact
 // form (src/core/item-ref.js) precisely because it rides every rendered row.
+//
+// The attachment line then rides AFTER the content snippet with its own budget, so the
+// 240-char snippet bounds what the HUMAN typed and can never truncate the transcript out of
+// the hit (the same split getContext makes — src/tools/context.js). Both properties are
+// load-bearing and independent: the ref makes the hit ADDRESSABLE, the line makes it
+// TRUTHFUL — a voice note matched via its indexed transcript would otherwise be rendered as
+// "File: memo.ogg" with a ref pointing at a message whose body says nothing.
 function formatMessage(m) {
   const who = m.agent_id ? `[${m.agent_id}] ` : '';
   const ref = renderRef('message', m.id);
-  return `${ref ? `${ref} ` : ''}${who}${snippet(m.content)}`;
+  const head = `${ref ? `${ref} ` : ''}${who}`;
+  const body = snippet(m.content);
+  const att = m._attachmentLine;
+  if (!att) return `${head}${body}`;
+  return body ? `${head}${body}\n${att}` : `${head}${att}`;
 }
 
 function formatProfile(p) {

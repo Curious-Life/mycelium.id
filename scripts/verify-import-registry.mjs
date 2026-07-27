@@ -8,6 +8,7 @@
 //   G5 POST /import/run recent-export (allowed path) → job runs → done; rows landed
 //   G6 single-flight + progress/cancel envelope behaves (re-POST safe; progress reaches done)
 //   G7 fail-closed: a DENIED path → job errors, nothing imported
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import express from 'express';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';

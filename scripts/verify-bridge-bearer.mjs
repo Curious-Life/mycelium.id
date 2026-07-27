@@ -3,6 +3,7 @@
 // hooks need ZERO env setup. Asserts: auth.db fallback, env-first precedence, and
 // graceful no-op when neither is available. Each scenario runs in a fresh node
 // subprocess (the bridge caches the resolved bearer per-process).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import http from 'node:http';
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';

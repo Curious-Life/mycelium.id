@@ -25,6 +25,7 @@ import { createLane } from './lane.js';
 import { computeNextRun, parseSchedule } from './scheduler-time.js';
 import { classifyProviderError } from './provider-errors.js';
 import { runAgentTurn } from './run-turn.js';
+import { isWriteTrustedProvenance } from './autonomy-tools.js';
 import { cycleTurnOpts, cycleByName } from './cycle-prompts.js';
 import { finalizeCycleOutput, cycleDeliveryId } from './cycle-output.js';
 import { hasEnoughActivity } from './cycle-activity.js';
@@ -60,12 +61,17 @@ const errCode = (e) => String(e?.code || e?.status || (e?.name && e.name !== 'Er
  * @param {(task:object, text:string, meta?:{model?:string|null})=>Promise<void>} [o.deliver]
  *                    output_target sink (non-'none' targets); `meta.model` = WHICH model
  *                    produced the text (recorded on the persisted message). Absent ⇒ logged + skipped.
- * @param {(task:object)=>Promise<object>} [o.runTurn]  turn-executor override (tests)
+ * @param {(task:object)=>Promise<object>} [o.runTurn]  turn-executor override (tests) — REPLACES
+ *                    buildAndRunTurn wholesale, so it sees the task but not the turn options.
+ * @param {Function} [o.runAgentTurnImpl]  runAgentTurn seam (gates). Keeps buildAndRunTurn's real
+ *                    body, so a gate can observe the OPTIONS the scheduler actually builds — the
+ *                    only way to prove the trust flags are wired, since an ungranted tool call is
+ *                    otherwise silent (it returns a string and the run still records 'done').
  * @param {Function} [o.fetchImpl]
  * @param {(m:string)=>void} [o.logger]
  * @param {number}   [o.tickMs]
  */
-export function createScheduler({ db, userId, tools = [], handlers = {}, deliver, runTurn: runTurnOverride, fetchImpl = globalThis.fetch, logger = () => {}, tickMs = DEFAULT_TICK_MS } = {}) {
+export function createScheduler({ db, userId, tools = [], handlers = {}, deliver, runTurn: runTurnOverride, runAgentTurnImpl = runAgentTurn, fetchImpl = globalThis.fetch, logger = () => {}, tickMs = DEFAULT_TICK_MS } = {}) {
   if (!db || !db.harness) throw new TypeError('createScheduler: db with db.harness required');
   if (typeof userId !== 'string') throw new TypeError('createScheduler: userId required');
 
@@ -128,7 +134,13 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
     // A reflection cycle injects the user-editable persona (skills/persona/soul.md, resolved
     // with a hard fallback to the ported default); any other task keeps the generic preamble.
     const systemExtra = isCycle ? await resolvePersona(db, tUser) : SCHEDULER_SYSTEM;
-    return runAgentTurn(
+    // Trust PROVENANCE on the row decides what this fire may WRITE. `enabled_tools` is
+    // model-supplied on every path a model can reach, so the grant must not follow the stored
+    // names; only a code-authored task (agent/seed-cycles.js, tool list from the in-repo CYCLES
+    // constant, prompt still equal to that body) carries a trusted provenance.
+    // the task-trust-provenance design.
+    const instructionsTrusted = isWriteTrustedProvenance(task.tool_provenance);
+    return runAgentTurnImpl(
       { db, userId: tUser, tools, handlers, loop, fetchImpl, signal: ctrl.signal, hooks },
       {
         userMessage: task.prompt || '',
@@ -137,7 +149,12 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
         // D-076: unlocks CYCLE_AUTONOMOUS_TOOLS for an ENGINE-OWNED cycle only. Same source as
         // systemExtra + inferenceTask above (cycleTurnOpts → the row's immutable created_by), so
         // a model-created task — which schedule_task stamps 'agent' — can never claim it.
-        isCycle,
+        // NARROWED by provenance: created_by proves the ROW is engine-owned but NOT its
+        // INSTRUCTIONS — updateCycle is chat-grantable and rewrites a cycle's prompt while
+        // leaving created_by intact, which the cycle tier's own comment names as its residual.
+        // Provenance is cleared by exactly that edit, so ANDing it closes the laundering path.
+        isCycle: isCycle && instructionsTrusted,
+        writeTrusted: instructionsTrusted,
         inferenceTask,
       },
     );

@@ -21,7 +21,7 @@
 export type PollTick =
   | 'converge'   // map existence not yet known-true: poll BOTH slices (mindscape,pipeline)
   | 'pipeline'   // map is built: keep ONLY the cheap pipeline slice live (the built-map feed)
-  | 'stop';      // the "Checking your mind…" probe cap tripped: the retry state owns it from here
+  | 'stop';      // the "Checking your mindscape…" probe cap tripped: the retry state owns it from here
 
 /**
  * Decide the tick action. `exhausted` (the probe cap) OUTRANKS everything — once it trips, the

@@ -4,6 +4,7 @@
 //   I3 idempotency — same id twice => one row, second is deduped
 //   I4 fail-closed — a write with no/invalid content path is rejected
 //   I5 queued — the saved row has nlp_processed = 0 (enrichment work queue)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

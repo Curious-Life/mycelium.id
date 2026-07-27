@@ -170,6 +170,17 @@ await build({
   logLevel: 'silent',
 });
 
+// ── The REAL $lib/stage-count (P8b) — count/unit rendering. NOT stubbed, deliberately ─────────
+// This module is the whole point of the "1,014 points" claim: a stub would let the unit drift out
+// from under the render assertions exactly as a stubbed fmtSeconds would for the ETA. It is pure
+// (no imports at all), so bundling it needs no redirects.
+await build({
+  entryPoints: ['src/lib/stage-count.ts'],
+  outfile: `${GEN}/stage-count.js`,
+  bundle: true, format: 'esm', platform: 'neutral',
+  logLevel: 'silent',
+});
+
 // ── The REAL generate store, for the REAL fmtSeconds the component renders the ETA with ───────
 // Not a stub: a stubbed fmtSeconds would let the ETA formatting (`90` → "1m 30s") drift out from
 // under the gate, and the gate asserts the FORMATTED string. Only `./api` is redirected.
@@ -192,7 +203,9 @@ await build({
 writeFileSync(`${GEN}/spies.js`, `export const calls = [];\n`);
 writeFileSync(`${GEN}/nav-spy.js`, `import { calls } from './spies.js';\nexport async function goto(url) { calls.push('goto:' + url); }\n`);
 writeFileSync(`${GEN}/api-spy.js`, `import { calls } from './spies.js';\nexport const api = async () => ({ ok: true, json: async () => ({}) });\nexport async function apiPost(path) { calls.push('apiPost:' + path); return {}; }\nexport default { api };\n`);
-writeFileSync(`${GEN}/generate-spy.js`, `import { calls } from './spies.js';\nexport { fmtSeconds } from './generate.js';\nexport async function start() { calls.push('start'); }\n`);
+// P8b: `rebuild` joins the spy set — the cluster row's ↻ calls it, and the render gate asserts the
+// click actually FIRED it (a source regex cannot tell a wired button from a decorative one).
+writeFileSync(`${GEN}/generate-spy.js`, `import { calls } from './spies.js';\nexport { fmtSeconds } from './generate.js';\nexport async function start() { calls.push('start'); }\nexport async function rebuild() { calls.push('rebuild'); }\n`);
 
 // ── The component under test: REAL source, only its four lib/app specifiers rewired ───────────
 // pipeline + fmtSeconds are the REAL modules; goto/apiPost/start are the spies above so a click's
@@ -211,6 +224,7 @@ writeFileSync(
 const rewired = compile(readFileSync(COMPONENT, 'utf8'), { generate: 'client', name: 'PipelineStatus', css: 'injected' }).js.code
   .replace(/from\s+['"]\.\/CollapsibleHeader\.svelte['"]/g, `from './CollapsibleHeader.svelte.js'`)
   .replace(/from\s+['"]\$lib\/pipeline['"]/g, `from './pipeline.js'`)
+  .replace(/from\s+['"]\$lib\/stage-count['"]/g, `from './stage-count.js'`)
   .replace(/from\s+['"]\$lib\/generate['"]/g, `from './generate-spy.js'`)
   .replace(/from\s+['"]\$lib\/api['"]/g, `from './api-spy.js'`)
   .replace(/from\s+['"]\$app\/navigation['"]/g, `from './nav-spy.js'`);

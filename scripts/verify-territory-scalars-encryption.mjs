@@ -3,6 +3,7 @@
 // at rest and that readers coerce them back to numbers + sort in JS (energy /
 // current_vitality can no longer be SQL-ORDER BY'd). message_count stays plaintext
 // (structural ranking key) — asserted too. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

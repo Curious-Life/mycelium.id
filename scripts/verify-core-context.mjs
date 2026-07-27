@@ -3,6 +3,7 @@
 // getContext recompose: the bounded Core (self.md) LEADS the briefing; today's domain/register
 // mix renders from the 1b labels; the claims block is kept but DEMOTED below the Core; a runaway
 // Core is defensively trimmed. Plus: the domainMix GROUP BY is valid against the real 0031 schema.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { createContextDomain } from '../src/tools/context.js';
 import { applyMigrations } from '../src/db/migrate.js';

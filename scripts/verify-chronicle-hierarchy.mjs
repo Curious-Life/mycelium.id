@@ -6,6 +6,7 @@
 //      described LATER re-opens the realm for narration (hierarchy fold)
 //   H3 a realm whose children did NOT change is NOT re-narrated (stable)
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

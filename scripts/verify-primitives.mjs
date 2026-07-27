@@ -3,6 +3,7 @@
 // fixture (scripts/fixtures/primitives_fixture.json) at 1e-12, plus property
 // tests for the two operators not in the fixture (lzComplexity, countsToProbs).
 // PASS/FAIL ledger. This is the "shared primitives in ONE place" guardrail.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';

@@ -39,6 +39,7 @@
 // the SSE headers) would ship green. That failure is invisible to a non-streaming check and
 // user-hostile: a harness gets a silent half-open stream instead of an honest 503. Pin each
 // path that can refuse, not one representative of them.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';

@@ -103,7 +103,7 @@ const isUsNonExempt = (cfg) => /^us/.test(cfg?.jurisdiction || 'us-standard') &&
 
 export async function runAgentTurn(
   { db, userId, tools = [], handlers = {}, loop, fetchImpl = globalThis.fetch, signal, hooks } = {},
-  { userMessage, systemExtra = '', enabledTools = [], isCycle = false, history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null, inferenceTask = 'harness', maxIterations, webSearch = false, harnessMode = 'native', sessionId = null, resume = false, ttfbMs, idleMs, deliverTool = null, humanTriggered = false, ownerTrusted = false } = {},
+  { userMessage, systemExtra = '', enabledTools = [], isCycle = false, history = [], conversationId = null, recentN, localTools = false, historyUntrusted = false, onWrite = null, inferenceTask = 'harness', maxIterations, webSearch = false, harnessMode = 'native', sessionId = null, resume = false, ttfbMs, idleMs, deliverTool = null, humanTriggered = false, ownerTrusted = false, writeTrusted = false } = {},
 ) {
   // CLI engine: the `claude` session OWNS the conversation memory + in-session compaction,
   // so we do NOT hydrate history into the preamble (portal-chat.js does the same). The tool
@@ -250,11 +250,16 @@ export async function runAgentTurn(
   //     the task row's immutable created_by (scheduler.js → cycleTurnOpts), so the model cannot
   //     set it; every other caller omits it. A cycle is never humanTriggered, so unlocking its
   //     tools does not license self-arming.
+  //   `writeTrusted` — may this turn hold the vault-WRITE tier at all? Naming a write tool is
+  //     only half the grant. channel-turn passes its token-proved `ownerTrusted`; the scheduler
+  //     derives it from the task row's trust provenance (which tracks the row's INSTRUCTIONS, not
+  //     just its created_by); the narration walk passes true because its tool list is an in-repo
+  //     literal. Default false, so a caller that forgets fails closed.
   //   `ownerTrusted` (D-040 ↻1) — is the human the vault OWNER, proven by the per-boot daemon
   //     token? Required TOGETHER WITH humanTriggered for the destructive tier (forget). A cycle
   //     is never ownerTrusted, so a cycle can never forget; an owner DM is never a cycle.
   // All fail-closed on their parameter defaults — see autonomy-tools.js.
-  const granted = (toolsCapable || localTools) ? autonomyTools(tools, enabledTools, { humanTriggered, isCycle, ownerTrusted }) : [];
+  const granted = (toolsCapable || localTools) ? autonomyTools(tools, enabledTools, { humanTriggered, isCycle, ownerTrusted, writeTrusted }) : [];
   const grantedNames = new Set(granted.map((t) => t.name));
   // The model that is ACTUALLY serving this turn right now. Starts as the primary and
   // follows the provider chain if the loop falls back mid-turn (transient faults only —

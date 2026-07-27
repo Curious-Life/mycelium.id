@@ -2,6 +2,7 @@
 // distances are encrypted at rest, and that the reworked db/topology.js readers
 // (which now filter/sort/aggregate in JS over decrypted values, joining only on
 // plaintext keys) return correct results. PASS/FAIL ledger.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

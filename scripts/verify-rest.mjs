@@ -5,6 +5,7 @@
 //
 // Setup mirrors verify-mcp.mjs: load the 111-table schema into a fresh db and
 // provide two random hex keys, since boot() fails closed without them.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync, rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

@@ -12,6 +12,7 @@
 // Proves: reply tool is wired in the vault when AGENT_URL is set; inbound +
 // outbound rows are real; the agent sees the active turn; delivery is audited
 // as agent-explicit-via-tool; zero plaintext in audit. PASS/FAIL; exit 0 on GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

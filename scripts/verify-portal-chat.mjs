@@ -5,6 +5,7 @@
 //   C3 GET /chat/history → returns the turns; NEVER leaks entities/tags/metadata
 //   C4 PUT/GET /ai-access → policy round-trips; toolsForDomains filters fail-closed
 //   C5 stream error (provider 400) → 'error' SSE event, no crash, no plaintext leak
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import express from 'express';
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';

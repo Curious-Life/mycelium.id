@@ -3,6 +3,7 @@
 // Proves boot() honors the MYCELIUM_AT_REST opt-in: default OFF → plaintext open
 // (unchanged); ON → encrypt-in-place migration runs at boot and every vault
 // connection opens keyed. Fixture vaults only; the real vault is never touched.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';

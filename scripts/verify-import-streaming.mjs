@@ -5,6 +5,7 @@
 //   • zip-stream: reads ONE known entry out of a zip as a stream, enforces the
 //     decompression byte cap, returns null for an absent entry.
 // Tier-1 (no ML, no vault). Exits 0 / VERDICT: GO when all pass.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { Readable } from 'node:stream';
 import JSZip from 'jszip';
 import { streamJsonArray } from '../src/ingest/json-array-stream.js';

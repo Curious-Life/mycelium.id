@@ -6,6 +6,7 @@
 // HTTP-forward without a live :4711. Asserts: loopback bypass, networked deny,
 // cookie/Bearer allow, CSRF on cookie-authed writes, /auth/session gating, and
 // that SPA navigation (non-data paths) is NOT gated.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

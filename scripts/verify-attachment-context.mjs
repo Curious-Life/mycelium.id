@@ -12,6 +12,7 @@
 //   A8 blob read failure → 200 ok:false-free fail-soft (extraction-error)
 //   A11 decompression-bomb docx → null WITHIN BUDGET + parse worker torn down
 //       (MED-3: a tiny docx that inflates to GBs cannot hold vault memory)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 process.env.MYCELIUM_UPLOADS_ROOT = 'data/verify-attctx-uploads';
 // Tight parse budget + floor heap so the bomb (A11) trips fast: V8 OOM-kills the
 // worker on the heap cap, or the timeout terminate()s it — either way, quickly.

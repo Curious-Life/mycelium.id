@@ -21,6 +21,7 @@
 //       AND through the refresher's return value must not appear in any response body
 //
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import express from 'express';
 import {

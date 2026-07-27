@@ -15,6 +15,7 @@
 //  P3 db.folders.list returns correct per-folder doc_count/document_count via the
 //     grouped query — matches the seeded distribution, ONE query (not N+1)
 //  P4 §7: the folders payload carries no content/ciphertext
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';

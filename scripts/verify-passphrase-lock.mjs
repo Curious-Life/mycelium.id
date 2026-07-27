@@ -7,6 +7,7 @@
 //   B. e2e — setup → enable (Keychain emptied, seal written, jobs keys in memory)
 //      → RESTART (locked) → unlock wrong/right → disable (Keychain restored) →
 //      RESTART (auto-opens again). Mirrors the real launch/relaunch lifecycle.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

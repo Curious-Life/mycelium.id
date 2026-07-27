@@ -30,6 +30,7 @@ import {
   loadMembers, sampleMembers, getSeenIds, recordSeen, exploredPercent, lastPassNumber,
 } from './lib/narrate-sample.js';
 import { buildContextCapsule, renderCapsule, describedPeriodFor } from './lib/narrate-context.js';
+import { createStageResult } from './lib/stage-result.js';
 
 export const CHRONICLE_VERSION = process.env.MYCELIUM_CHRONICLE_VERSION || 'chronicle-v1';
 
@@ -517,6 +518,25 @@ if (isMain) {
         if (feedId) { try { await db.activityFeed.finish(feedId, { status: 'done' }); } catch { /* */ } }
       }
       console.log(`[chronicles] ${res.described} narrated, ${res.skipped} skipped (no content), ${res.failed} failed (no model / write)`);
+
+      // STAGE ACCOUNTING (Gap #3). This walk ALREADY returns honest tallies, so rather than
+      // instrument every loop we translate its own summary — the stage keeps one definition of
+      // what counted as described / skipped / failed, and the accounting cannot drift from the
+      // number the log line prints.
+      //   described → ok()    a chronicle was written
+      //   skipped   → skip()  "no content" — legitimately nothing to narrate, not a malfunction
+      //   failed    → fail()  no model, or a write that threw
+      // ⚠️ The EXIT CONTRACT is unchanged: this stage is fail-soft on purpose (the catch below
+      // says "never block the pipeline"), so a finalize() throw is swallowed there and the cycle
+      // continues. finalize() records to pipeline_state BEFORE throwing, so the failure becomes
+      // VISIBLE on the health surface without becoming fatal. Visibility, not a new failure mode.
+      const acc = createStageResult('describe-chronicles', {
+        record: db.pipelineState?.recorderFor?.(USER_ID, 'describe-chronicles'),
+      });
+      for (let i = 0; i < (res.described || 0); i++) acc.ok();
+      for (let i = 0; i < (res.skipped || 0); i++) acc.skip();
+      for (let i = 0; i < (res.failed || 0); i++) acc.fail(new Error('chronicle turn failed (no model or write error)'));
+      await acc.finalize();
     }
   } catch (e) {
     console.error('[chronicles] non-fatal:', e.message); // never block the pipeline

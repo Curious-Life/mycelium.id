@@ -11,6 +11,7 @@
 //   H7 dynamics stage records one per live entity; unchanged → deduped; changed → +1
 //   H8 history survives entity dissolution + realm prune (rows remain)
 // PASS/FAIL ledger; VERDICT GO/NO-GO.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';

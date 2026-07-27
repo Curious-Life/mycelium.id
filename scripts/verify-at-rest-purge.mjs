@@ -6,6 +6,7 @@
 // This gate proves the purge is correct (happy path) AND fail-safe (it KEEPS the
 // backup on every doubt: no key, live vault still plaintext, wrong key) so it can
 // never destroy the only good copy. @see the SQLCipher stage-0 design
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, existsSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';

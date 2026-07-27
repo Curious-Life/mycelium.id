@@ -9,6 +9,7 @@
 // nothing lands in the ledger to diverge FROM. This gate locks in the corrected behavior:
 // report + self-heal + keep booting, and prove schemaDrift() sees a ledger-less foreign build.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';

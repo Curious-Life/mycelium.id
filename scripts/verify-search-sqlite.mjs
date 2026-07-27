@@ -6,6 +6,7 @@
 //
 // Fixture-only (in-memory + temp-file DBs; no real vault). PASS/FAIL ledger +
 // VERDICT + EXIT=<code>. Run: npm run verify:search-sqlite
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { webcrypto } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -143,7 +144,7 @@ async function main() {
   // Minimal real-handle "db" namespace: rawQuery routes to the same better-
   // sqlite3 file the backend uses (plaintext fixture; no crypto/migrations).
   const intRaw = new Database(':memory:');
-  intRaw.exec(`CREATE TABLE messages (id TEXT, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  intRaw.exec(`CREATE TABLE messages (id TEXT, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT, attachment_id TEXT); CREATE TABLE attachments (id TEXT PRIMARY KEY, user_id TEXT, file_name TEXT, file_type TEXT, transcript TEXT, description TEXT)`);
   const seed = intRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
   seed.run('m-forest', 'u1', 'the forest canopy and ancient trees', '2026-06-01T00:00:00.000Z');
   seed.run('m-vault', 'u1', 'an encrypted vault of private notes', '2026-06-02T00:00:00.000Z');
@@ -178,7 +179,7 @@ async function main() {
   // ── SQ13 build-flag robustness: incremental add before 1st query must NOT
   //    skip the full corpus build (the count()>0 trap the flag fixes) ─────────
   const bfRaw = new Database(':memory:');
-  bfRaw.exec(`CREATE TABLE messages (id TEXT, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  bfRaw.exec(`CREATE TABLE messages (id TEXT, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT, attachment_id TEXT); CREATE TABLE attachments (id TEXT PRIMARY KEY, user_id TEXT, file_name TEXT, file_type TEXT, transcript TEXT, description TEXT)`);
   const bfSeed = bfRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
   bfSeed.run('seed-1', 'u1', 'seeded alpha document', '2026-06-01T00:00:00.000Z');
   bfSeed.run('seed-2', 'u1', 'seeded beta document', '2026-06-02T00:00:00.000Z');
@@ -195,7 +196,7 @@ async function main() {
 
   // ── SQ14 capture hook end-to-end: a NEW message is searchable with NO rebuild
   const capRaw = new Database(':memory:');
-  capRaw.exec(`CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  capRaw.exec(`CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT, attachment_id TEXT); CREATE TABLE attachments (id TEXT PRIMARY KEY, user_id TEXT, file_name TEXT, file_type TEXT, transcript TEXT, description TEXT)`);
   const capDb = {
     _sqlite: capRaw,
     _sqliteSearch: capRaw,
@@ -239,7 +240,7 @@ async function main() {
   // that left the source. (Same fixture shape as SQ12 but driven through the
   // real loadFromDb bulk path.)
   const blkRaw = new Database(':memory:');
-  blkRaw.exec(`CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT)`);
+  blkRaw.exec(`CREATE TABLE messages (id TEXT PRIMARY KEY, user_id TEXT, content TEXT, created_at TEXT, embedding_768 TEXT, forgotten_at TEXT, sensitive INTEGER DEFAULT 0, agent_id TEXT, attachment_id TEXT); CREATE TABLE attachments (id TEXT PRIMARY KEY, user_id TEXT, file_name TEXT, file_type TEXT, transcript TEXT, description TEXT)`);
   const blkSeed = blkRaw.prepare('INSERT INTO messages(id,user_id,content,created_at) VALUES (?,?,?,?)');
   for (let i = 0; i < 5; i++) blkSeed.run(`bk-${i}`, 'u1', `bulk loaded entry ${i} about forest and vault`, `2026-06-0${i + 1}T00:00:00.000Z`);
   const blkBe = createSqliteBackend({ sqliteDb: blkRaw, userId: 'u1' });

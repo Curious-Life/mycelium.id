@@ -6,6 +6,7 @@
 // class), that Understanding owns categorize AND enrich (operator decision 2026-07-16), that
 // the per-function recommendations are single-sourced from ROLE_RECOMMENDATIONS (badge ==
 // default, never drift), and that Descriptions carries the §4g eu-or-local limit.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import assert from 'node:assert/strict';
 import { INFERENCE_TASKS, ONBOX_TASKS } from '../src/inference/resolve.js';
 import { INTELLIGENCE_FUNCTIONS, functionForTask, tasksForFunction, labelingRecommendedModel, descriptionsRecommendedPreset, voiceRecommendedModel } from '../src/inference/role-models.js';

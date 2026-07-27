@@ -3,6 +3,7 @@
 // typing presence fires for Telegram DM turns, keeps alive on an interval, is
 // gated off for groups/discord, and is always stopped when the turn ends —
 // including on turn error (it must never outlive a turn).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createReplyDomain } from '../src/tools/reply.js';
 import { createTypingPresence } from '../packages/channel-daemon/presence.js';
 import { createLane } from '../packages/channel-daemon/agent/lane.js';

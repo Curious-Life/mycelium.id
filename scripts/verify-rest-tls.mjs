@@ -15,6 +15,7 @@
 // A networked (non-loopback) client is simulated with an X-Forwarded-For header
 // (same technique as verify-portal-auth / verify-portal-bearer-remote); a REAL
 // remote peer is non-loopback intrinsically, so the gate behaves identically.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

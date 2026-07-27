@@ -6,6 +6,7 @@
 // auth-gated, and the verify endpoints exist. The full browser/device WebAuthn
 // ceremony (register a credential with a real authenticator) is the host/device
 // smoke (Spike S2) — not deterministically scriptable here.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import express from 'express';
 import { toNodeHandler } from 'better-auth/node';

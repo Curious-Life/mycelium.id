@@ -7,6 +7,7 @@
 // CEK, resolving LWW by seq. Adversarial: a forged/spliced entry, a gen-relabel, and a
 // removed member are all rejected (no plaintext to a non-holder).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

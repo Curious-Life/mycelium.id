@@ -6,6 +6,7 @@
 // model is fail-closed: a non-member sees 404, a granted member gets in, revoke
 // locks them back out. Prints a [✓]/[✗] ledger + VERDICT.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import express from 'express';
 import http from 'node:http';

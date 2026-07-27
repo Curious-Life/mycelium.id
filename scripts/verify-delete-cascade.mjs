@@ -37,6 +37,7 @@
 //   C15 a blob still referenced by a SURVIVING attachment row is KEPT (refcount)
 //
 // Boots a temp vault; no network; never logs content.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';

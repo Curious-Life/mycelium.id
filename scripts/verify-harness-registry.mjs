@@ -12,6 +12,7 @@
 //   R8 cli + subscription eligible is ORTHOGONAL to the chat provider (a non-sub chat
 //      provider does NOT block cli when an oauth row exists) — matches the UI gate
 //   B1 CLAUDE_BIN override wins  ·  B2 PATH scan finds it  ·  B3 none → null
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { resolveHarness } from '../src/agent/resolve-harness.js';
 import { resolveClaudeBin } from '../src/inference/claude-bin.js';
 

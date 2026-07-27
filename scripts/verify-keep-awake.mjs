@@ -8,6 +8,7 @@
 //
 // Platform-aware: the macOS assertions are asserted only on darwin; elsewhere the
 // no-op path is verified. PASS/FAIL ledger + VERDICT + EXIT=<code>.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { execFileSync } from 'node:child_process';
 import { startKeepAwake, stopKeepAwake, keepAwakeStatus, __resetKeepAwakeForTest } from '../src/system/keep-awake.js';
 

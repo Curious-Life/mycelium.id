@@ -110,6 +110,7 @@
 //   both F5b rows RED: the held one-off reminder was marked `completed`, undelivered and never
 //   retried. That was a REAL defect in the first draft of this fix, found by independent
 //   review, and F5b exists because of it.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import http from 'node:http';

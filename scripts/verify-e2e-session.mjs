@@ -8,6 +8,7 @@
 // PART 3 — security: replay/reorder rejected [MUTATION], tamper rejected, wrong box key
 //   fails mutual auth, all-zero ECDH guard.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { createIdentity } from '../src/identity/identity.js';
 import * as E from '../src/crypto/e2e-session.js';

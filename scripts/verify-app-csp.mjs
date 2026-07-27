@@ -7,6 +7,49 @@
 // (SPA shell, SPA fallback, data 404): a CSP with `script-src 'self' 'sha256-…'`
 // (≥1 hash, NO 'unsafe-inline'), framing locked, plus the companion headers — and
 // that each emitted sha256 byte-matches the shell's inline scripts.
+//
+// PROVE IT RENDERS BEFORE ASSERTING ITS POLICY. The hash-pinning assertion
+// only means something about a response that IS the app shell. When the shell 404s,
+// express's finalhandler answers with its own `default-src 'none'` CSP — which
+// satisfies every "is a policy present / is framing locked" check and then fails the
+// four rendered-class checks. So a BROKEN SHELL was indistinguishable from a CSP
+// regression, and this gate spent a session being read as one: the dot-directory
+// `res.sendFile` 404 fixed in `#396` took the whole UI down and surfaced HERE as four
+// policy failures. The rendered classes now assert 200 + text/html + the built entry
+// bundle FIRST, so that failure names itself and stays out of the CSP's column.
+// (The serving contract itself is `#396`'s to keep: `verify:serving-perf` S9 serves
+// from a dot-named fixture root and S10 blocks a bare `res.sendFile` at either call
+// site. Not duplicated here — this gate owns the POLICY, that one owns the SERVING.)
+//
+// NOTHING HERE IS HARDCODED. The server derives the CSP hashes from the shell at
+// boot (server-rest.js buildPortalCsp), and this gate INDEPENDENTLY re-derives them
+// from the bytes it was actually served, then proves those bytes are the on-disk
+// shell. So the gate validates the RELATIONSHIP (every inline script the webview
+// executes is pinned), never a frozen list — a locally built shell is self-consistent
+// and green, and a shell whose inline scripts stop being pinned is red.
+//
+// MUTATION-TESTED: buildPortalCsp's hash loop emptied (hashes never pushed, so the
+//   header degrades to plain `script-src 'self'`) → 31/34, RED on `every inline script
+//   served in the shell is pinned` (0/2), the same check on the fallback, and `the CSP
+//   was built from the shell that was served` (pinned=0). The rendered-class
+//   `script-src includes 'self'` checks stayed GREEN — they never covered pinning.
+// MUTATION-TESTED: one extra unexplained pin appended in buildPortalCsp
+//   (`hashes.push("'sha256-AAA…='")`, i.e. a stale/over-broad extraction that WIDENS
+//   the policy) → 33/34, RED only on `the CSP was built from the shell that was
+//   served` (served=2 on-disk=2 pinned=3), with both pinning checks still green. So
+//   over-pinning and under-pinning red on different checks.
+// MUTATION (no-op, recorded so nobody re-runs it): widening the same regex to
+//   `<script[^>]*>` (hashing `src`'d tags too) does NOT red — SvelteKit's src'd tags
+//   have empty bodies, so the hash set is unchanged. Mutate the pin list, not the regex.
+// MUTATION-TESTED: `sendPortalFile` (serving.js, `#396`) reverted to a bare
+//   `res.sendFile(absPath)` — the defect that started this — → 21/34, RED on `shell: 200 OK`
+//   (status=404) and `shell: body is the built SPA shell` plus both fallback twins and
+//   every hash check, while `shell: text/html` stayed GREEN (the finalhandler 404 page
+//   is html too, which is exactly why status AND body are asserted, not content-type).
+//   This is the record that matters: the gate now leads with the true cause instead of
+//   reporting four CSP failures for a serving bug.
+// All restored afterwards; the suite returns 34/34 GO on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,16 +71,21 @@ const hex = () => crypto.randomBytes(32).toString('hex');
 const SHELL = join(process.cwd(), 'portal-app', 'build', '200.html');
 const haveCanonical = existsSync(SHELL);
 
-// Independently recompute the expected inline-script hashes from the built shell,
-// so we prove the header carries the RIGHT hashes (not just "a hash").
-const expectedHashes = [];
-if (haveCanonical) {
-  const html = readFileSync(SHELL, 'utf8');
+// Independently recompute the expected inline-script hashes — from the bytes the
+// server actually SERVED, so we prove the header carries the RIGHT hashes (not just
+// "a hash") for the document the webview really executes. Same extraction the server
+// does (server-rest.js buildPortalCsp), written out separately on purpose: a shared
+// helper would make the two sides agree by construction and prove nothing.
+const inlineHashes = (html) => {
+  const out = [];
   for (const m of html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)) {
     if (!m[1].trim()) continue;
-    expectedHashes.push(`'sha256-${crypto.createHash('sha256').update(m[1], 'utf8').digest('base64')}'`);
+    out.push(`'sha256-${crypto.createHash('sha256').update(m[1], 'utf8').digest('base64')}'`);
   }
-}
+  return out;
+};
+// The on-disk shell, used only to prove the served bytes ARE that shell.
+const onDiskHashes = haveCanonical ? inlineHashes(readFileSync(SHELL, 'utf8')) : [];
 
 let server = null;
 try {
@@ -88,6 +136,16 @@ try {
   const renderedClasses = haveCanonical ? [['shell', shell], ['fallback', fallback]] : [['shell', shell]];
   if (!haveCanonical) console.log('[—] canonical build absent — SPA-fallback (/library) checks skipped (legacy has no client-route fallback)');
   for (const [name, r] of renderedClasses) {
+    // FIRST: this response must actually BE the app document. A 404 here still
+    // carries a CSP (finalhandler's `default-src 'none'`), so without these three
+    // checks a dead shell reds as four cryptic policy failures instead of naming
+    // itself. Everything below only means something on a real document.
+    ok(r.status === 200, `${name}: 200 OK`, `status=${r.status}`);
+    ok(/^text\/html/.test(r.headers['content-type'] || ''), `${name}: text/html`, String(r.headers['content-type'] || 'none'));
+    ok(haveCanonical
+      ? /\/_app\/immutable\/entry\/start\./.test(r.body)   // canonical SvelteKit shell
+      : /portal isn't built yet/i.test(r.body),            // inline placeholder (legacy mode)
+      `${name}: body is the ${haveCanonical ? 'built SPA shell' : 'placeholder shell'}`, `${r.body.length}B`);
     ok(/(^|;)\s*frame-ancestors 'none'/.test(csp(r)), `${name}: explicit frame-ancestors 'none'`);
     ok(/script-src 'self'/.test(scriptSrc(r)), `${name}: script-src includes 'self'`);
     ok(r.headers['referrer-policy'] === 'strict-origin-when-cross-origin', `${name}: Referrer-Policy`);
@@ -95,13 +153,31 @@ try {
   }
 
   if (haveCanonical) {
-    ok(expectedHashes.length >= 1, `canonical shell has ≥1 inline script to hash`, `n=${expectedHashes.length}`);
-    const ss = scriptSrc(shell);
-    ok(expectedHashes.every((h) => ss.includes(h)),
-      `every shell inline-script sha256 is pinned in script-src`,
-      `expected ${expectedHashes.length}`);
+    // THE POINT OF THIS GATE: every inline script in the document the webview
+    // executes must be pinned in that document's own script-src. Derived from the
+    // served body on both sides of the comparison — never a frozen list — so a
+    // freshly built shell is self-consistent, and an inline script that stops being
+    // pinned (or a policy that stops pinning) is the ONLY way this reds.
+    for (const [name, r] of [['shell', shell], ['fallback', fallback]]) {
+      const served = inlineHashes(r.body);
+      const ss = scriptSrc(r);
+      ok(served.length >= 1, `${name}: has ≥1 inline script to pin`, `n=${served.length}`);
+      ok(served.length >= 1 && served.every((h) => ss.includes(h)),
+        `every inline script served in the ${name} is pinned in its script-src`,
+        `${served.filter((h) => ss.includes(h)).length}/${served.length} pinned`);
+    }
+    // …and the policy was built from THAT shell, not a stale/other one: the server
+    // hashes portal-app/build/200.html at boot, so the served bytes must yield the
+    // same hash set, and script-src must pin exactly it (no extra, unexplained hash
+    // — an over-broad extraction is drift too, and would silently widen the policy).
+    const servedHashes = inlineHashes(shell.body);
+    const pinned = (scriptSrc(shell).match(/'sha256-[A-Za-z0-9+/=]+'/g) || []);
+    ok(servedHashes.join(' ') === onDiskHashes.join(' ') && pinned.length === onDiskHashes.length,
+      `the CSP was built from the shell that was served`,
+      `served=${servedHashes.length} on-disk=${onDiskHashes.length} pinned=${pinned.length}`);
   } else {
-    console.log('[—] canonical build absent — ran against legacy shell (hash-presence check skipped)');
+    console.log('[—] canonical build absent — ran against legacy shell (hash-pinning checks skipped;');
+    console.log('    CI builds portal-app before verify — .github/workflows/verify.yml, or `npm run portal:build` locally)');
   }
 } catch (e) {
   fail++; console.log(`FAIL  harness error: ${e?.stack || e}`);

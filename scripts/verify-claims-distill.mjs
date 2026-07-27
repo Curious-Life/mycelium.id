@@ -4,6 +4,7 @@
 // with stubbed embed/validate/similarity. Proves: ADD born pending; promotion on enough distinct days
 // scaled by decay_class; corroboration raises confidence ONLY from day-cards (C); contradiction
 // retracts the old + links the successor (never deletes); the per-change log records each step.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { createClaimsNamespace } from '../src/db/claims.js';

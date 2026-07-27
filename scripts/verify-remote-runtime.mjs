@@ -5,6 +5,7 @@
 //   RT4 materialize(direct): Caddyfile only (public :443), no frpc.toml
 //   RT5 materialize(off): nothing (removes stale)
 // Pure fs to a temp dir; no network/server; never logs a secret value.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { rmSync, mkdirSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';

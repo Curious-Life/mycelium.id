@@ -4,6 +4,7 @@
 //   B2 the repeated (3rd) call is NOT executed (toolsUsed has only the 2 that ran)
 //   B3 distinct-arg tool calls do NOT trip the breaker (it's identity-based)
 //   B4 maxIterations still caps a non-repeating always-tool loop (existing guard intact)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { createAgentHarness } from '../src/agent/harness.js';
 
 const enc = new TextEncoder();

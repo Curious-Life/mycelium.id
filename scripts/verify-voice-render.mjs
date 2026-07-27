@@ -6,6 +6,7 @@
 // service: honest 501 without a sample, correct ref_audio/ref_text/instruct body,
 // ZERO EGRESS (non-loopback refused before any call), and honest service-down.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 process.env.ENCRYPTION_MASTER_KEY = crypto.randomBytes(32).toString('hex');
 delete process.env.MYCELIUM_QWEN_TTS_URL; // start from the loopback default

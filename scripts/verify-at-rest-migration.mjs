@@ -5,6 +5,7 @@
 // born-encrypted). Exercises the REAL initVaultStorage path (not boot() directly,
 // which is what let the old gate miss all of it) + TRUE cross-process concurrency.
 // @see the at-rest migration-hardening design
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';

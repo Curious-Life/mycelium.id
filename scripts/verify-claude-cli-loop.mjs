@@ -11,6 +11,7 @@
 //   CL5 mcp-config → loopback /internal/mcp, type:http, NO bearer/headers
 //   CL6 signal abort → SIGTERM + aborted:true
 //   CL7 spawn 'error' → resolves (never throws) with lastErr
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { EventEmitter } from 'node:events';
 import { createClaudeCliLoop, buildMcpConfig } from '../src/agent/loop-claude-cli.js';
 

@@ -65,6 +65,32 @@ if [ -z "${PYTHON:-}" ]; then
   fi
 fi
 
+# ── Interpreter VERSION probe — MUST run before the imports probe below ──────
+# cluster.py uses PEP 604 (`np.ndarray | None`) in annotations that are evaluated at
+# def time (pipeline/cluster.py:176), so it needs Python >= 3.10. That requirement was
+# stated only in a COMMENT (pipeline/setup.sh:16) and enforced nowhere, and the imports
+# probe below cannot catch it: every one of those modules imports fine on 3.9. So a 3.9
+# host sailed through the whole preflight, ran Step 1 to completion, and then died in
+# Step 2 with:
+#     TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+# — which names neither Python nor the version, and (with `set -e`) took Steps 3-16 with
+# it. Measured end-to-end on stock macOS, 2026-07-27.
+#
+# Why this is reachable in the field: the PACKAGED app is safe (src-tauri/src/main.rs:571
+# prefers a bundled interpreter; scripts/build-app-bundle.sh pins python-build-standalone
+# 3.12). The exposure is the FALLBACK CHAIN — `pipeline/.venv` (which setup.sh builds from
+# whatever `python3` is on PATH), then bare `python3` — and stock macOS still ships 3.9.6.
+# Dev checkouts hit this today; an npm/source distribution would ship into it.
+# The actionable line is printed LAST so jobs.js surfaces it verbatim.
+PY_MIN_MAJOR=3
+PY_MIN_MINOR=10
+if ! "$PYTHON" -c "import sys; sys.exit(0 if sys.version_info >= ($PY_MIN_MAJOR, $PY_MIN_MINOR) else 1)" 2>/dev/null; then
+  PY_FOUND="$("$PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo 'unknown')"
+  echo "[clustering] Python ${PY_MIN_MAJOR}.${PY_MIN_MINOR}+ required, found ${PY_FOUND} at: $PYTHON" >&2
+  echo "Generate needs Python ${PY_MIN_MAJOR}.${PY_MIN_MINOR} or newer (the clustering stage uses syntax 3.9 cannot parse). Install a newer Python, then re-run: bash pipeline/setup.sh" >&2
+  exit 5
+fi
+
 # Fail FAST + ACTIONABLE if the clustering/harmonics deps aren't installed.
 # Otherwise the run churns for minutes and dies on an opaque
 # "ModuleNotFoundError: No module named 'dotenv' (exit 1)" surfaced by jobs.js

@@ -5,6 +5,7 @@
 //   BG3 under budget → the turn runs
 //   BG4 budget unset → unlimited (turn runs)
 //   BG5 runAgentTurn passes a providerChain (resolved primary first, on-box local floor last)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

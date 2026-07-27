@@ -9,6 +9,7 @@
 //   • validateInboundEntry bounds a hostile/malformed entry before it is applied;
 //   • a grantee holding the CEK can verify authorship AND decrypt the ciphertext payload.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

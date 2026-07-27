@@ -12,6 +12,7 @@
 //  • previews are truncated; health summary is well-formed; message rows keep
 //    attachment + role fields and DROP metadata
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import express from 'express';
 import http from 'node:http';

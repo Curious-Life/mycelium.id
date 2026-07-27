@@ -53,6 +53,14 @@ export interface Stage {
   /** Per-stage pause state (QA R2) — set by readiness.js for embed/categorize so the co-located
    *  Stop/Resume control knows its two-state label. Undefined for stages with no pause control. */
   paused?: boolean;
+  /** P8b — `cluster` only, and ONLY on a built map: has the vault grown enough since the map was
+   *  made that it is worth rebuilding? Set from the SAME evaluateFreshness() that governs POST
+   *  /mycelium/generate's debounce, so an armed auto-rebuild cannot ask for a run the route skips.
+   *  Undefined on every other stage and on an unbuilt map — absent means "not a claim", not false. */
+  stale?: boolean;
+  /** P8b — `cluster` only: how many embedded messages are not represented on the map yet. A count
+   *  of MESSAGES, not points; the two are different tables and the copy must not fuse them. */
+  drift?: number;
 }
 
 /**

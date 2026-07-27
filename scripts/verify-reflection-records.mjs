@@ -4,6 +4,7 @@
 // Verifies: migration 0039 (table + plaintext keys + indexes), the encryption allowlist, the
 // DAL (record / recent / listRange + themes JSON round-trip + defaults), the recordReflection /
 // listReflections tools, that EVERY cycle logs one, and chat-grantability.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

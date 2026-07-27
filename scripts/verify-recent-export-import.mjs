@@ -10,6 +10,7 @@
 //   R7 enrichment nudged for new rows
 //
 // Boots a temp vault; reads content back DECRYPTED via db (never raw ciphertext).
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -50,6 +50,7 @@
 // MUTATION-TESTED: a MUTATION-TESTED line added to an exempt script (verify-handle.mjs) → T3 REDs
 // MUTATION-TESTED: a non-existent filename pushed into the baseline → T4 REDs
 // All four restored afterwards; the suite returns GREEN on the restored tree.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { readFileSync, existsSync } from 'node:fs';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';

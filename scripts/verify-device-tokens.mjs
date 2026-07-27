@@ -14,6 +14,7 @@
 // Pure Node, no network. Uses an in-memory better-sqlite3 seeded from the actual
 // migrations/0052_device_tokens.sql so a schema drift breaks the gate.
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

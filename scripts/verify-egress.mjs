@@ -6,6 +6,7 @@
 //   - every egress event carries a sha256 hash + length, NEVER the prompt;
 //   - createEgressAuditSink records through db.audit.log (hash only).
 // Pure router/seam test (no vault boot) — mock fetch + mock onEgress. PASS/FAIL.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { createInferenceRouter } from '../src/inference/router.js';
 import { createEgressAuditSink } from '../src/inference/egress.js';

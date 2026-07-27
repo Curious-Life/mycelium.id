@@ -15,6 +15,7 @@ import { transcribeLongAudio } from './transcribe-long.js';
 import { getTranscriberHealth } from '../transcribe/supervisor.js';
 import { serviceState, isRetryable, transcribeNotReadyReason } from '../system/service-state.js';
 import { readCoverage, writeCoverage, resumeStartSec, stitchTranscript, coverageDominates } from './transcript-coverage.js';
+import { markMessagesForReembed } from './derived-text.js';
 
 const isAudio = (fileType) => {
   const t = String(fileType || '').toLowerCase();
@@ -288,6 +289,26 @@ export async function transcribeAttachment(db, userId, attachmentId, {
       fault: complete ? null : (fault || extra.fault || null),
     });
     await db.attachments.update(row.id, fields);
+    // ── THE TRANSCRIPT IS FINAL — RE-QUEUE THE MESSAGE THAT OWNS IT ────────────────────────────
+    // The owning message was embedded from `content` ALONE — on the import path literally
+    // "File: memo.ogg" — so without this the speech stays BM25-only, invisible to a paraphrase
+    // (src/enrich/derived-text.js). This is the single chokepoint for all three BULK entry points:
+    // the portal Transcribe button, import's fire-and-forget call, and the background retry drain
+    // (transcribe-retry.js calls THIS function).
+    //
+    // ⚠️ INSIDE persist(), GATED ON `complete` — NOT at the ok-return above, and NOT on every save.
+    // D-076 made multi-pass the NORM: a 30-minute recording is transcribed across several resumed
+    // passes, each persisting a longer partial, plus a progressive save every ~10 segments. Marking
+    // on any of those would re-queue the same message repeatedly and re-embed a half-finished
+    // transcript each time — burning the BULK embed lane on text that is about to change. Marking
+    // at the ok-return instead would MISS the other completion path (a resumed pass that reaches
+    // `coverage.complete` with no new text of its own, and 'no-speech'), which is exactly the kind
+    // of second exit a future branch adds without noticing. One guard, at the one write.
+    //
+    // The empty-text guard keeps a genuine 'no-speech' completion from re-embedding a message whose
+    // derived text is still nothing. A stale-write return (coverageDominates, above) never reaches
+    // here — a write that did not land must not claim new text arrived.
+    if (complete && String(text || '').trim()) await markMessagesForReembed(db, userId, row.id);
   };
 
   try {

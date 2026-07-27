@@ -8,6 +8,7 @@
 //   U2 a forged fence in the input cannot break out of the envelope
 //   U3 length-bounded (truncation marker)
 //   U4 source is sanitized (no injection through the banner)
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import crypto from 'node:crypto';

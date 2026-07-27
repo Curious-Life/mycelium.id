@@ -5,6 +5,7 @@
 // territory_id, clustering_run_id) stay plaintext, AND that a read through the
 // adapter (db.rawQuery) returns decrypted/usable numbers. Runs the REAL stage
 // via spawnSync(node …). PASS/FAIL ledger; exits 0 only if all pass.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

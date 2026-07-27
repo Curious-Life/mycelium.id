@@ -4,6 +4,7 @@
 //   TR3 group + not addressed + no name → skip
 //   TR4 group + name mention in text → reply (heuristic fallback)
 //   TR5 model triage (flag-gated): yes→reply, no→skip, throw→heuristic skip; off by default
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import { triageHeuristic, createTriage } from '../src/agent/triage.js';
 
 const ledger = [];

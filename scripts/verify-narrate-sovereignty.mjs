@@ -22,6 +22,7 @@
 // The on-device HONESTY checks (isLoopbackUrl / jurisdictionForBaseUrl / isOnBoxCfg + the audit
 // that narrate never takes a SILENT off-box direct-fetch branch) are orthogonal to §4g and STAY:
 // even a now-permitted off-box narrate must be routed + AUDITED, never dialled unrecorded.
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { createInferenceRouter } from '../src/inference/router.js';
 import { isSensitiveTask, SENSITIVE_TASKS } from '../src/inference/sensitivity.js';

@@ -6,6 +6,7 @@
 // per-item LWW lamport, delete tombstones, and eager-on-next-write rekey (a write after a
 // membership removal re-encrypts under the new generation automatically).
 
+import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
