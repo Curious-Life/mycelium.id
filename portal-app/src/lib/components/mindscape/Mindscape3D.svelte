@@ -50,7 +50,13 @@
 	 * Out of scope, per design §6: per-territory halos (uSize) and CONTACT_SIZE are
 	 * separate knobs and are deliberately NOT multiplied.
 	 */
-	const POINT_SIZE_MULTIPLIER = 3;
+	// 3 → 1.8 (2026-07-28, operator): dots 40% smaller. Changed HERE, at the single knob,
+	// rather than at POINT_SIZE_DARK/LIGHT — PICK_THRESHOLD_POINTS (:75) is derived from
+	// this same constant, so the clickable radius shrinks with the mark. Editing the two
+	// size constants directly would have left the pick radius at the old 3× and quietly
+	// re-created the "the mark and the hover target stop agreeing" bug the header warns
+	// about, in the harder-to-notice direction (an invisible hit area LARGER than the dot).
+	const POINT_SIZE_MULTIPLIER = 1.8;
 	const POINT_SIZE_DARK_BASE = 0.28;
 	// Light mode needs noticeably bigger dots: they're solid (not glowing), so each
 	// must read as a distinct mark against the light background.

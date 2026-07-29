@@ -295,6 +295,10 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
         MYCELIUM_DB: dbPath || resolveDbPath(),
         MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
         ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
+      // This process is a SPAWNED CHILD: it may inherit the app's vault lease but must
+      // never claim one. If the app dies while this job runs, the child stops writing
+      // instead of taking ownership of the vault it was only borrowing.
+      MYCELIUM_VAULT_ROLE: 'child',
         ...(process.env.MYCELIUM_PYTHON ? { PYTHON: process.env.MYCELIUM_PYTHON } : {}),
         ...(process.env.HF_HOME ? { HF_HOME: process.env.HF_HOME } : {}),
         ...(process.env.HF_HUB_OFFLINE ? { HF_HUB_OFFLINE: process.env.HF_HUB_OFFLINE } : {}),
@@ -665,6 +669,10 @@ export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
     // Forward the vault writer-lock family token so this pipeline child is recognized
     // as same-family (not a foreign writer) when it opens the vault. See db/writer-lock.js.
     ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
+      // This process is a SPAWNED CHILD: it may inherit the app's vault lease but must
+      // never claim one. If the app dies while this job runs, the child stops writing
+      // instead of taking ownership of the vault it was only borrowing.
+      MYCELIUM_VAULT_ROLE: 'child',
   };
   const args = ['pipeline/discover-claims.mjs'];
   if (cadence) args.push(`--cadence=${cadence}`);
@@ -743,6 +751,10 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
     // Forward the vault writer-lock family token so this pipeline child is recognized
     // as same-family (not a foreign writer) when it opens the vault. See db/writer-lock.js.
     ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
+      // This process is a SPAWNED CHILD: it may inherit the app's vault lease but must
+      // never claim one. If the app dies while this job runs, the child stops writing
+      // instead of taking ownership of the vault it was only borrowing.
+      MYCELIUM_VAULT_ROLE: 'child',
     // Generous per-territory timeout (background → no UI bar to freeze): absorbs the
     // first call's cold model-load. Env override wins so tests can shrink it.
     MYCELIUM_CHRONICLE_TIMEOUT_MS: process.env.MYCELIUM_CHRONICLE_TIMEOUT_MS || '180000',
@@ -826,6 +838,10 @@ export function startClusterNamingJob({ dbPath, userId } = {}) {
     MYCELIUM_USER_ID: userId || process.env.MYCELIUM_USER_ID || 'local-user',
     // Same-family writer-lock token so this pipeline child is not seen as a foreign writer.
     ...(process.env.MYCELIUM_VAULT_FAMILY ? { MYCELIUM_VAULT_FAMILY: process.env.MYCELIUM_VAULT_FAMILY } : {}),
+      // This process is a SPAWNED CHILD: it may inherit the app's vault lease but must
+      // never claim one. If the app dies while this job runs, the child stops writing
+      // instead of taking ownership of the vault it was only borrowing.
+      MYCELIUM_VAULT_ROLE: 'child',
     // GAP-FILL: name the unnamed, preserve real names. describe-clusters reads this flag; the
     // placeholder-aware skip predicate (D10) makes PRESERVE fill placeholders rather than skip
     // them. This is what makes the job's job (naming) actually happen.

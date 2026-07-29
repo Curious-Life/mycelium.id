@@ -9,6 +9,7 @@
 // calls would be dead surface. See TOOL_NAMESPACES below for the live set.
 import { createDb } from '../adapter/d1.js';
 import { acquireVaultWriterLock } from './writer-lock.js';
+import { claimVaultOwnership } from './vault-lease.js';
 import { parseHealthRow, computeHealthSummary, cofireCol } from './helpers.js';
 
 import { createDocumentsNamespace } from './documents.js';
@@ -70,6 +71,46 @@ import { openSidecar } from '../search/sqlite/sidecar.js';
  * @returns {{ db: object, close: () => void, adapter: object }}
  */
 export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federationDeps = {}, dbKeyHex = null }) {
+  // ── VAULT OWNERSHIP — THE ENFORCEMENT, AT THE OPEN EVERY WRITER ACTUALLY USES ────────
+  // "If the app is closed, we should not let other processes write to the db."
+  //
+  // This MUST be here and not only in boot(). The pipeline children are the whole point of
+  // the guard and they deliberately do not call boot() — `pipeline/discover-claims.mjs:100`,
+  // `describe-chronicles.js:454`, `describe-clusters.js:133` all say "getDb + loadKey …
+  // NOT boot()" in as many words. A first draft claimed the lease at boot() only, and an
+  // adversarial review demonstrated the consequence by running it: a marked child with a
+  // dead app's family token wrote 25 rows into the canonical vault, while the gate that was
+  // supposed to prove otherwise sat green — because the gate called assertVaultOwnership
+  // directly and the product called nothing. The role mark was decorative.
+  //
+  // ORDER IS LOAD-BEARING: this runs BEFORE acquireVaultWriterLock, because that function
+  // ADOPTS a holder's family token into process.env for a process that has none
+  // (writer-lock.js:219). Running the ownership check afterwards would hand a stranger the
+  // owner's identity and then ask whether it was family.
+  //
+  // CLAIM-OR-INHERIT, not merely assert. The distinction is the whole design and I had it
+  // wrong twice:
+  //
+  //   a SPAWNED CHILD (MYCELIUM_VAULT_ROLE=child) may only ever INHERIT — no live owner of
+  //     its own family ⇒ it is refused. That is the guarantee: an orphaned pipeline stage
+  //     stops instead of taking ownership of the vault it was borrowing.
+  //   ANY OTHER PROCESS is, by definition, an entry point opening its own vault: the app,
+  //     `npm start`, a headless self-host, a pipeline CLI, a verify gate. Under the
+  //     operator's O1 decision those claim, visibly, rather than being refused.
+  //
+  // The first version called assertVaultOwnership here, which can only ever say no. That
+  // permanently refused every process that reaches the vault through getDb without going
+  // through boot() — which is TEN pipeline entry points and a large share of the gate
+  // suite. verify:at-rest crashed with ECONNREFUSED (its bridge never came up) and
+  // verify:realm-prune failed five checks before the pattern was visible.
+  //
+  // ⚠️ AND THE REASON IT WAS NOT VISIBLE EARLIER: resolveDbPath() READS MYCELIUM_DB, so any
+  // gate that points MYCELIUM_DB at a temp file makes that file THE CANONICAL VAULT for
+  // that process. "Fixtures are unaffected" was true only for fixtures reached by a
+  // different path than MYCELIUM_DB — which is not the population. My own gate check
+  // asserted the convenient case. Same class as the four before it.
+  claimVaultOwnership({ dbPath, log: (m) => console.error(m) });
+
   // Fail-closed single-FAMILY writer lock on the canonical vault: refuse to open a
   // second writer from a foreign process (a stray `node src/index.js` MCP) that would
   // corrupt the WAL. Same-app children (pipeline stages) pass via token/ancestry.

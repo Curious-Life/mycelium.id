@@ -13,6 +13,7 @@
 // stdout. Exit 0 on success, 1 on failure.
 //
 // Env: MYCELIUM_DB, USER_MASTER, SYSTEM_KEY (inherited from the calling stage).
+import { claimVaultOwnership } from '../src/db/vault-lease.js';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { resolveDbKeyHex } from '../src/db/open.js';
@@ -28,6 +29,12 @@ async function main() {
   for await (const chunk of process.stdin) input += chunk;
   const { statements } = JSON.parse(input || '{}');
   if (!Array.isArray(statements)) throw new Error('expected { statements: [...] }');
+
+  // VAULT OWNERSHIP — same reasoning as pipeline/vault-bridge.js: a bare main() that
+  // reaches the vault via getDb without boot(), so it claims for itself. Spawned from
+  // local_db.py under jobs.js's env it carries MYCELIUM_VAULT_ROLE=child and INHERITS,
+  // so it stops writing if the app that started the job has died.
+  claimVaultOwnership({ dbPath, log: (m) => console.error(m) });
 
   // Imported CryptoKeys (NOT raw hex) — autoEncryptParams needs HKDF keys.
   const [userKey, systemKey] = await Promise.all([loadKey(userHex), loadKey(systemHex)]);

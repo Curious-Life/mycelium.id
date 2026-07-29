@@ -164,7 +164,7 @@ export async function snapshotDb(srcDbPath, destPath, { dbKeyHex = null } = {}) 
     if (!/^[0-9a-f]{64}$/i.test(dbKeyHex)) throw new Error('snapshotDb: dbKeyHex must be 64-char hex');
     // VACUUM INTO requires the target to not exist.
     for (const sfx of ['', '-wal', '-shm']) { try { rmSync(destPath + sfx); } catch { /* */ } }
-    const db = new Database(srcDbPath, { fileMustExist: true });
+    const db = new Database(srcDbPath, { readonly: true, fileMustExist: true });
     try {
       db.pragma(`cipher='sqlcipher'`);
       db.pragma(`key="x'${dbKeyHex}'"`);
@@ -175,7 +175,7 @@ export async function snapshotDb(srcDbPath, destPath, { dbKeyHex = null } = {}) 
     restrictTempPerms(destPath);
     return;
   }
-  const src = new Database(srcDbPath, { fileMustExist: true });
+  const src = new Database(srcDbPath, { readonly: true, fileMustExist: true });
   try {
     await src.backup(destPath);   // online backup: consistent single file, WAL folded in
   } finally {

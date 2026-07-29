@@ -17,6 +17,7 @@ import {
   ENCRYPTED_FIELDS,
 } from '../crypto/crypto-local.js';
 import { vaultIsEncrypted } from '../db/open.js';
+import { assertVaultUsable, noteQueryError, sqlShape } from '../db/vault-halt.js';
 
 const isWrite = (sql) => /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sql);
 const hasReturning = (sql) => /\bRETURNING\b/i.test(sql);
@@ -74,24 +75,111 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
   // keeps its peak size. Caps disk pressure on a near-full volume (a corruption
   // co-factor). @see the vault-concurrency-fix design.
   db.pragma('journal_size_limit = 67108864');
+  // ── durability pragmas (the vault fail-stop design) ──────────────
+  // cell_size_check validates b-tree cell bounds as pages are written instead of
+  // trusting them until a later read trips over the damage. It turns "corrupt now,
+  // discovered at next boot after N more writes" into "SQLITE_CORRUPT on the statement
+  // that caused it" — which the fail-stop latch above then acts on immediately. This is
+  // the pairing that bounds damage: earlier detection = less amplification.
+  db.pragma('cell_size_check = ON');
+  // macOS: plain fsync() returns before the drive has flushed its write cache, so a
+  // panic or power loss can tear the WAL tail. F_FULLFSYNC is the only macOS primitive
+  // that actually reaches the platter. Costs nothing extra per commit — it only changes
+  // how the fsyncs SQLite already issues are performed.
+  db.pragma('fullfsync = 1');
+  // synchronous is deliberately LEFT AT THE WAL DEFAULT (NORMAL), which is already
+  // crash-safe against application crash — it risks only the WAL tail on power loss,
+  // which is not the failure this vault has actually suffered. FULL fsyncs every commit,
+  // a real cost on a pipeline that writes thousands of rows per cycle. Opt in per box.
+  if (process.env.MYCELIUM_SYNCHRONOUS) {
+    db.pragma(`synchronous = ${/^(0|OFF|1|NORMAL|2|FULL|3|EXTRA)$/i.test(process.env.MYCELIUM_SYNCHRONOUS) ? process.env.MYCELIUM_SYNCHRONOUS : 'NORMAL'}`);
+  }
+
+  // ── the raw handle is NOT a hole in the latch ───────────────────────────────────
+  // `db` (this raw better-sqlite3 handle) is handed out as `rawDb` / `db._sqlite` and
+  // carries real WRITE paths that never touch query(): device-sessions.js:136 and
+  // device-tokens.js:87 UPDATE on EVERY authenticated request, and jobs.js backfill
+  // writes encrypted columns back. Guarding only query()/withTransaction would have left
+  // the app still writing to a damaged vault on the busiest path it has — the exact
+  // failure this whole change exists to stop (independent review, 2026-07-28).
+  //
+  // So the three statement entry points are wrapped at the source. Everything else on the
+  // handle (close/pragma/backup/serialize) is untouched: those must keep working while
+  // halted, because closing cleanly and reading pragmas is part of recovery.
+  const rawPrepare = db.prepare.bind(db);
+  const rawExec = db.exec.bind(db);
+  const rawTransaction = db.transaction.bind(db);
+  const guardRaw = (fn, shape) => (...args) => {
+    assertVaultUsable();
+    try { return fn(...args); }
+    catch (err) { noteQueryError(err, { op: shape(...args), dbPath }); throw err; }
+  };
+  db.exec = guardRaw(rawExec, (s) => sqlShape(s));
+  db.transaction = (fn) => {
+    const t = rawTransaction(fn);
+    const guarded = guardRaw(t, () => 'TRANSACTION raw');
+    // better-sqlite3 hangs .default/.deferred/.immediate/.exclusive off the returned
+    // function. Nothing uses them today, but silently dropping them would be a trap.
+    for (const mode of ['default', 'deferred', 'immediate', 'exclusive']) {
+      if (typeof t[mode] === 'function') guarded[mode] = guardRaw(t[mode].bind(t), () => `TRANSACTION raw ${mode}`);
+    }
+    return guarded;
+  };
+  db.prepare = (sql, ...rest) => {
+    assertVaultUsable(); // refuse at prepare-time too — cheapest possible refusal
+    const stmt = rawPrepare(sql, ...rest);
+    const shape = () => sqlShape(sql);
+    for (const m of ['run', 'get', 'all', 'iterate', 'pluck', 'raw', 'expand', 'bind', 'columns']) {
+      if (typeof stmt[m] !== 'function') continue;
+      // pluck/raw/expand/bind return the statement for chaining — don't break that.
+      const orig = stmt[m].bind(stmt);
+      stmt[m] = (...a) => {
+        assertVaultUsable();
+        try { return orig(...a); }
+        catch (err) { noteQueryError(err, { op: shape(), dbPath }); throw err; }
+      };
+    }
+    return stmt;
+  };
 
   async function query(sql, params = []) {
-    // CONTRACT [crypto-local.js:1318,1396,1408]: autoEncryptParams MUTATES
-    // `params` in place (encrypting values; rewriting the array when it injects
-    // a scope column) and RETURNS the possibly-rewritten SQL string. So the
-    // params we bind are `params` itself; the SQL we prepare is the return value.
-    let finalSql = sql;
-    if (isWrite(sql)) {
-      finalSql = await autoEncryptParams(sql, params, scope, userKey, null, { systemKey });
+    // FAIL-STOP (CLAUDE.md §3). This is the ONE function every namespace call funnels
+    // through, so it is the only place that can bound corruption damage. Two halves:
+    //
+    //  1. assertVaultUsable() refuses BEFORE the file is touched, once damage has been
+    //     latched. This is what makes the app's 432 swallow-and-continue catch blocks
+    //     harmless — post-trip they swallow a refusal instead of completing a write.
+    //  2. the catch latches SQLITE_CORRUPT (and only that — BUSY/LOCKED/IOERR are
+    //     transient and must not halt a healthy vault), then RETHROWS unchanged so
+    //     existing callers behave exactly as before.
+    //
+    // Observed 2026-07-26: without this, one malformed-page report was swallowed by
+    // src/db/llm-usage.js:70 and the app wrote 3,840 more rows into the damaged file.
+    // @see src/db/vault-halt.js, the vault fail-stop design.
+    assertVaultUsable();
+    try {
+      // CONTRACT [crypto-local.js:1318,1396,1408]: autoEncryptParams MUTATES
+      // `params` in place (encrypting values; rewriting the array when it injects
+      // a scope column) and RETURNS the possibly-rewritten SQL string. So the
+      // params we bind are `params` itself; the SQL we prepare is the return value.
+      let finalSql = sql;
+      if (isWrite(sql)) {
+        finalSql = await autoEncryptParams(sql, params, scope, userKey, null, { systemKey });
+      }
+      const stmt = db.prepare(finalSql);
+      if (isWrite(finalSql) && !hasReturning(finalSql)) {
+        const info = stmt.run(...params);
+        return { results: [], success: true, meta: { changes: info.changes, last_row_id: Number(info.lastInsertRowid) } };
+      }
+      const rows = stmt.all(...params); // SELECTs + INSERT/UPDATE … RETURNING
+      const results = await autoDecryptResults(rows, userKey, null, { systemKey });
+      return { results, success: true };
+    } catch (err) {
+      // Content-free: sqlShape() yields "INSERT llm_usage" — verb + table, both code.
+      // `params` carry plaintext and are never passed (§1).
+      noteQueryError(err, { op: sqlShape(sql), dbPath });
+      throw err;
     }
-    const stmt = db.prepare(finalSql);
-    if (isWrite(finalSql) && !hasReturning(finalSql)) {
-      const info = stmt.run(...params);
-      return { results: [], success: true, meta: { changes: info.changes, last_row_id: Number(info.lastInsertRowid) } };
-    }
-    const rows = stmt.all(...params); // SELECTs + INSERT/UPDATE … RETURNING
-    const results = await autoDecryptResults(rows, userKey, null, { systemKey });
-    return { results, success: true };
   }
 
   const d1Query = (sql, params = []) => query(sql, params);
@@ -131,7 +219,15 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
         );
       }
     }
-    return db.transaction(fn)();
+    // Same fail-stop contract as query(): the raw-handle path must not be a hole in the
+    // latch. Refuse up front once damage is latched; classify + rethrow on the way out.
+    assertVaultUsable();
+    try {
+      return db.transaction(fn)();
+    } catch (err) {
+      noteQueryError(err, { op: `TRANSACTION ${tables.join(',') || 'raw'}`, dbPath });
+      throw err;
+    }
   }
 
   const parseJson = (s) => {

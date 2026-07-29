@@ -23,9 +23,17 @@
 //
 // The inode is recorded but is NOT a trigger (independent review 2026-07-16, two
 // PoC-proven false quarantines): legitimate whole-family restores (Time Machine, a new
-// Mac, re-installing an archived triple) change the inode while the WAL remains
-// same-generation committed data. Inode change without salt change = the file MOVED →
-// refresh the binding, touch nothing.
+// Mac) change the inode while the WAL remains same-generation committed data. Inode
+// change without salt change = the file MOVED → refresh the binding, touch nothing.
+//
+// ⚠️ ONE CASE THIS LIST USED TO CLAIM AND DOES NOT ACTUALLY COVER (measured 2026-07-29,
+// adversarial review): re-installing an archived `.replaced-*` TRIPLE. install-vault
+// archives db+`-wal` together and rebinds to the new generation, so restoring that triple
+// later presents a WAL whose salt does not match the recorded binding — it IS quarantined,
+// and the restored db opens without its own committed frames. Non-destructive (the WAL is
+// renamed aside, never deleted) and loud, and the trade is still right, but it was listed
+// among the cases the salt trigger avoids and it is not one. Newly reachable for
+// born-encrypted vaults too, now that they carry a binding from their first boot.
 //
 // FAIL-OPEN without proof: no recorded binding, a plaintext (magic-header) side, or an
 // unreadable header → we cannot judge, so we DO NOTHING and record the binding for next
@@ -42,7 +50,8 @@
 // ciphertext header bytes, no content, no keys. The quarantined WAL is SQLCipher
 // ciphertext and stays inside dataDir.
 
-import { existsSync, statSync, readFileSync, writeFileSync, renameSync, openSync, readSync, closeSync } from 'node:fs';
+import { existsSync, statSync, readFileSync, writeFileSync, renameSync, unlinkSync, openSync, readSync, closeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 const BINDING_FILE = '.vault-binding.json';
@@ -92,10 +101,34 @@ function readBinding(dbPath) {
 /** Record the CURRENT db file as the rightful owner of any future -wal. Call after a
  *  successful open, and after any deliberate swap/restore (install tooling does). */
 export function recordVaultBinding(dbPath) {
+  // ATOMIC. This file is the single point of failure for the whole guard: a torn, empty or
+  // `ino`-less binding SILENTLY DISARMS it — measured, 3/3 tamper shapes leaving the foreign
+  // -wal in place to be replayed — and readBinding() returning null is indistinguishable
+  // from "first run", which is the permissive branch.
+  //
+  // A bare writeFileSync TRUNCATES BEFORE IT FAILS, so an ENOSPC or EIO on any boot destroys
+  // a previously-good binding. A full disk is precisely the state in which a stale foreign
+  // WAL exists, so the failure mode is correlated with the thing being guarded against.
+  // Every neighbouring artefact in this subsystem already publishes atomically for exactly
+  // this reason — publishMeta (vault-lease.js), publishLock (init.js), the snapshot worker,
+  // install-vault — and this one was the exception until the ownership work made it
+  // load-bearing on every boot rather than only after a migration.
+  const target = bindingPath(dbPath);
+  const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}`;
   try {
-    writeFileSync(bindingPath(dbPath), JSON.stringify({ ...fileIdentity(dbPath), at: new Date().toISOString() }));
+    writeFileSync(tmp, JSON.stringify({ ...fileIdentity(dbPath), at: new Date().toISOString() }));
+    // Rename is atomic WITHIN a run: a reader sees the old file or the new one, never a
+    // half-written one, which is the failure this fixes. It is NOT a durability claim —
+    // there is no fsync of the file or the directory, so a power loss can still surface a
+    // zero-length binding, i.e. readBinding()→null, the permissive branch. Stated because
+    // this is the one file whose whole thesis is that a crash is when the binding matters.
+    // (publishMeta and publishLock do not fsync either; matching them, not excusing it.)
+    renameSync(tmp, target);
     return true;
-  } catch { return false; } // best-effort: an unwritable binding only disarms the guard
+  } catch {
+    try { unlinkSync(tmp); } catch { /* */ }
+    return false;              // an unwritable binding disarms the guard; a TORN one is worse
+  }
 }
 
 /**

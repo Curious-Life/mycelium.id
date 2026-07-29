@@ -68,7 +68,21 @@ async function keyOpensVault({ dbPath, userHex }) {
     // permissions problem) points them at destructive remedies — the same
     // wrong-diagnosis-drives-destructive-action class as D-080 itself.
     const msg = String(e?.message || e);
-    if (!/not a database|file is encrypted|malformed/i.test(msg)) {
+    // "malformed" is NOT a wrong key — it is the OPPOSITE. SQLCipher only reaches a
+    // b-tree verdict AFTER it has decrypted the page, so "database disk image is
+    // malformed" proves the key was RIGHT and the file is damaged. Folding it in with
+    // the wrong-key patterns below made a correct key report as `false` = "this key does
+    // not open the vault", which is precisely the reported symptom (2026-07-26: owner
+    // pastes the correct passkey, app silently behaves as if it were wrong). It is also
+    // the exact wrong-diagnosis-drives-destructive-action class the comment above warns
+    // about — the remedy it points a user toward is "start over", on an intact-but-
+    // repairable vault. @see the vault fail-stop design.
+    if (/malformed|SQLITE_CORRUPT/i.test(msg) || String(e?.code || '').startsWith('SQLITE_CORRUPT')) {
+      const err = new Error(`this vault is structurally damaged (${e?.code || 'SQLITE_CORRUPT'}: ${msg}). The key is not the problem — the database file is. Refusing to write anything; recover with scripts/vault-repair/ or restore a snapshot.`);
+      err.code = 'vault_corrupt';
+      throw err;
+    }
+    if (!/not a database|file is encrypted/i.test(msg)) {
       const err = new Error(`could not verify this key against the vault (${e?.code || 'error'}: ${msg}). Refusing to write anything until the vault can be read.`);
       err.code = 'kcv_unverifiable';
       throw err;

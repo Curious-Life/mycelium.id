@@ -17,7 +17,7 @@ import {
   buildVaultArchive, restoreVaultArchive, validateArchive,
   entryExceedsCap, readEntryCapped, MAX_DB_BYTES, MAX_ENTRY_BYTES,
 } from '../src/account/backup.js';
-import { mindDir, voiceSamplesRoot as resolveVoiceSamplesRoot, dataDir as resolveDataDir } from '../src/paths.js';
+import { mindDir, legacyMindDir, voiceSamplesRoot as resolveVoiceSamplesRoot, dataDir as resolveDataDir } from '../src/paths.js';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
 
@@ -338,16 +338,37 @@ try {
         ok(bh.manifest.mindCount === 1, 'H15d. mindCount counts only the real file', `(${bh.manifest.mindCount})`);
       }
 
-      // H16. resolver centralization is VALUE-PRESERVING: mindDir() equals the
-      //      pre-refactor inline expressions (compared with path.resolve).
+      // H16. mindDir() is DURABLE by default, and the override still wins.
+      //
+      //      H16a used to assert value-preservation against the pre-refactor inline
+      //      expressions (<cwd>/data/mind/mind). The mind-root durability migration
+      //      DELIBERATELY broke that: the default is now <dataDir>/mind, under
+      //      app_data_dir like mycelium.db, because <cwd>/data/mind resolved INSIDE
+      //      the code-signed, update-replaceable bundle and an app update orphaned
+      //      the identity capsule (src/paths.js:110-126, src/mindfiles/migrate-root.js).
+      //      The old assertion therefore encoded the very bug the change removed, and
+      //      it had been failing on main — which is why `npm run verify` could not run
+      //      to completion. It is replaced here with the invariant that IS load-bearing.
+      //
+      //      MUTATION-TESTED (2026-07-28):
+      //        C. paths.js mindAgentRoot default `dataDir({env,cwd})` → `join(cwd,'data','mind')`
+      //           (i.e. re-introducing the orphaning legacy root)
+      //           → H16a REDs (/some/fake/cwd/data/mind/mind), H16a2 stays PASS.
+      //        D. paths.js legacyMindDir `join(cwd,'data','mind','mind')` → `join(cwd,'data','mind')`
+      //           → H16a2 REDs, and H16a REDs too (the now !== legacy clause).
       {
-        // env-unset: old mcp.js root 'data/mind' and old rest/portal join(cwd,'data','mind')
-        // both meant <cwd>/data/mind; the mind subdir is <that>/mind.
         const cwd = '/some/fake/cwd';
-        const oldMcp = resolve(join(resolve(cwd, 'data/mind'), 'mind'));
-        const oldRest = resolve(join(join(cwd, 'data', 'mind'), 'mind'));
         const now = resolve(mindDir({ env: {}, cwd }));
-        ok(now === oldRest && now === oldMcp, 'H16a. env-unset: mindDir() == old inline expressions', `(${now})`);
+        const durable = resolve(join(resolveDataDir({ env: {}, cwd }), 'mind'));
+        const legacy = resolve(legacyMindDir({ cwd }));
+        ok(now === durable && now !== legacy,
+          'H16a. env-unset: mindDir() is <dataDir>/mind — durable, NOT inside the app bundle',
+          `(${now})`);
+        // The migration's SOURCE must still name the pre-relocation path, or a legacy
+        // tree is silently left behind on upgrade.
+        ok(legacy === resolve(join(join(cwd, 'data', 'mind'), 'mind')),
+          'H16a2. legacyMindDir() still names the pre-relocation path the migration reads',
+          `(${legacy})`);
         // env-set: MYCELIUM_AGENT_ROOT wins; old subdir was join(root,'mind').
         const absRoot = '/opt/agent-root';
         const oldSet = resolve(join(absRoot, 'mind'));

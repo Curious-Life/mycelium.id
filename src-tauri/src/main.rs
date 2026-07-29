@@ -256,6 +256,13 @@ fn reap(server: &Server) {
     }
     if let Some(pf) = &server.pidfile {
         let _ = std::fs::remove_file(pf);
+        // NO VAULT SEAL HERE, deliberately. A previous revision sealed the vault at this
+        // point, and an adversarial review showed why that is wrong: "my children are gone"
+        // is NOT "nobody owns the vault". A foreign stdio MCP can own it while this app's
+        // own siblings are refused and the supervisor respawns them; quitting the
+        // dead-looking app then sealed the vault UNDER that live MCP, which silently lost
+        // every fresh-connection write for the rest of its life. Sealing now belongs to
+        // whichever process leaves LAST, decided from presence locks — src/db/vault-lease.js.
     }
 }
 

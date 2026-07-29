@@ -136,19 +136,31 @@ function printReport({ problems, report }) {
 
 if (LIVE) {
   // ── report mode: the canonical vault, read-only ─────────────────────────────
-  const { dbPath } = await import('../src/paths.js');
   const { readUserMaster, deriveDbKey } = await import('../src/account/keystore.js');
-  const { existsSync } = await import('node:fs');
-  const { homedir } = await import('node:os');
-  // dbPath() honours MYCELIUM_DATA_DIR / MYCELIUM_DB; a bare dev checkout resolves to
-  // <repo>/data which usually has no vault. "--live" means THE app's vault, so fall
-  // back to the platform app dir when the checkout-local path has nothing to check.
-  let p = dbPath();
-  if (!existsSync(p)) {
-    const appVault = join(homedir(), 'Library', 'Application Support', 'id.mycelium.app', 'mycelium.db');
-    if (existsSync(appVault)) { p = appVault; console.log(`(no vault at ${dbPath()} — checking the app vault ${p})`); }
-    else { console.error(`FATAL: no vault at ${p} or ${appVault}`); process.exit(2); }
-  }
+  const { resolveOperationalVault } = await import('./vault-repair/operational-vault.mjs');
+  // "--live" means THE VAULT THE USER RUNS. It used to ask dbPath(), the APPLICATION's
+  // resolver, which in a repo checkout answers <repo>/data/mycelium.db — a dev fixture.
+  // The existsSync fallback below it only fired when NO dev vault existed, so on any
+  // developer machine this probed the wrong database, keyed it with the real Keychain
+  // key, and reported SQLITE_NOTADB — indistinguishable from "your master key does not
+  // open your vault". That produced a false, alarming diagnosis on 2026-07-28.
+  // @see scripts/vault-repair/operational-vault.mjs.
+  // `const`, deliberately — but it is NOT the load-bearing guard, and the comment here
+  // used to overstate it. `const` blocks RE-ASSIGNMENT, not a wrong INITIALIZER:
+  // `const p = dbPath()` compiles perfectly. What it does buy is that the specific bypass
+  // an adversarial review used — re-assigning the target after the resolver — becomes a
+  // loud TypeError instead of a silent wrong target. The real guard is behavioural, in
+  // verify-operational-vault.mjs: the tool is RUN under a faked HOME with a decoy where
+  // dbPath() resolves, and must announce the platform vault.
+  const resolved = (() => {
+    try {
+      return resolveOperationalVault({ explicit: process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : null, what: 'db-health --live' });
+    } catch (e) { console.error(`FATAL: ${e.message}`); process.exit(2); return null; }
+  })();
+  const p = resolved.path;
+  // Announce the file we are ABOUT TO OPEN, from the binding we will open, before anything
+  // can fail for an unrelated reason (a missing Keychain entry used to abort first).
+  console.error(`[vault] opening: ${p}`);
   const hex = readUserMaster();
   if (!hex) { console.error('FATAL: USER_MASTER not in Keychain — cannot open the vault'); process.exit(2); }
   const db = new Database(p, { fileMustExist: true, readonly: true });

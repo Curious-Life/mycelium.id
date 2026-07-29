@@ -52,6 +52,29 @@ export function corruptionLedgerPath(dbPath) {
  * @param {{ dbPath: string, userHex?: string|null, isCanonical: boolean }} opts
  * @returns {{ scheduled: boolean, reason?: string }}
  */
+/**
+ * Write the condemnation marker. THE ONLY WRITER — there used to be two, and they drifted:
+ * the latch emitted `db` while src/db/integrity.js (the app's own scheduled checker, and
+ * the more common condemnation path in practice) emitted `{at, detail}` with no `db`, which
+ * made index.js's ownership test vacuously true and let a sibling boot un-condemn the real
+ * vault. A format that two places construct is a format that will diverge again.
+ * Round-5 review, 2026-07-28.
+ * @param {string} dbPath
+ * @param {{ at?: string|number, code?: string, op?: string, detail?: string, source: string }} fields
+ */
+export function writeVaultCorruptMarker(dbPath, fields = {}) {
+  const payload = {
+    at: fields.at ?? new Date().toISOString(),
+    ...(fields.code ? { code: fields.code } : {}),
+    ...(fields.op ? { op: fields.op } : {}),
+    ...(fields.detail ? { detail: fields.detail } : {}),
+    db: path.basename(dbPath), // WHICH file this condemns — load-bearing, see above
+    source: fields.source || 'unknown',
+  };
+  try { fs.writeFileSync(vaultCorruptMarkerPath(dbPath), `${JSON.stringify(payload)}\n`); return true; }
+  catch { return false; }
+}
+
 export function maybeScheduleIntegrityCheck({ dbPath, userHex = null, isCanonical }) {
   try {
     if (!isCanonical) return { scheduled: false, reason: 'not-canonical' };
@@ -85,7 +108,11 @@ export function maybeScheduleIntegrityCheck({ dbPath, userHex = null, isCanonica
         // CORRUPT — loud + durable, but NEVER auto-overwrite (operator-gated recovery).
         let detail = ''; try { detail = JSON.parse(stdout.trim().split('\n').pop() || '{}').result || ''; } catch { /* */ }
         console.error(`[mycelium] VAULT_CORRUPT: quick_check failed${detail ? ` (${detail})` : ''} — restore a recent consistent snapshot; see scripts/vault-repair/. The vault was NOT modified.`);
-        try { fs.writeFileSync(markerPath, JSON.stringify({ at: Date.now(), detail })); } catch { /* */ }
+        // ONE writer for this format — see writeVaultCorruptMarker's header. This path used
+        // to construct its own payload without `db`, which made index.js's ownership test
+        // vacuously true and let a sibling boot un-condemn the real vault (2.3 MB written
+        // into it, measured). Round-5 review.
+        writeVaultCorruptMarker(dbPath, { at: new Date().toISOString(), detail, source: 'scheduled-integrity' });
         appendCorruptionEvent(dir, { source: 'scheduled-integrity', detail });
       } else {
         // code 2 (couldn't open/measure) — warn, don't claim corruption, leave marker as-is.

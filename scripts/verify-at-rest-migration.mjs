@@ -5,10 +5,20 @@
 // born-encrypted). Exercises the REAL initVaultStorage path (not boot() directly,
 // which is what let the old gate miss all of it) + TRUE cross-process concurrency.
 // @see the at-rest migration-hardening design
+//
+// MUTATION-TESTED (2026-07-28, the D2/D3 empty-lock pair):
+//   A. init.js acquireLock: `steal = lockOlderThan(...)` → `steal = true`
+//      (i.e. the pre-fix behaviour: an unparseable lock is "abandoned")
+//      → D2 REDs — `settled=true lockStillEmpty=false`, the holder's lock stolen.
+//   B. same line → `steal = false` (never reclaim)
+//      → D3 REDs in 20s — `ok=false encrypted=false lockGone=false`.
+// Case C (N=4 racing migrations) is STATISTICAL, not deterministic: it caught the
+// same defect as 3 NO-GO in 10 rounds before the fix and 0 in 20 after, which is
+// why D2/D3 exist as the deterministic pair. Do not treat a single C pass as proof.
 import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, openSync, writeSync, closeSync, utimesSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,6 +150,55 @@ async function main() {
     try { const key = await initVaultStorage({ dbPath: f, userHex: USER, log: () => {} }); ok = key === KEY && encrypted(f); } catch { ok = false; }
     rec('D stale lock (dead holder pid) is stolen → init proceeds (no deadlock)', ok && !existsSync(lockPath),
       `ok=${ok} lockGone=${!existsSync(lockPath)}`);
+  }
+
+  // ── D2/D3. The EMPTY-lock window — the defect behind C's flakiness ─────────
+  // acquireLock used to read an unparseable lock as "abandoned" and steal it.
+  // On the O_EXCL path the lock IS momentarily empty (created, pid not yet
+  // written), so a waiter stole a live holder's lock and both processes migrated
+  // the same vault: measured 3 NO-GO in 10 rounds of C with the stolen lock's
+  // content logged as "". A fresh empty lock must now be WAITED on (fail closed)
+  // and only an OLD one — a crash between create and write — reclaimed.
+  {
+    const base = join(dir, 'lock-empty'); const f = join(base, 'mycelium.db'); require_mkdir(f); seedPlaintextVault(f);
+    const lockPath = join(base, '.vault-init.lock');
+
+    // D2 — FRESH empty lock: init must block, and must not delete it.
+    writeFileSync(lockPath, '');
+    let settled = false;
+    const pending = initVaultStorage({ dbPath: f, userHex: USER, log: () => {} })
+      .then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((r) => setTimeout(r, 2000));
+    const heldOff = !settled && existsSync(lockPath) && readFileSync(lockPath, 'utf8') === '';
+    rec('D2 a FRESH empty lock is NOT stolen — init waits (the two-migrations-at-once defect)',
+      heldOff, `settled=${settled} lockStillEmpty=${existsSync(lockPath) && readFileSync(lockPath, 'utf8') === ''}`);
+    rmSync(lockPath, { force: true });   // release it; the waiter proceeds
+    await pending;
+    rec('D2b …and once the empty lock is released the waiter completes', encrypted(f), `encrypted=${encrypted(f)}`);
+  }
+  {
+    // D3 — an empty lock OLDER than the grace window is genuinely abandoned
+    // (crash between create and write) and must be reclaimed, or one crash
+    // bricks every future boot.
+    const base = join(dir, 'lock-empty-old'); const f = join(base, 'mycelium.db'); require_mkdir(f); seedPlaintextVault(f);
+    const lockPath = join(base, '.vault-init.lock');
+    writeFileSync(lockPath, '');
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, old, old);
+    // BOUNDED: the regression here is "waits forever", and acquireLock's own
+    // deadline is 15 minutes — so an unbounded await would hang the suite rather
+    // than fail it. Not reclaiming within 20s IS the failure.
+    let ok = false;
+    const TIMEOUT = Symbol('timeout');
+    try {
+      const r = await Promise.race([
+        initVaultStorage({ dbPath: f, userHex: USER, log: () => {} }),
+        new Promise((res) => setTimeout(() => res(TIMEOUT), 20_000)),
+      ]);
+      ok = r === KEY;
+    } catch { ok = false; }
+    rec('D3 an OLD empty lock (crash between create and write) IS reclaimed — no permanent brick',
+      ok && encrypted(f) && !existsSync(lockPath), `ok=${ok} encrypted=${encrypted(f)} lockGone=${!existsSync(lockPath)}`);
   }
 
   // ── E. KEY MATCH — the data-safety invariant. The vault is encrypted with the

@@ -431,7 +431,10 @@ export async function setOperatorPassword({ email, password, env = process.env }
   // Dynamic import breaks the auth.js <-> config.js cycle (auth.js imports
   // resolveAuthSecret/readRemoteConfig from here at load time).
   const { createAuth, migrateAuth, ensureOperatorUser } = await import('../auth.js');
-  const { auth, database } = createAuth({});
+  // settleOnDamage:false — this runs inside an HTTP request (src/remote/router.js), and
+  // the heal's 3s settle is a synchronous Atomics.wait that would freeze the whole event
+  // loop. A damaged auth.db is healed at the next start instead.
+  const { auth, database } = createAuth({ settleOnDamage: false });
   await migrateAuth(auth);
   // signUpEmail is a no-op for an EXISTING user, so a password change = delete
   // then recreate. foreign_keys = ON makes the delete CASCADE to the user's

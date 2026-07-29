@@ -1,3 +1,4 @@
+import { bindBoundedShutdown } from './db/vault-lease.js';
 import express from 'express';
 import path from 'node:path';
 import https from 'node:https';
@@ -93,6 +94,7 @@ import { createPairRouters } from './portal-pair.js';
 import { createE2ERouter } from './portal-e2e.js';
 import { createPathThrottle } from './http/rate-limit.js';
 import { recordDurabilityEvent, isCorruptionError } from './db/durability-log.js';
+import { isVaultHalted, vaultHaltState } from './db/vault-halt.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Per-boot shared secret authenticating the channel-daemon to the native channel-turn
@@ -578,6 +580,21 @@ export async function startRestServer({
   let bootError = null;
   const classifyBootError = (err) => {
     const m = String(err?.message || err || '');
+    // FIRST, and before the key branches: structural damage is NOT a key problem, and
+    // saying so is the difference between an honest error and a dead end. A corrupt
+    // vault decrypts fine and then fails on its own b-tree, so it reached the generic
+    // 'boot_failed' bucket and the portal routed it to the paste-your-recovery-key
+    // screen (portal-app/src/routes/setup/+page.svelte) — a screen no key can satisfy.
+    // That is the whole of the reported "I paste the right passkey and nothing happens".
+    // @see the vault fail-stop design.
+    // isCorruptionError (durability-log.js) is the TIGHT test — an SQLITE_CORRUPT* code
+    // or SQLite's exact message. A loose /malformed/i over the raw message was wrong: real
+    // non-vault errors carry that word ('openCekGrant: malformed grant', src/crypto/
+    // space-cek.js:59; pair-channel.js; space-seal.js), and reporting a key/grant bug as
+    // structural vault damage points the owner at scripts/vault-repair/ for a problem
+    // repair cannot fix — the same wrong-diagnosis-drives-destructive-action class this
+    // branch exists to remove (independent review, 2026-07-28).
+    if (isCorruptionError(err) || err?.code === 'vault_corrupt' || err?.code === 'VAULT_HALTED') return 'vault_corrupt';
     if (/KCV failed|wrong key|does not match/i.test(m)) return 'key_mismatch';
     if (/at-rest|MYCELIUM_AT_REST|migration/i.test(m)) return 'at_rest_migration_failed';
     return 'boot_failed';
@@ -967,6 +984,13 @@ export async function startRestServer({
         // vault, /account/status reports needsSetup:false + needsRecoveryKey:true,
         // and nothing has applied a schema or opened a writable handle. No vault is
         // created, truncated or written over on this path.
+        // Record the failure BEFORE anything else. Until now the boot-failure path wrote
+        // only to stderr, so every vault that was dead on arrival left zero forensic
+        // trail: on the machine that motivated this change, neither
+        // durability-events.jsonl nor corruption-events.jsonl existed at all, despite the
+        // black box having shipped. A boot that cannot open the vault is exactly the
+        // event worth recording. Content-free (§1): a classification, never the message.
+        recordDurabilityEvent('vault-boot-failed', { reason: bootError, code: String(err?.code || '') || null });
         console.error(unopenableVaultMessage({
           dbPath: effectiveDbPath, kcvPath: effectiveKcvPath, reason: bootError,
         }));
@@ -1147,6 +1171,19 @@ export async function startRestServer({
   // calls next(), so static assets + the SPA fallback below still work.
   const isVaultDataPath = (p) => p.startsWith('/api/') || p.startsWith('/ingest/') || p.startsWith('/portal/');
   app.use((req, res, next) => {
+    // MID-SESSION structural damage. bootError only ever covered a vault that failed to
+    // open; the case actually observed on 2026-07-26 is the OTHER one — a vault that
+    // opened fine and went malformed hours later. Without this, every handler throws
+    // VaultHaltedError from wherever it happens to call d1Query and the user gets an
+    // opaque 500 with no reason: the change would have classified the survivable case and
+    // left the observed one silent (independent review, finding 4).
+    if (isVaultHalted() && isVaultDataPath(req.path)) {
+      const st = vaultHaltState();
+      return res.status(503).json({
+        error: 'vault_locked', reason: 'vault_corrupt', haltedAt: st?.at ?? null,
+        message: 'Your vault reported damage while running, so Mycelium stopped writing to it to prevent further loss. Your data on disk is frozen as-is — nothing has been deleted or overwritten. This is not a key problem. Restore a snapshot, or recover the file with scripts/vault-repair/.',
+      });
+    }
     if (vaultSubApp) return vaultSubApp(req, res, next);
     if (isVaultDataPath(req.path)) {
       // Distinguish "no vault yet" from "vault exists but couldn't open" so the UI
@@ -1154,11 +1191,15 @@ export async function startRestServer({
       if (bootError) {
         return res.status(503).json({
           error: 'vault_locked', reason: bootError,
-          message: bootError === 'key_mismatch'
-            ? 'Your vault exists but the saved key can’t open it. Enter your recovery key, or restore from a backup.'
-            : bootError === 'at_rest_migration_failed'
-              ? 'Your vault couldn’t finish encrypting at rest and didn’t open. See recovery options.'
-              : 'Your vault exists but failed to open. See recovery options.',
+          message: bootError === 'vault_corrupt'
+            // NOT a key problem, and saying so is the entire point: a damaged vault sent
+            // the owner to the paste-your-recovery-key screen, which no key can satisfy.
+            ? 'Your vault file is damaged — this is not a key problem, and re-entering your recovery key will not fix it. Nothing has been deleted or overwritten. Restore a snapshot, or recover the file with scripts/vault-repair/.'
+            : bootError === 'key_mismatch'
+              ? 'Your vault exists but the saved key can’t open it. Enter your recovery key, or restore from a backup.'
+              : bootError === 'at_rest_migration_failed'
+                ? 'Your vault couldn’t finish encrypting at rest and didn’t open. See recovery options.'
+                : 'Your vault exists but failed to open. See recovery options.',
         });
       }
       return res.status(503).json({ error: 'vault_not_initialized', reason: 'not_created', message: 'Your vault is not set up yet.' });
@@ -1310,13 +1351,10 @@ async function main() {
   const reach = REST_LOOPBACK_HOSTS.has(host) ? 'localhost-only' : `bound to ${host} (networked — proxy must auth)`;
   process.stderr.write(`mycelium portal + REST on ${url} (open in a browser; ${reach})\n`);
 
-  const shutdown = () => {
-    server.close(() => {
-      try { close?.(); } finally { process.exit(0); }
-    });
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  // Shared with the public server — three copies of this is how the hole stayed open, and
+  // the public one kept the unbounded version after this was fixed here.
+  // @see src/db/vault-lease.js bindBoundedShutdown.
+  bindBoundedShutdown({ server, close, log: (m) => process.stderr.write(`${m}\n`) });
 
   // CRASH POLICY (durability): this process died silently THREE times in one day from
   // uncaught async errors (SQLITE_CORRUPT in a background task) — Node's default kills

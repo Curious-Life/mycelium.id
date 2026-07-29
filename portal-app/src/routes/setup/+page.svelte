@@ -12,7 +12,7 @@
 
 	// 'hero' = fresh machine, no vault yet (create or restore). The old 'reveal' mode
 	// is GONE — the recovery-key backup now happens in the in-app wizard.
-	type Mode = 'loading' | 'hero' | 'restore-backup' | 'restore';
+	type Mode = 'loading' | 'hero' | 'restore-backup' | 'restore' | 'damaged';
 	let mode = $state<Mode>('loading');
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -50,6 +50,11 @@
 				// Vault files are present but the Keychain can't open them (a hand-copied
 				// data dir, a key mismatch, or right after a restore-from-backup): go
 				// to the recovery-key paste, which succeeds because kcv.json is on disk.
+				// A DAMAGED vault is not a key problem. Routing it to the recovery-key paste
+				// is the reported 2026-07-26 symptom: the owner enters the correct key,
+				// nothing happens, and the screen implies the key is at fault. No key can
+				// satisfy a malformed b-tree. @see the vault fail-stop design
+				if (bootError === 'vault_corrupt') { mode = 'damaged'; return; }
 				if (s.needsRecoveryKey || bootError) { mode = 'restore'; return; }
 			}
 		} catch { /* show the hero regardless */ }
@@ -201,6 +206,34 @@
 					<button onclick={() => { error = null; mode = 'hero'; }}
 						class="w-full text-sm text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors py-2">
 						← Back
+					</button>
+				</div>
+
+			{:else if mode === 'damaged'}
+				<div class="card-elevated p-8 space-y-6">
+					<div class="text-center">
+						<div class="rounded-lg border border-[#E5B84C]/40 bg-[#E5B84C]/10 p-3 mb-4 text-sm text-left text-[var(--color-text-secondary)] leading-relaxed">
+							<strong class="text-[var(--color-text-primary)]">Your vault file is damaged.</strong>
+							This is <strong class="text-[var(--color-text-primary)]">not</strong> a key problem — your recovery key is fine, and re-entering it will not help.
+							Mycelium has stopped writing to the file so the damage cannot spread.
+						</div>
+						<h2 class="text-lg font-medium text-[var(--color-text-primary)] mb-2">Your data has not been deleted</h2>
+						<p class="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+							The vault is still on disk exactly as it was — nothing has been overwritten, moved or repaired.
+							Recovery needs the vault-repair tools rather than this screen.
+						</p>
+					</div>
+					<div class="rounded-lg border border-[var(--color-border)] p-4 text-left space-y-2">
+						<p class="text-sm text-[var(--color-text-primary)] font-medium">What to do next</p>
+						<ol class="text-sm text-[var(--color-text-secondary)] leading-relaxed list-decimal ml-4 space-y-1">
+							<li>Do <strong>not</strong> delete the data folder or start a new vault — that discards the recoverable file.</li>
+							<li>Restore the most recent snapshot if you have one.</li>
+							<li>Otherwise run the vault-repair tools (<code class="font-mono text-xs">scripts/vault-repair/</code>) against a copy.</li>
+						</ol>
+					</div>
+					<button onclick={() => { error = null; mode = 'restore'; }}
+						class="w-full text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors">
+						I've already copied my vault files here → enter recovery key
 					</button>
 				</div>
 

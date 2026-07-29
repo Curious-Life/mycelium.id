@@ -1,0 +1,77 @@
+{
+  "_README": [
+    "Every place in src/ that opens the CANONICAL VAULT with its own `new Database(...)`,",
+    "bypassing the adapter chokepoint (src/adapter/d1.js) and therefore bypassing the",
+    "fail-stop latch, the corruption marker and the standard pragmas.",
+    "",
+    "WHY THIS FILE EXISTS: the vault's durability guards were added one per incident, and",
+    "each new opener could silently miss all of them. Counting them was never possible, so",
+    "nobody knew the guards had holes. `maxWriteCapable` is a RATCHET: it may only shrink.",
+    "A new unguarded opener cannot land; an existing one can only be removed or downgraded.",
+    "",
+    "This is a build-time invariant, not another runtime guard. It does not detect damage —",
+    "it prevents the class of mistake where a guard is added and then quietly routed around.",
+    "",
+    "readOnly openers are SAFE BY CONSTRUCTION: they cannot write to a damaged vault, which",
+    "is the property the latch exists to enforce. Moving an opener from writeCapable to",
+    "readOnly is the cheapest way to shrink the ratchet, and is usually possible — VACUUM",
+    "INTO, for one, succeeds on a read-only connection (measured 2026-07-28).",
+    "",
+    "NOT_THE_VAULT (scripts/verify-vault-open-chokepoint.mjs) exempts openers that are not the vault at all. src/db/vault-lease.js is one: it opens `.vault-ownership`, a zero-row file whose ONLY purpose is to carry a kernel (fcntl) lock. It holds no data, so it is neither a vault opener nor a write of any kind that the fail-stop latch could care about."
+  ],
+  "maxWriteCapable": 9,
+  "chokepoint": "src/adapter/d1.js",
+  "readOnly": [
+    {
+      "site": "src/crypto/keys.js",
+      "why": "key probe — opens readonly to test whether a key opens the vault; cannot write"
+    },
+    {
+      "site": "src/db/vault-halt.js",
+      "why": "verifyVaultIntegritySync — the read-only quick_check that decides whether a flagged vault is still damaged"
+    },
+    {
+      "site": "src/db/vault-integrity-check.mjs",
+      "why": "the detached read-only integrity probe (query_only=true)"
+    },
+    {
+      "site": "src/db/snapshot-worker.mjs",
+      "why": "VACUUM INTO from a readonly handle; also refuses outright on .vault-corrupt"
+    },
+    {
+      "site": "src/account/backup.js",
+      "why": "export archive VACUUM INTO / .backup() from a READ-ONLY handle"
+    }
+  ],
+  "writeCapable": [
+    {
+      "site": "src/db/init.js",
+      "why": "applies schema/migrations before the adapter exists — runs under .vault-init.lock",
+      "guarded": "init-lock + wal-guard",
+      "reduceTo": "should consult the corruption marker before applying DDL"
+    },
+    {
+      "site": "src/db/migrate.js",
+      "why": "opens :memory: for the expected-schema probe — never the real vault",
+      "guarded": "n/a (:memory:)",
+      "reduceTo": "verify and drop from this list"
+    },
+    {
+      "site": "src/account/db-cipher-migrate.js",
+      "why": "the at-rest plaintext→SQLCipher migration genuinely rewrites the file",
+      "guarded": "init-lock",
+      "reduceTo": "stays write-capable by nature; should check the marker first"
+    },
+    {
+      "site": "src/account/snapshot-on-boot.js",
+      "why": "pre-migration VACUUM INTO under the init lock, against a vault other processes may be migrating",
+      "guarded": "init-lock",
+      "reduceTo": "read-only IS possible in isolation (measured), but verify:at-rest-migration is too FLAKY to prove it safe on the N=4 racing-migration path — fix that gate first, then reduce"
+    },
+    {
+      "site": "src/search/sqlite/sidecar.js",
+      "why": "dropLegacyVaultIndex() opens THE VAULT (called with dbPath from src/db/init.js) and runs DROP TABLE IF EXISTS to remove the stale in-vault search index left by pre-sidecar builds. It was invisible to this gate until 2026-07-28: the file was wholly exempt as 'mycelium.search.db', so a fifth write-capable, latch-bypassing, DDL-executing vault opener sat behind that exemption while the ceiling claimed four.",
+      "reduceTo": "Route the DROP through the d1 adapter so it passes assertVaultUsable(), or move the legacy-index cleanup into a migration. It runs inside initVaultStorage under the init lock, before the adapter exists, which is the only reason it opens raw today."
+    }
+  ]
+}

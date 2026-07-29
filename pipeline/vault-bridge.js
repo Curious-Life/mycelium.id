@@ -38,6 +38,7 @@
 // passes a random ephemeral port).
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { claimVaultOwnership } from '../src/db/vault-lease.js';
 import { getDb } from '../src/db/index.js';
 import { loadKey } from '../src/crypto/keys.js';
 import { deriveDbKey } from '../src/account/keystore.js';
@@ -118,6 +119,21 @@ async function main() {
   if (EXPECTED_TOKEN.length < 32) {
     throw new Error('MYCELIUM_DB_BRIDGE_TOKEN required (≥32 chars) — the bridge will not serve the decrypted vault without a per-boot auth token');
   }
+
+  // VAULT OWNERSHIP. This file is a real process entry point — a bare main(), launched by
+  // pipeline/run-clustering.sh:127 — and it reaches the vault through getDb WITHOUT going
+  // through boot(), which is where the app claims its lease. So it must claim for itself,
+  // exactly as the other entry points do.
+  //
+  // In production this is an INHERIT, not a claim: run-clustering.sh is spawned by jobs.js,
+  // whose child allowlist carries MYCELIUM_VAULT_ROLE=child, so the bridge borrows the
+  // running app's lease and stops if that app dies mid-run — which is the whole point.
+  // Standalone (a verify gate against its own fixture, no app anywhere) it claims.
+  //
+  // Found by verify:at-rest, which spawns this bridge against a temp vault it makes
+  // canonical via MYCELIUM_DB: without this the bridge was refused at getDb, /healthz never
+  // came up, and the gate crashed with ECONNREFUSED.
+  claimVaultOwnership({ dbPath, log: (m) => console.error(m) });
 
   // Imported CryptoKeys for the encrypting path; raw hex DB key for the cipher open.
   const [userKey, systemKey] = await Promise.all([loadKey(userHex), loadKey(systemHex)]);

@@ -12,8 +12,8 @@
 // plaintext — only OAuth/session rows. The vault's two hex keys never touch
 // this file.
 import Database from 'better-sqlite3';
-import { mkdirSync, existsSync, chmodSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, existsSync, chmodSync, renameSync, statSync } from 'node:fs';
+import { dirname, basename } from 'node:path';
 import { authDbPath } from './paths.js';
 import { readRemoteConfig, resolveAuthSecret } from './remote/config.js';
 import { betterAuth } from 'better-auth';
@@ -28,6 +28,118 @@ import { getMigrations } from 'better-auth/db/migration';
  * @param {string} [opts.secret]   signing secret (32+ random chars)
  * @param {string} [opts.dbPath]   sqlite path; ':memory:' for tests
  */
+/** Is this a SQLite structural-damage error? (auth.db is plaintext — no cipher case.) */
+function isAuthDbCorrupt(err) {
+  const c = String(err?.code || '');
+  return c === 'SQLITE_CORRUPT' || c.startsWith('SQLITE_CORRUPT_') || c === 'SQLITE_NOTADB'
+    || /database disk image is malformed|file is not a database/i.test(String(err?.message || ''));
+}
+
+/**
+ * Make auth.db usable, self-healing past structural damage. Runs BEFORE anything else
+ * touches the file (see the order note in createAuth).
+ *
+ * Quarantines rather than deletes: the file holds the signing secret, the relay/acme-dns
+ * secrets and the MCP bearer, and a human may want to salvage one by hand. Recreation
+ * costs a re-pair and re-connect, which is why healing beats refusing — refusing takes the
+ * remote surface down permanently for a file we can rebuild.
+ *
+ * @param {string} dbPath
+ * @returns {boolean} true if a damaged file was quarantined
+ */
+/** Sleep synchronously. healAuthDbIfCorrupt runs before anything is async. */
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no SAB */ }
+}
+
+/** Probe auth.db on a FRESH connection. @returns {Error|null} the error, or null if healthy. */
+function probeAuthDb(dbPath) {
+  let db = null;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    db.prepare('SELECT count(*) FROM sqlite_master').get(); // open succeeds on a damaged
+    return null;                                            // file; the first statement fails
+  } catch (err) {
+    return err;
+  } finally {
+    try { db?.close(); } catch { /* */ }
+  }
+}
+
+// A concurrent writer can make a read-only probe misread TRANSIENTLY, and the app spawns
+// two auth-touching siblings by design. Long enough for a checkpoint to finish.
+const AUTH_SETTLE_MS = 3000;
+
+/**
+ * @param {string} dbPath
+ * @param {boolean} allowSettle  false for request-path callers — see the note below.
+ */
+function healAuthDbIfCorrupt(dbPath, allowSettle = true) {
+  if (!dbPath || dbPath === ':memory:' || !existsSync(dbPath)) return false;
+  // Only ever heal a regular FILE. A directory (or socket, or device) at the db path reads
+  // as SQLITE_NOTADB — indistinguishable from a damaged database by error code alone — and
+  // the destructive branch would then rename someone's DIRECTORY aside and invent a fresh
+  // db in its place. That is a configuration mistake to surface, not damage to repair.
+  try { if (!statSync(dbPath).isFile()) return false; } catch { return false; }
+  {
+    const first = probeAuthDb(dbPath);
+    if (!first) return false;
+    if (!isAuthDbCorrupt(first)) return false; // a lock/permission problem is not damage
+
+    // CONFIRM ON A SECOND LOOK BEFORE DOING SOMETHING IRREVERSIBLE. One observation is
+    // not enough here: quarantining rotates the better-auth signing secret plus the relay
+    // and acme-dns secrets and the MCP bearer, which invalidates every OAuth token and
+    // every paired device. src/db/vault-integrity-check.mjs already learned that a
+    // concurrent boot-time write makes a read-only probe read as damage transiently — and
+    // there the action is only an advisory marker. A destructive action needs a HIGHER
+    // bar than an advisory one, not the same one. Adversarial review, 2026-07-28.
+    // THE SETTLE IS A BOOT-PATH COST, NOT A REQUEST-PATH ONE. sleepSync is Atomics.wait:
+    // it blocks the whole event loop, and createAuth is also reached from
+    // src/remote/config.js:434 (setOperatorPassword) via the HTTP route in
+    // src/remote/router.js — where a 3s stall would freeze every concurrent request.
+    // A request-path caller therefore does not settle; it declines to act instead, which
+    // is the fail-safe direction: the next boot heals it.
+    if (!allowSettle) {
+      console.error(`[auth] auth.db read as damaged (${first.code || 'SQLITE_CORRUPT'}) on a request path — NOT quarantining here; it will be re-checked and healed at the next start.`);
+      return false;
+    }
+    sleepSync(AUTH_SETTLE_MS);
+    const second = probeAuthDb(dbPath);
+    if (!second || !isAuthDbCorrupt(second)) {
+      console.error(`[auth] auth.db read as damaged (${first.code || 'SQLITE_CORRUPT'}) but verified clean ${AUTH_SETTLE_MS}ms later on a fresh connection — treating the first read as transient (a concurrent write), NOT quarantining.`);
+      return false;
+    }
+    const err = second;
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const aside = `${dbPath}.corrupt-${stamp}`;
+    let moved = 0;
+    try {
+      // Move the whole triple as a UNIT: a stale -wal beside a fresh file is replayed into
+      // it on the next open — the mechanism src/db/wal-guard.js exists for.
+      for (const sfx of ['', '-wal', '-shm']) {
+        if (existsSync(dbPath + sfx)) { renameSync(dbPath + sfx, aside + sfx); moved++; }
+      }
+    } catch (e) {
+      throw new Error(`auth.db is corrupt (${err.code}) and could not be quarantined (${e.message}) — refusing to write over it`);
+    }
+    // A SIBLING GOT THERE FIRST. Both processes can observe the same damage; the loser
+    // finds nothing left to move. Returning true then would claim a quarantine it did not
+    // perform, and both would go on to mint a fresh db and a fresh signing secret.
+    if (moved === 0) {
+      console.error('[auth] auth.db was already quarantined by another process — standing down.');
+      return false;
+    }
+    console.error(
+      `[auth] auth.db was structurally damaged (${err.code || 'SQLITE_CORRUPT'}) and has been set aside as `
+      + `${basename(aside)} — nothing was deleted. A fresh one will be created. Your VAULT AND ITS DATA ARE `
+      + `UNAFFECTED and the desktop app keeps working; what you will need to redo is remote access: re-pair any `
+      + `phones, re-connect the MCP client, and re-enter the operator password if you use networked access.`,
+    );
+    return true;
+  }
+}
+
 export function createAuth(opts = {}) {
   // baseURL: explicit opt > MYCELIUM_BASE_URL > persisted remote.json > localhost
   // (readRemoteConfig folds in the env-var precedence). For a remote connector
@@ -47,16 +159,39 @@ export function createAuth(opts = {}) {
   // so the old "must set MYCELIUM_AUTH_SECRET" boot friction is gone; the guard
   // below stays as defence in depth. A changed secret invalidates issued tokens
   // by design (the deliberate "revoke all" action).
+  // ORDER IS LOAD-BEARING: resolveAuthSecret() reads the signing secret out of auth.db
+  // itself (src/remote/config.js), so it throws SQLITE_CORRUPT before any heal placed
+  // after it can run. Caught by testing the heal end-to-end rather than trusting it.
+  // Resolve the path, make the file usable, and only then ask it for anything.
+  const dbPath = opts.dbPath || authDbPath();
+  if (dbPath !== ':memory:') {
+    const dir = dirname(dbPath);
+    if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+    // opts.settleOnDamage === false means a request-path caller: do not block the loop.
+    healAuthDbIfCorrupt(dbPath, opts.settleOnDamage !== false);
+  }
+
   const secret = opts.secret || resolveAuthSecret();
   if (!secret) {
     throw new Error('Could not resolve an auth signing secret.');
   }
-  const dbPath = opts.dbPath || authDbPath();
-
-  if (dbPath !== ':memory:') {
-    const dir = dirname(dbPath);
-    if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
-  }
+  // auth.db is REGENERABLE-WITH-FRICTION, and that decides its whole durability story.
+  //
+  // Measured, not assumed (2026-07-28): with auth.db fully corrupt the DESKTOP app boots
+  // and serves normally — portal 200, /account/status 200, no auth error. `createAuth` is
+  // reached only from server-http.js (the :4711 remote/OAuth surface) and remote/config.js;
+  // the desktop path is the auth shim, which authenticates from loopback trust plus
+  // device-sessions stored INSIDE the vault. So a damaged auth.db costs the REMOTE surface,
+  // never access to your own data — the opposite of the vault, where damage is unrecoverable
+  // and therefore earns the fail-stop latch, snapshots and the WAL guard.
+  //
+  // Giving this file that same machinery would be three more layers protecting a re-pair.
+  // The right pattern is the one already used for the regenerable search index
+  // (src/search/sqlite/sidecar.js): detect, QUARANTINE (never delete — it may hold the only
+  // copy of a secret worth recovering by hand), recreate, and say plainly what must be
+  // redone. Without this, a corrupt auth.db throws on the first pragma below, takes the
+  // remote surface down with an opaque SQLITE_CORRUPT, and never heals — because nothing
+  // recreates the file. @see the vault-durability architecture design.
   const database = new Database(dbPath);
   // Enforce foreign keys (better-sqlite3 defaults them OFF). The OAuth tables use
   // `on delete cascade`; without enforcement, deleting a user ORPHANS its oauth

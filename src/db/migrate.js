@@ -110,6 +110,43 @@ function expectedTables(dir, files) {
 }
 
 /** Expected tables that are ABSENT from the vault (→ self-heal). Never throws. */
+/**
+ * WOULD applyMigrations WRITE to this vault? Answered from a READ-ONLY handle, so it can be
+ * asked BEFORE anything opens the vault write-capable.
+ *
+ * This exists because of D-117's second half, and it was found by an adversarial review that
+ * REPRODUCED 2,273,280 bytes written into a damaged ENCRYPTED vault on the very commit that
+ * claimed to close D-117. The reasoning that let it through was mine and it was wrong: I
+ * asserted an already-encrypted vault was covered by the runtime halt latch. It is not.
+ * ensureVaultSchema opens the vault raw and keyed and calls applyMigrations BEFORE createDb
+ * exists — the same un-latched raw-handle window I had granted only to plaintext vaults.
+ *
+ * The mechanism is the self-heal at :61-66: a damaged vault loses tables, missingExpectedTables
+ * sees them missing, `heal` goes true, and EVERY migration is re-applied over the damage. So
+ * "would this write?" is exactly the question, and it is cheap — a ledger read plus one
+ * sqlite_master scan, no page walk — which is what makes the expensive quick_check affordable
+ * to gate behind it instead of running on every boot of a multi-GB vault.
+ *
+ * FAILS TOWARD CHECKING. Any error answering the question returns true: "I could not tell
+ * whether this write is safe" must mean "verify first", never "go ahead".
+ *
+ * @param {import('better-sqlite3').Database} db a READ-ONLY handle
+ * @returns {boolean}
+ */
+export function migrationsWouldWrite(db, dir = MIGRATIONS_DIR) {
+  try {
+    const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+    const present = new Map(files.map((f) => [f, sha256(readFileSync(join(dir, f), 'utf8'))]));
+    let ledger;
+    try { ledger = readLedger(db); } catch { return true; }   // no ledger table ⇒ everything applies
+    if (!ledger.size) return true;                             // pre-ledger or bootstrap vault
+    if (missingExpectedTables(db, dir, files).length) return true; // the self-heal path
+    return files.some((f) => ledger.get(f) !== present.get(f));
+  } catch {
+    return true;
+  }
+}
+
 function missingExpectedTables(db, dir, files) {
   try {
     const have = new Set(db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all().map((r) => r.name));

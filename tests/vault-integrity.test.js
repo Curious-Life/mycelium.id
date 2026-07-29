@@ -93,6 +93,17 @@ describe('integrity scheduler (throttle + marker)', () => {
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline && !fs.existsSync(marker)) { await new Promise((res) => setTimeout(res, 100)); }
     assert.equal(fs.existsSync(marker), true, 'expected a .vault-corrupt marker after a failed check');
-    assert.equal(typeof JSON.parse(fs.readFileSync(marker, 'utf8')).at, 'number');
+    // `at` is an ISO STRING, not an epoch number, since the two marker writers were
+    // unified behind integrity.js writeVaultCorruptMarker (2026-07-28). They had drifted:
+    // the fail-stop latch emitted {at: ISO, code, op, db} while this path emitted
+    // {at: epoch, detail} with NO `db`, which made index.js's ownership test vacuously
+    // true and let a sibling boot un-condemn the real vault. This test correctly caught
+    // the format change; the format change is the fix.
+    const body = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    assert.equal(typeof body.at, 'string', 'at is an ISO timestamp');
+    assert.ok(!Number.isNaN(Date.parse(body.at)), `at must parse as a date, got ${body.at}`);
+    // The load-bearing field: WHICH vault this condemns.
+    assert.equal(body.db, path.basename(p), 'the marker must name the file it condemns');
+    assert.equal(body.source, 'scheduled-integrity', 'and record which writer produced it');
   });
 });

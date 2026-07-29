@@ -22,7 +22,7 @@ import Database from 'better-sqlite3';
 import { existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
-import { dbPath } from '../../src/paths.js';
+import { resolveOperationalVault } from './operational-vault.mjs';
 import { readUserMaster, deriveDbKey } from '../../src/account/keystore.js';
 import { recordVaultBinding } from '../../src/db/wal-guard.js';
 import { recordDurabilityEvent } from '../../src/db/durability-log.js';
@@ -34,7 +34,13 @@ const die = (m) => { console.error(`FAIL: ${m}`); process.exit(1); };
 if (!CANDIDATE) die('usage: install-vault.mjs <candidate.db> [--yes]');
 if (!existsSync(CANDIDATE)) die(`candidate not found: ${CANDIDATE}`);
 
-const LIVE = dbPath();
+// The SWAP TARGET must be the vault the user runs, not the one this checkout would run.
+// dbPath() answers the latter: run from a repo, install-vault would have archived and
+// replaced <repo>/data/mycelium.db, printed "DONE — installed vault verified", and left
+// the user's real corrupt vault untouched. A repair tool that silently repairs the wrong
+// database is worse than none. mustExist:false — a first install has nothing to archive.
+// @see scripts/vault-repair/operational-vault.mjs.
+const { path: LIVE } = resolveOperationalVault({ what: 'install target', mustExist: false });
 const hex = readUserMaster();
 if (!hex) die('USER_MASTER not found in Keychain — cannot validate the candidate');
 const KEY = deriveDbKey(hex);
@@ -54,7 +60,15 @@ if (holders) die(`the live vault is OPEN by pid(s) ${holders.replace(/\n/g, ', '
 console.log(`[install] validating candidate ${CANDIDATE} …`);
 {
   const c = open(CANDIDATE, false);
-  const qc = c.prepare('PRAGMA quick_check').all().map((r) => r.quick_check);
+  // quick_check THROWS (rather than returning rows) when the candidate is damaged badly
+  // enough that the check itself cannot walk the b-tree — which is the single most likely
+  // thing an operator points this tool at by mistake. Uncaught, that surfaced as a raw
+  // SqliteError stack trace instead of the refusal this step exists to produce. It still
+  // failed closed, but "stack trace" and "your candidate is corrupt, here is why" are very
+  // different messages to someone mid-recovery.
+  let qc;
+  try { qc = c.prepare('PRAGMA quick_check').all().map((r) => r.quick_check); }
+  catch (e) { c.close(); die(`candidate is CORRUPT — quick_check could not complete (${e?.code || e?.message}). Refusing to install it. Rebuild it first (rebuild-fresh.mjs), or pick a different candidate.`); }
   if (!(qc.length === 1 && qc[0] === 'ok')) { c.close(); die(`candidate quick_check: ${qc.join(' | ').slice(0, 120)}`); }
   try {
     c.prepare("INSERT INTO messages (id, user_id, role, content, created_at) VALUES ('__install_probe__','local-user','user','probe','2000-01-01T00:00:00.000Z')").run();
@@ -102,5 +116,14 @@ recordDurabilityEvent('vault-installed', { from: path.basename(CANDIDATE), bytes
   const n = v.prepare('SELECT count(*) c FROM messages').get().c;
   v.close();
   if (!(qc.length === 1 && qc[0] === 'ok')) die(`installed vault quick_check FAILED: ${qc.join('|').slice(0, 120)}`);
-  console.log(`[install] DONE — installed vault verified at ${LIVE} (quick_check ok, ${n} messages). Relaunch the app.`);
+  // A successful, verified install means the vault this box condemned no longer exists —
+// so the condemnation must go with it. Without this, a user repairs their vault, the app
+// verifies it byte-for-byte, and then REFUSES to boot forever because a stale marker file
+// says it is corrupt (three independent reviews caught exactly this). Cleared only here,
+// after step 6 has proven the installed file opens and quick_checks ok.
+try {
+  const { clearVaultCorruptMarker } = await import('../../src/db/vault-halt.js');
+  if (clearVaultCorruptMarker(LIVE)) console.log('[install] cleared the .vault-corrupt flag (the installed vault verified clean)');
+} catch { /* best-effort: never fail a good install on marker hygiene */ }
+console.log(`[install] DONE — installed vault verified at ${LIVE} (quick_check ok, ${n} messages). Relaunch the app.`);
 }

@@ -17,6 +17,7 @@ import express from "express";
 import { boot } from "../index.js";
 import { createIdentity } from "../identity/identity.js";
 import { verifyLink } from "./links.js";
+import { bindBoundedShutdown } from '../db/vault-lease.js';
 import { fileURLToPath } from "node:url";
 
 const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -166,8 +167,12 @@ async function main() {
   const host = process.env.MYCELIUM_PUBLIC_HOST ?? "127.0.0.1";
   const { url, server, close, identity } = await startPublicServer({ port, host });
   process.stderr.write(`mycelium PUBLIC surface on ${url} — serves ONLY published/unlisted docs (handle: ${identity.handle ?? "unset"})\n`);
-  const shutdown = () => server.close(() => { try { close?.(); } finally { process.exit(0); } });
-  process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);
+  // BOUNDED. `server.close()` never returns while ANY connection is open — measured on
+  // Node 22 for a merely half-sent request, and this process was still alive 8 s after
+  // SIGTERM, past the shell's 6 s grace. While hung it holds a vault PRESENCE lock, so
+  // every other process leaving refuses to seal: one stalled TCP connection disabled the
+  // whole guarantee. Shared with server-rest so the two cannot drift apart again.
+  bindBoundedShutdown({ server, close, log: (m) => process.stderr.write(`${m}\n`) });
 }
 
 // Compare decoded FS paths (a bundle path with a space breaks the raw file:// form).

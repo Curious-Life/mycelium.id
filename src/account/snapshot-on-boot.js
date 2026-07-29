@@ -25,7 +25,7 @@
 // is what finally puts the refusal in front of a production vault.
 import { existsSync, mkdirSync, readdirSync, statSync, statfsSync, readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { atRestEnabled } from '../db/open.js';
 import { isPlaintextSqlite } from './db-cipher-migrate.js';
@@ -40,6 +40,14 @@ const KEEP = Number(process.env.MYCELIUM_SNAPSHOT_KEEP) || 15;
  */
 function snapshotSync(srcDbPath, destPath, dbKeyHex) {
   for (const sfx of ['', '-wal', '-shm']) { try { rmSync(destPath + sfx); } catch { /* */ } }
+  // WRITE-CAPABLE, deliberately — and this was measured, not assumed. Opening read-only here
+  // looks strictly safer (VACUUM INTO only reads) and it is what verify:vault-open-chokepoint
+  // wants, but it BREAKS the concurrent-migration path: verify:at-rest-migration's
+  // "N=4 racing migrations" case goes from 11-pass to a hard failure, because this snapshot
+  // runs under the init lock against a vault other processes are actively migrating and a
+  // read-only handle cannot get the consistent view it needs there. Reverted 2026-07-28 after
+  // the full verify chain caught the regression. If this is ever reduced to read-only, that
+  // gate is the one that must stay green.
   const db = new Database(srcDbPath, { fileMustExist: true });
   try {
     if (dbKeyHex) {
@@ -148,8 +156,17 @@ export function maybeSnapshotBeforeMigrate({ dbFile, dbKeyHex, migrationsDir = '
       log?.(msg);
       return null;
     }
+    // UNIQUE PER PROCESS. An ISO timestamp alone collides: two processes booting in the same
+    // millisecond pick the SAME destination, and the second one VACUUMs INTO a file the first
+    // is already writing — "output file already exists", or a half-written dest that then
+    // reports "table <x> already exists" depending on the interleaving. Because this runs
+    // under the init lock only for the process that WINS it, the losers still reach here
+    // during a concurrent boot; the app spawns two vault-opening siblings by design
+    // (main.rs:146), so this is reachable in production, not just in the gate.
+    // It was the cause of verify:at-rest-migration's flaky "N=4 racing migrations" case,
+    // which failed ~4 runs in 5 at baseline and cost an hour of misattributed blame.
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    dest = path.join(snapDir, `pre-migrate-${stamp}.db`);
+    dest = path.join(snapDir, `pre-migrate-${stamp}-${process.pid}-${randomBytes(3).toString('hex')}.db`);
     snapshotSync(dbFile, dest, dbKeyHex);                 // keyed → still-encrypted; null → plaintext
     // Only record the fingerprint AFTER a successful snapshot, so a failed one
     // doesn't poison the gate and skip the next attempt.

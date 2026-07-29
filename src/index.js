@@ -11,8 +11,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { maybeScheduleIntegrityCheck } from './db/integrity.js';
+import { startSnapshotSchedule } from './db/snapshot-schedule.js';
+import { bindStdioLifetime } from './db/mcp-lifetime.js';
+import { claimVaultOwnership, bindBoundedShutdown } from './db/vault-lease.js';
 import { initVaultStorage } from './db/init.js';
-import { resolveDbKeyHex, atRestEnabled } from './db/open.js';
+import { resolveDbKeyHex, atRestEnabled, vaultIsEncrypted } from './db/open.js';
 import { purgePlaintextBackup } from './account/db-cipher-migrate.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -157,6 +160,19 @@ export async function boot({
   // guard existed (independent review, finding 4). The guard is cheap (a stat + a
   // 16-byte read), quarantines only on proof, and its unguardable failure mode throws —
   // which is the correct fail-closed outcome for this path too.
+  // ── VAULT OWNERSHIP ────────────────────────────────────────────────────────────────
+  // "If the app is closed, we should not let other processes write to the db." Before
+  // ANYTHING opens this vault write-capable, establish that we are entitled to: either we
+  // take ownership (a standalone entry point — the app, `npm start`, a headless self-host,
+  // a verify gate against its own fixture), or we inherit it from a live owner of our own
+  // family (the app's second node sibling, a pipeline child). A spawned child whose app has
+  // died gets neither and stops here.
+  //
+  // No-op on a non-canonical vault, which is why the ~104 fixture-based gates need no
+  // changes and no new escape hatch. @see src/db/vault-lease.js, and
+  // the vault-ownership design for why this is a kernel lock and not a pidfile.
+  const vaultLease = claimVaultOwnership({ dbPath, log: (m) => console.error(m) });
+
   if (!initStorage) {
     const { guardAgainstForeignWal } = await import('./db/wal-guard.js');
     const { recordDurabilityEvent } = await import('./db/durability-log.js');
@@ -165,6 +181,65 @@ export async function boot({
       onEvent: (e) => recordDurabilityEvent(e.kind, e),
     });
   }
+  // A vault this box previously condemned is SUSPECT, not condemned forever.
+  //
+  // The first version of this threw unconditionally when `.vault-corrupt` existed. That was
+  // a permanent lockout, and three independent reviews caught it: NOTHING clears the marker
+  // — `install-vault.mjs` does not touch it, and `integrity.js:83` (which does) is scheduled
+  // ~40 lines AFTER this point, so a refusing boot can never reach the code that would clear
+  // it. Worse, `scripts/` is not in the app bundle at all (verified against
+  // Contents/Resources/app), so every message pointing a user at `scripts/vault-repair/`
+  // named a directory that does not exist on their machine. Net effect: repair the vault
+  // successfully, and the app still refuses — forever, with no in-product way out. That is
+  // strictly worse than the silent degradation this whole change set set out to fix.
+  //
+  // So the marker now means "prove yourself": run the integrity check the marker is asking
+  // for. Clean → clear it and carry on (a repaired or restored vault self-heals, which is
+  // exactly what should happen after install-vault.mjs). Still damaged → refuse, with the
+  // damage as the reason rather than a stale file. quick_check costs ~24 s on a 2 GB vault,
+  // which is only ever paid on a vault already flagged as suspect — correctness beats speed
+  // on that path. @see the vault-durability architecture design.
+  if (process.env.MYCELIUM_IGNORE_VAULT_HALT !== '1') { // same test as vault-halt.js bypassed()
+    const { readVaultCorruptMarker, clearVaultCorruptMarker, verifyVaultIntegritySync, decideMarkerAction } =
+      await import('./db/vault-halt.js');
+    const mark = readVaultCorruptMarker(dbPath);
+    if (mark) {
+      // KEY ONLY IF THE FILE IS ACTUALLY ENCRYPTED. resolveDbKeyHex returns a derived key
+      // whenever at-rest is enabled — which the real launch guard always sets — but this
+      // gate runs BEFORE the plaintext→cipher migration, so a still-plaintext vault would
+      // be opened WITH a key, answer SQLITE_NOTADB, and refuse forever.
+      const keyForCheck = vaultIsEncrypted(dbPath) ? resolveDbKeyHex(userHex, dbPath) : null;
+      const verdict = verifyVaultIntegritySync(dbPath, keyForCheck);
+
+      // THE DECISION IS A PURE, TOTAL FUNCTION — see decideMarkerAction's header. This
+      // block used to be a chain of if/else, and six review rounds each found an unhandled
+      // combination that fell into a permissive branch. Boot now only EXECUTES the decision,
+      // so the state space can be enumerated and covered by a table instead of by judgement.
+      const decision = decideMarkerAction({ mark, verdict, dbFile: path.basename(dbPath) });
+      const when = mark.at || 'an earlier boot';
+
+      if (decision.clearMarker) clearVaultCorruptMarker(dbPath);
+
+      if (decision.action === 'REFUSE') {
+        const err = new Error(
+          `this vault was flagged as damaged at ${when} and ${decision.why} (${verdict.reason}). `
+          + `Refusing to open it rather than risk writing to a damaged file — nothing has been modified. `
+          + `Restore a snapshot from the snapshots folder beside your vault, or run the vault-repair tools `
+          + `against a copy. To start over deliberately, delete the vault file. `
+          + `Set MYCELIUM_IGNORE_VAULT_HALT=1 only for recovery tooling that knowingly owns the box.`,
+        );
+        err.code = 'vault_corrupt';
+        err.markerDecision = decision.kind;
+        throw err;
+      }
+
+      console.error(
+        `[mycelium] vault was flagged corrupt at ${when}: ${decision.why}`
+        + `${decision.clearMarker ? ' — clearing the flag and continuing.' : ' — continuing; the flag names another vault and is left in place.'}`,
+      );
+    }
+  }
+
   const dbKeyHex = initStorage
     ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) })
     : resolveDbKeyHex(userHex, dbPath); // open-only (e.g. public server): no schema apply, fail-closed
@@ -194,6 +269,17 @@ export async function boot({
   // boot (the scan is ~24 s on a 2 GB vault, so it must not run in-process). Fixtures /
   // pipeline temp DBs are skipped. @see src/db/integrity.js.
   maybeScheduleIntegrityCheck({ dbPath, userHex, isCanonical: isCanonicalVault });
+  // ROLLING SNAPSHOTS. snapshot-on-boot.js covers the pre-MIGRATION moment and stops
+  // there — its trigger is "migration set changed OR no snapshot at all", so a settled
+  // vault takes one baseline and never another. That is how a production vault reached
+  // 2026-07-26 with nothing to restore from. Bounding damage is the halt latch's job;
+  // being able to go back a day is this one's. Detached + unref'd: never blocks a boot,
+  // never holds the process open, and refuses outright on a vault already marked corrupt
+  // (a timer that keeps copying a damaged file rotates every good snapshot away).
+  // @see src/db/snapshot-schedule.js, the vault fail-stop design.
+  if (isCanonicalVault) {
+    startSnapshotSchedule({ dbPath, dbKeyHex, isCanonical: true, log: (m) => console.error(m) });
+  }
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.
@@ -206,32 +292,71 @@ export async function boot({
   // handlers is returned so non-MCP transports (REST) can reuse the SAME
   // tool handler map without re-implementing tool logic. userId is returned so
   // HTTP ingestion routes (upload) can scope writes without re-deriving it.
-  return { server, db, close, tools, handlers, deferred, userId, identity, publicHost, handle, searchHelpers, isTopologyReady };
+  // Release the vault lease when the caller closes the vault. The KERNEL releases the
+  // lock itself on exit — crash, SIGKILL, panic — so this is only for an orderly
+  // shutdown that keeps the process alive afterwards (tests, a re-boot in one process).
+  const closeAll = () => { try { close(); } finally { vaultLease.release(); } };
+  return { server, db, close: closeAll, tools, handlers, deferred, userId, identity, publicHost, handle, searchHelpers, isTopologyReady };
 }
 
 async function startStdio() {
-  const { server, tools, deferred } = await boot();
+  const { server, tools, deferred, close } = await boot();
+  // A stdio MCP server's lifetime IS its stdin. Nothing was listening: observed on a real
+  // machine, a Claude-Code-spawned `node src/index.js` had been holding a vault open
+  // read/write for 2 h 54 m with its session long gone. 171 worktrees × 12 worktree vaults
+  // is a lot of orphans waiting to happen, and an orphan from a STALE worktree carries a
+  // divergent migration lineage — mechanism #1 in the 2026-07-16 root cause, and the one
+  // case the stress harness cannot model because it runs a single build.
+  // @see src/db/mcp-lifetime.js.
   // stderr only — never write non-protocol bytes to stdout on stdio transport.
   console.error(`[mycelium] ${tools.length} tools registered; ${deferred.length} deferred (${deferred.join(', ')})`);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // AFTER connect, never before: the transport attaches its own stdin handler inside
+  // start(), and resuming the stream earlier discards bytes already in flight — the
+  // `initialize` request among them.
+  bindStdioLifetime({ close, label: 'stdio MCP' });
   console.error('[mycelium] stdio MCP server connected.');
 }
 
 async function startHttp() {
   // Lazy import so the stdio path never loads express/better-auth.
   const { startHttpServer } = await import('./server-http.js');
-  await startHttpServer();
+  // SIGTERM DOES NOT RUN EXIT HANDLERS, and SIGTERM is how the Tauri shell quits this
+  // sibling. Without this it never seals the vault — and since which sibling OWNS the lease
+  // is a startup race, that made the branch's headline claim false about half the time.
+  // I added this once, deleted it when the shell briefly owned sealing, and failed to
+  // restore it when sealing came back to node. @see src/db/vault-lease.js.
+  const httpServer = await startHttpServer();
+  // ⚠️ THIS IS THE ONLY ONE THE TAURI SHELL ACTUALLY SPAWNS (main.rs:803) — the :4711
+  // remote MCP/OAuth surface, with streaming sessions and long-running tool calls, i.e. the
+  // MOST in-flight work of any entry point. It had an IMMEDIATE process.exit() and got 0 ms
+  // to drain, while --enrich and --public (which the shell does not spawn at all) got
+  // 2500 ms. My previous commit claimed "every http entry point" and this was not one of
+  // them; the same commit's own comment described the defect it was shipping here.
+  //
+  // No vault `close` at this level is correct, not an omission: server-http.js calls boot()
+  // PER MCP SESSION, so there is no single handle to close. The seal still happens — the
+  // exit handler carries leaveVault().
+  bindBoundedShutdown({ server: httpServer, log: (m) => console.error(m) });
 }
 
 async function startEnrich() {
+  // ⚠️ FOUR ENTRY POINTS BOOT THE VAULT AND I WIRED THE SEAL INTO ONE. --enrich and
+  // --public both claim ownership (unlock + presence) and had no signal handler at all, so
+  // SIGTERM left the vault UNLOCKED WITH NOBODY OWNING IT — measured, mode 600 with a stale
+  // presence file. That is precisely the state Layer B exists to prevent.
   // Lazy import so stdio/http paths never load the enrichment server.
   // MYCELIUM_ENRICH_PORT overrides the default :8095 (the port the ingestion
   // enqueue nudge targets); leave unset in production.
   const { startEnrichmentServer } = await import('./enrich/server.js');
   const port = process.env.MYCELIUM_ENRICH_PORT
     ? Number(process.env.MYCELIUM_ENRICH_PORT) : undefined;
-  const { url } = await startEnrichmentServer(port !== undefined ? { port } : {});
+  const { url, server, close } = await startEnrichmentServer(port !== undefined ? { port } : {});
+  // DRAIN, then seal — the same bounded shutdown both http servers use. An immediate
+  // process.exit() here would seal correctly but cut in-flight enrichment work dead; this
+  // gives it the budget and still exits well inside the shell's 6 s grace.
+  bindBoundedShutdown({ server, close, log: (m) => console.error(m) });
   console.error(`[mycelium] enrichment service on ${url} — POST /enrich-all, GET /health`);
 }
 
@@ -242,7 +367,12 @@ async function startPublic() {
   const { startPublicServer } = await import('./publish/public-server.js');
   const port = Number(process.env.MYCELIUM_PUBLIC_PORT ?? 8788);
   const host = process.env.MYCELIUM_PUBLIC_HOST ?? '127.0.0.1';
-  const { url, identity } = await startPublicServer({ port, host });
+  const { url, identity, server, close } = await startPublicServer({ port, host });
+  // @see startEnrich. Running this module DIRECTLY already binds the same bounded shutdown
+  // (public-server.js main()); binding it here too means the `--public` MODE behaves
+  // identically instead of exiting instantly without draining. Two paths to one server that
+  // shut down differently is how the unbounded version survived a commit that fixed it.
+  bindBoundedShutdown({ server, close, log: (m) => console.error(m) });
   console.error(`[mycelium] PUBLIC surface on ${url} — published/unlisted docs only (handle: ${identity.handle ?? 'unset'})`);
 }
 
