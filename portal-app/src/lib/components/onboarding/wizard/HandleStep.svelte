@@ -21,6 +21,12 @@
 	let handleState = $state<'idle' | 'checking' | 'available' | 'taken' | 'invalid' | 'unreachable'>('idle');
 	let saving = $state(false);
 	let saveErr = $state('');
+	// D-124: the truth the server already sends and this step used to drop. In onboarding
+	// there is no operator password yet, so setHandle can only RECORD the name as pending —
+	// it returns claimed:false with a doc-comment saying "the caller MUST surface
+	// claimed:false". Showing "Claim @x" → silence told the user the handle was theirs
+	// when anyone could still take it.
+	let savedPending = $state<null | string>(null); // handle recorded-but-not-claimed
 	let handleTimer: ReturnType<typeof setTimeout> | null = null;
 
 	async function getJSON(path: string): Promise<any | null> {
@@ -30,6 +36,7 @@
 	function onInput() {
 		handleState = 'idle';
 		saveErr = '';
+		savedPending = null; // typing again re-arms the save path (review F7: never a stuck "Continue")
 		if (handleTimer) clearTimeout(handleTimer);
 		const h = handleInput.trim().toLowerCase();
 		if (!h) return;
@@ -48,10 +55,14 @@
 		saving = true; saveErr = '';
 		try {
 			const res = await api('/portal/profile', { method: 'PUT', body: JSON.stringify({ handle: h }) });
-			if (!res.ok) { saveErr = 'Could not claim that handle — try another, or do this later.'; return; }
+			if (!res.ok) { saveErr = 'Could not save that handle — try another, or do this later.'; return; }
+			// D-124: surface claimed:false instead of advancing in silence. The server's
+			// handle result rides the profile PUT response (portal-compat: `handle: handleResult`).
+			const d = await res.json().catch(() => ({} as any));
+			if (d?.handle && d.handle.claimed === false) { savedPending = h; return; }
 			onNext();
 		} catch {
-			saveErr = 'Could not claim that handle — try another, or do this later.';
+			saveErr = 'Could not save that handle — try another, or do this later.';
 		} finally { saving = false; }
 	}
 
@@ -88,11 +99,24 @@
 	{/if}
 	{#if saveErr}<p class="handle-hint bad">{saveErr}</p>{/if}
 
-	<div class="actions">
-		<button class="primary" disabled={handleState !== 'available' || saving} onclick={claim}>
-			{saving ? 'Claiming…' : typed && handleState === 'available' ? `Claim @${typed}` : 'Claim handle'}
-		</button>
-	</div>
+	{#if savedPending}
+		<!-- D-124: recorded ≠ claimed. Saying nothing here is how the operator left
+		     onboarding believing @martin was reserved while anyone could still take it. -->
+		<p class="pending-note">
+			Saved — <strong>@{savedPending}</strong> is recorded for you, but not claimed yet.
+			You'll claim it when you set up remote access (Settings → Connections). Until then
+			the name stays available to others.
+		</p>
+		<div class="actions">
+			<button class="primary" onclick={onNext}>Continue</button>
+		</div>
+	{:else}
+		<div class="actions">
+			<button class="primary" disabled={handleState !== 'available' || saving} onclick={claim}>
+				{saving ? 'Saving…' : typed && handleState === 'available' ? `Save @${typed}` : 'Save handle'}
+			</button>
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -122,6 +146,12 @@
 	.handle-hint { font-size: 0.76rem; margin: 0.5rem 0 0; color: var(--color-text-tertiary); }
 	.handle-hint.ok { color: var(--color-accent-aurum, #e5b84c); }
 	.handle-hint.bad { color: var(--color-coral, #e5736b); }
+	.pending-note {
+		font-size: 0.82rem; line-height: 1.5; color: var(--color-text-secondary);
+		margin: 0.9rem 0 0; padding: 0.7rem 0.85rem; border-radius: 9px;
+		background: var(--glass-input-bg, rgba(0, 0, 0, 0.2));
+		border: 1px solid var(--glass-input-border, rgba(255, 255, 255, 0.14));
+	}
 	.actions { margin-top: 1.6rem; }
 	.primary {
 		display: inline-flex; align-items: center; gap: 0.5rem;

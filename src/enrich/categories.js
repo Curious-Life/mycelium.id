@@ -4,7 +4,7 @@
 // the injection site (the drainer wires it to the on-box model with format:'json'), so this
 // module stays unit-testable with a stub. Foundations-first: this LLM pass is the labeler and
 // the ground truth the Phase-3a centroid-compass is later validated against.
-import { buildCategoryPrompt, parseCategoryResponse } from './categories-prompt.js';
+import { buildCategoryPrompt, parseCategoryResponse, buildCategoryBatchPrompt, parseCategoryBatchResponse } from './categories-prompt.js';
 import { labelingRecommendedModel } from '../inference/role-models.js';
 
 // Default on-box model for L1 labeling. qwen3.5:4b beat llama3.1 decisively in a live
@@ -35,6 +35,34 @@ export function createCategoryClassifier({ infer, model } = {}) {
     return parseCategoryResponse(raw);                     // parse never throws (null = unclassified)
   }
   classify.model = model;                                  // provenance label; undefined → not recorded
+  /**
+   * D-132 (U-C) — K messages in ONE model call. Returns an array aligned with
+   * `contents`: labels for items the STRICT batch parser matched, null for the
+   * rest (the caller falls back to the single path for those — one bad reply
+   * costs a retry, never a wrong label). Output/context budgets scale with K
+   * via the second infer arg; a single-arg infer (tests, older wirings) simply
+   * ignores it and relies on its own caps — truncation then falls out as an
+   * unparseable array → all-null → full single-path fallback. Throw = outage,
+   * propagated like classify()'s.
+   * ACCEPTED RESIDUAL (round-1 review): on a model whose real context window
+   * binds BELOW the computed need (the wiring clamps to the catalog ctx), every
+   * pass burns one truncated batch call before falling back per-row — K is not
+   * auto-shrunk to fit. Bounded (one wasted call/pass), self-evident in the
+   * measured rate, and the revert lever (MYCELIUM_L1_BATCH=1) removes it.
+   * @param {string[]} contents
+   */
+  classify.batch = async function classifyBatch(contents) {
+    const items = (contents || []).map((content, idx) => ({ i: idx + 1, content }));
+    const prompt = buildCategoryBatchPrompt(items);
+    // ~3.2 chars/token heuristic + the scaled reply budget, rounded up to the
+    // 2048 grid, floor 2048 — the model catalog caps the real ceiling at the
+    // wiring site (drainer clamps to the catalog ctx; 8192 for the default).
+    const maxTokens = 48 * items.length + 16;
+    const numCtx = Math.max(2048, Math.ceil((prompt.length / 3.2 + maxTokens) / 2048) * 2048);
+    const raw = await infer(prompt, { maxTokens, numCtx });
+    const matched = parseCategoryBatchResponse(raw, items.map((x) => x.i));
+    return items.map((x) => matched.get(x.i) || null);
+  };
   return classify;
 }
 

@@ -80,7 +80,14 @@ export function portalChannelsRouter({ db, userId, channelSup }) {
         }
       }
       if (discord && typeof discord === 'object') {
-        if (discord.token) await setS('DISCORD_BOT_TOKEN', String(discord.token));
+        // D-129: the token clears on empty like every other field (the route's own
+        // contract: "Empty string clears a field"). Without this branch, the supervisor's
+        // blocked-config health line told the user to "remove the Discord token" — an
+        // action this screen could not perform (independent review, 2026-08-03).
+        if (discord.token !== undefined) {
+          const v = String(discord.token).trim();
+          if (v) await setS('DISCORD_BOT_TOKEN', v); else await delS('DISCORD_BOT_TOKEN');
+        }
         if (discord.ownerId !== undefined) {
           const v = String(discord.ownerId).trim();
           if (v) await setS('OWNER_DISCORD_ID', v); else await delS('OWNER_DISCORD_ID');

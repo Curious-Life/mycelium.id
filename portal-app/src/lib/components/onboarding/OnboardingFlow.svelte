@@ -61,12 +61,22 @@
 	// permanent fixture. Existing users (generated already true at mount) never see it.
 	let probedOllama = $state(false);
 
-	// Decide synchronously from a localStorage hint so the opaque wizard backdrop is
-	// painted on the FIRST frame (no flash of the app behind it). The async readiness
-	// check below corrects this for the rare edge cases. Returning users (hint set)
-	// never see a flicker. (Key name kept stable — it is the same "welcome seen" fact.)
+	// ── D-123: THE WIZARD NEVER OPENS OVER AN UNKNOWN VAULT ──
+	// This used to open optimistically whenever the localStorage hint was ABSENT — so a
+	// restored, data-rich vault on a fresh origin (new vite port, cleared storage) got the
+	// FIRST-RUN wizard whenever the readiness fetch was slow or failed, on every load
+	// (operator, 67k-message vault, 2026-07-30). First-run UI over a full vault reads as
+	// data loss. The gate is now fail-OPEN to the existing vault: the wizard opens only
+	// when the SERVER has answered "genuinely fresh" (or the recovery-key gate demands
+	// it); an absent hint plus an unanswered/failed fetch keeps it CLOSED, and the poll
+	// below retries until an answer arrives. Cost: on a true first launch the backdrop
+	// paints one (fast, empty-vault) readiness round-trip late instead of on the first
+	// frame — the correct trade, because the old first-frame guess was exactly the
+	// mechanism that put first-run UI over the operator's restored vault.
+	// (Key name kept stable — it is the same "welcome seen" fact, used to KEEP CLOSED.)
 	const WELCOME_SEEN_KEY = 'myc-welcome-seen';
-	let wizardOpen = $state(browser ? !localStorage.getItem(WELCOME_SEEN_KEY) : false);
+	let wizardOpen = $state(false);
+	let statusKnown = false; // true once /portal/readiness has answered at least once
 	function markWelcomeSeen() {
 		welcomeSeen = true;
 		wizardOpen = false;
@@ -215,13 +225,24 @@
 		const r = await getJSON(`/portal/readiness?slices=${SLICES}`);
 
 		if (r) {
+			// ⚠️ D-123, second layer (independent security review, 2026-08-03): a 200 whose
+			// data slice DEGRADED server-side (readiness fail-degrades the count to
+			// { total: 0, unknown: true } under WAL/lock contention — this repo's most-
+			// documented failure class) is NOT an answer about freshness. Reading its
+			// fabricated total=0 as "empty vault" re-admits the exact defect: first-run over
+			// a populated vault whose count merely failed. `unknown` never decides the gate,
+			// never latches statusKnown, and the poll keeps retrying — the same "unknown is
+			// not false" rule the mindscape slice below has carried since §3.2a.
+			const degraded = r.data?.unknown === true;
+			const firstAnswer = !statusKnown && !degraded; // D-123: only a REAL first answer may open
+			if (!degraded) statusKnown = true;
 			dismissed = !!r.onboarding?.dismissed;
 			// ⚠️ EXACT, not approximate. The rail's welcomeSeen was `!status.showWelcome`, and
 			// showWelcome is `!seen && total === 0` (portal-compat.js:1159) ⇒ welcomeSeen is
 			// `welcome_shown_at || total > 0`. readiness.onboarding.welcomeSeen is ONLY
 			// `Boolean(welcome_shown_at)` — swapping it naively RESURFACES the welcome backdrop on
 			// a populated vault whose welcome was never stamped. Reconstruct the real predicate.
-			welcomeSeen = !!r.onboarding?.welcomeSeen || Number(r.data?.total ?? 0) > 0;
+			welcomeSeen = !!r.onboarding?.welcomeSeen || (!degraded && Number(r.data?.total ?? 0) > 0);
 			// ── Recovery-key gate (U1.3), EXPLICIT-false only ────────────────────────────
 			// Gate iff the flag is EXPLICITLY `pending` (a U1.3 fresh vault, false) AND the
 			// vault is empty. Two guards, each sufficient to EXCLUDE a false gate:
@@ -248,6 +269,12 @@
 			// recovery-key gate WINS: an un-backed-up fresh vault stays open regardless.
 			if (recoveryGatePending) wizardOpen = true;
 			else if (welcomeSeen || dismissed) wizardOpen = false;
+			// D-123: a genuinely fresh vault (server-confirmed: not seen, not dismissed, no
+			// recovery gate) opens the wizard HERE, on the first answer — never from a guess.
+			// The server is the one authority; the localStorage hint is not consulted for
+			// opening (it was the mechanism of the defect) and is kept only as a write-through
+			// of the same fact for any surface that still reads it.
+			else if (firstAnswer) wizardOpen = true;
 			messageCount = Number(r.data?.total ?? 0);
 			embedded = Number(r.data?.embedded ?? 0);
 			pending = Number(r.data?.pending ?? 0);
@@ -437,10 +464,12 @@
 	onMount(async () => {
 		if (!browser) return;
 		await refresh();
-		// Reconcile the optimistic (localStorage) decision with the server truth:
-		// open for a genuinely fresh, unseen, undismissed vault OR whenever the recovery
-		// key still isn't backed up (the unskippable Step-2 gate must not be escapable).
-		wizardOpen = recoveryGatePending || (!welcomeSeen && !dismissed);
+		// D-123: open only on a SERVER-CONFIRMED fresh vault (or the unskippable
+		// recovery-key gate). The old line here recomputed from `!welcomeSeen && !dismissed`
+		// — variables still at their FALSE DEFAULTS after a failed refresh — so any slow or
+		// failed readiness read re-opened first-run over an existing vault, overriding even
+		// the localStorage seen-hint. Unknown must never mean "fresh".
+		wizardOpen = recoveryGatePending || (statusKnown && !welcomeSeen && !dismissed);
 		if (welcomeSeen) { try { localStorage.setItem(WELCOME_SEEN_KEY, '1'); } catch { /* */ } }
 		// Light polling keeps the rail honest as embedding/generation progress.
 		pollTimer = setInterval(() => {
@@ -458,7 +487,11 @@
 			// on the flag") — third instance (independent review HIGH-3, 2026-07-16).
 			// ⇒ Poll on what does NOT move: onboarding is live and not dismissed. One CACHED
 			// readiness call (§3.2b), so polling while hidden costs a cache read, not a scan.
-			if (!dismissed && welcomeSeen) refresh();
+			// D-123: ALSO poll while the status is still unknown — a fresh vault whose first
+			// readiness read failed must eventually get its wizard, and a populated vault
+			// whose read failed must eventually confirm it stays closed. Without this arm a
+			// failed first fetch froze the gate at its defaults forever.
+			if (!dismissed && (welcomeSeen || !statusKnown)) refresh();
 		}, 4000);
 	});
 

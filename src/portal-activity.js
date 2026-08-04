@@ -412,6 +412,10 @@ export async function enrichProjection(db, userId) {
     const waitingOnEmbed = Boolean(st?.categorizeWaitingOnEmbed);
     const waitingOnCompute = Boolean(st?.categorizeWaitingOnCompute); // D-001: governor holds the model slot
     const waiting = waitingOnEmbed || waitingOnCompute;
+    // D-132: the owner DEFERRED the L2 pass — a fourth vocabulary value, distinct from
+    // paused (a stop the reminder nudges to lift) and waiting (choice-free scheduling):
+    // deferred is a standing owner posture with its own Resume in the pipeline panel.
+    const deferred = Boolean(st?.enrichDeferred);
     // null ⇒ the owner has not approved an on-box enrich model (taskModels.enrich). NOTHING runs —
     // it is a legitimate steady state (§3.5), a CHOICE, not a fault (same rule as categorize).
     const model = await defaultEnrichModel(db, userId);
@@ -421,23 +425,24 @@ export async function enrichProjection(db, userId) {
       kind: 'enrich',
       stage: noModel ? `${KIND_LABELS.enrich} · no local model`
         : paused ? `${KIND_LABELS.enrich} · paused`
-          : waitingOnEmbed ? `${KIND_LABELS.enrich} · waiting for embedding`
-            : waitingOnCompute ? `${KIND_LABELS.enrich} · waiting for compute`
-              : KIND_LABELS.enrich,
+          : deferred ? `${KIND_LABELS.enrich} · deferred`
+            : waitingOnEmbed ? `${KIND_LABELS.enrich} · waiting for embedding`
+              : waitingOnCompute ? `${KIND_LABELS.enrich} · waiting for compute`
+                : KIND_LABELS.enrich,
       model: model || null,                              // the APPROVED on-box enrich model, or none
       // nothing is on-device if nothing runs: no model, OR the loop is deferred (behind embedding
       // OR behind the compute governor's model slot).
-      process: (noModel || waiting) ? null : PROCESS_LABELS.enrich,
+      process: (noModel || waiting || deferred) ? null : PROCESS_LABELS.enrich,
       done,
       total,
       remaining: pending,
       // A real L2 estimate from the drainer's measured throughput (8/min ⇒ ~153h for a 76k import).
       // WITHDRAWN (paused || waiting); also null on no model / nothing enriched yet / no work
       // / a stalled model.
-      etaSeconds: enrichEta(st, pending, paused || waiting, noModel),
+      etaSeconds: enrichEta(st, pending, paused || waiting || deferred, noModel),
       // `paused` = stopped OR no model approved; `waiting` = deferred (behind embedding or the
       // compute governor); never 'running' while the loop is idle. Same shape as categorize.
-      status: (paused || noModel) ? 'paused' : waiting ? 'waiting' : 'running',
+      status: (paused || noModel) ? 'paused' : deferred ? 'deferred' : waiting ? 'waiting' : 'running',
       startedAt: null,
       finishedAt: null,
     };

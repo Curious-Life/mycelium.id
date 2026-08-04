@@ -817,6 +817,69 @@ await t('X2. ⭐ the rail APPEARS in the session you generate — the poll must 
     + 'OnboardingFlow is in the persistent layout, so navigation cannot rescue it.');
 });
 
+// MUTATION-TESTED: (D-123, 2026-08-03) OnboardingFlow's mount decision reverted to the
+// pre-fix `recoveryGatePending || (!welcomeSeen && !dismissed)` → the FAIL_READINESS probe
+// reports {wizardAtMount:true, wizardAfterPoll:true} → X4 REDs on both closed-assertions.
+// Separately, the poll arm reverted to `!dismissed && welcomeSeen` → {readsAfterPoll:1} →
+// X4's retry assertion REDs. Both restored → X4/X4b GREEN with the full rail matrix intact.
+// MUTATION-TESTED: (D-123 layer 2, 2026-08-03, post-review) the degraded-answer guard
+// removed (`const degraded = false`) → the DATA_UNKNOWN probe reports
+// {wizardAtMount:true, wizardAfterPoll:true, readsAfterPoll:1} → X4c REDs on all three
+// assertions — the exact security-review F1 scenario (first-run over a populated vault
+// whose count degraded server-side). Restored → {false,false,2} GREEN.
+await t('X4. ⭐ D-123: a FAILED readiness read never opens first-run over an unknown vault', () => {
+  // THE BUG (operator, 67k-message restored vault, 2026-07-30): the wizard-open decision
+  // defaulted to "show" and a slow/failed readiness read skipped the only code that could
+  // correct it — so every load of a data-rich vault re-showed the FIRST-RUN wizard, which
+  // reads as data loss. The gate must fail OPEN to the existing vault: unknown ⇒ app,
+  // never ⇒ first-run. Driven with the api-stub REFUSING /portal/readiness.
+  const out = execFileSync('node', ['--conditions', 'browser', 'test/mount-onboarding-flow.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000,
+    env: { ...process.env, FAIL_READINESS: '1' },
+  }).trim().split('\n').pop();
+  const r = JSON.parse(out);
+  assert.ok(r.ok, `mount failed: ${r.error || 'unknown'}`);
+  assert.equal(r.wizardAtMount, false,
+    'readiness failed ⇒ the wizard must NOT open at mount — an unknown vault is not a fresh one (M-005: '
+    + 'the component would be concluding "fresh" from a fact it failed to observe)');
+  assert.equal(r.wizardAfterPoll, false, 'and it must STAY closed while the status remains unknown');
+  assert.ok(r.readsAfterPoll > 1,
+    `the poll must keep RETRYING while unknown (${r.readsAfterPoll} read) — otherwise a genuinely fresh `
+    + 'vault whose first fetch failed never gets its wizard at all');
+});
+
+await t('X4c. ⭐ D-123 layer 2: a DEGRADED 200 (data.unknown) never opens first-run either', () => {
+  // Independent security review (2026-08-03): the readiness data slice fail-degrades to
+  // { total: 0, unknown: true } INSIDE a 200 under WAL/lock contention — exactly the load
+  // shape of a populated vault mid-restore. Reading its fabricated total=0 as "empty
+  // vault" re-admits D-123 through the front door. A degraded answer must not open the
+  // wizard, must not latch statusKnown, and the poll must keep retrying.
+  const out = execFileSync('node', ['--conditions', 'browser', 'test/mount-onboarding-flow.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000,
+    env: { ...process.env, DATA_UNKNOWN: '1', WELCOME_STAMPED: '0' },
+  }).trim().split('\n').pop();
+  const r = JSON.parse(out);
+  assert.ok(r.ok, `mount failed: ${r.error || 'unknown'}`);
+  assert.equal(r.wizardAtMount, false, 'a degraded count is NOT an empty vault — the wizard must not open');
+  assert.equal(r.wizardAfterPoll, false, 'and it stays closed while the answer stays degraded');
+  assert.ok(r.readsAfterPoll > 1, `the poll must keep retrying a degraded answer (${r.readsAfterPoll} read)`);
+});
+
+await t('X4b (control): a SERVER-CONFIRMED fresh vault still gets the wizard; a populated one never does', () => {
+  // Proves X4 is non-vacuous in both directions: the closed-when-unknown behaviour is a
+  // gate, not a wizard that simply never renders in this harness.
+  const drive = (env) => JSON.parse(execFileSync('node', ['--conditions', 'browser', 'test/mount-onboarding-flow.mjs'], {
+    cwd: 'portal-app', encoding: 'utf8', timeout: 120000, env: { ...process.env, ...env },
+  }).trim().split('\n').pop());
+  const fresh = drive({ WELCOME_STAMPED: '0', TOTAL: '0' });
+  assert.ok(fresh.ok, `mount failed: ${fresh.error || 'unknown'}`);
+  assert.equal(fresh.wizardRendered, true, 'server-confirmed fresh (unstamped, empty) ⇒ the wizard opens');
+  const populated = drive({ WELCOME_STAMPED: '0', TOTAL: '9000' });
+  assert.equal(populated.wizardRendered, false,
+    'a populated vault (welcomeSeen via the `|| total > 0` arm) must never see first-run — the exact '
+    + 'operator symptom, now with the fetch SUCCEEDING');
+});
+
 await t('X3. ⭐ the mindscape slice SAYS when it could not count — like every sibling', async () => {
   // ⚠️ MY FIRST X3 TESTED NOTHING TWICE OVER. It drove a STUB that fabricated `unknown:true`, so
   // it never exercised readiness.js's catch — mutating that catch left it green. And it asserted

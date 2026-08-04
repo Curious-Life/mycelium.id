@@ -13,6 +13,7 @@
 //    (import mlx_audio fails), so this supervisor stays idle by design — the
 //    accepted cost of removing Kokoro (design §6).
 import { spawn } from 'node:child_process';
+import { registerCrashKillChild } from '../system/crash-reaper.js';
 import { qwenPaths, getModelState, resolveQwenPython, startDownload } from './qwen3-tts-model.js';
 import { looksLikePortConflict, reapOwnOrphanOnPort, createRestartGovernor } from '../system/service-guard.js';
 
@@ -328,6 +329,7 @@ export function startQwenTtsSupervisor({ home = process.cwd(), shouldRun = () =>
     setHealth({ status: 'starting', message: failures ? 'Restarting local voice…' : 'Starting local voice…' });
     try {
       child = spawnImpl(python, [SERVICE_SCRIPT, '--serve', '--port', String(PORT)], { cwd: home, env: env(), stdio: ['ignore', 'ignore', 'pipe'] });
+      registerCrashKillChild(child, 'qwen3-tts-service'); // D-136: the crash path must reap what stop() would
       spawnedByUs = true;
     } catch (e) {
       // §1: a spawn error can carry the interpreter PATH (which names the user) —

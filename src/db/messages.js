@@ -106,6 +106,10 @@ function _envAllowedScopes() {
 export function createMessagesNamespace(deps) {
   if (!deps) throw new TypeError('createMessagesNamespace: deps required');
   const { d1Query, d1Batch, firstRow } = deps;
+  // `now` injectable for the backlog-cache gates; the default reads the GLOBAL
+  // Date.now at call time (not a captured reference) so clock-mocking gates
+  // (verify-enrich-backlog-parity) keep working.
+  const now = deps.now || (() => Date.now());
   if (typeof d1Query !== 'function')      throw new TypeError('createMessagesNamespace: d1Query required');
   if (typeof d1Batch !== 'function')      throw new TypeError('createMessagesNamespace: d1Batch required');
   if (typeof firstRow !== 'function')     throw new TypeError('createMessagesNamespace: firstRow required');
@@ -125,8 +129,26 @@ export function createMessagesNamespace(deps) {
   // Cache the last result + revalidate in the background under a single-flight latch
   // so at most ONE scan runs per window and no caller ever queues behind another.
   // Per-process (one server-rest owns the pollers); keyed by userId defensively.
-  let _backlog = null;          // { userId, value:{embedded,total,pending,unprocessable}, at:ms }
+  let _backlog = null;          // { userId, value:{embedded,total,pending,unprocessable}, at:ms, gen }
   let _backlogInFlight = null;  // Promise while a recompute runs (single-flight)
+  // D-132 fast-half — the WRITE-GENERATION gate over all three polled backlog caches.
+  // The SWR caches above bound the scan rate, but a TTL alone still RE-RUNS the
+  // multi-second SQLCipher full-table decrypt on every expiry even when NOTHING has
+  // written — the operator's idle 67k-message vault burned a core in bursts forever,
+  // just from the activity feed polling @2.5s. The backlog numbers are pure functions
+  // of the messages table, so a poll on a write-quiescent vault can serve the last
+  // scan's value indefinitely: every write path bumps `_backlogGen` (every mutating
+  // method in this namespace, uniformly — plus the out-of-namespace raw writers:
+  // drainer reclaim/self-heal and full-export-import's vector pass / restore, via
+  // noteBacklogWrite()). A poll only rescans when the generation moved (TTL pacing
+  // unchanged) or when the RECONCILE FLOOR expires — drift insurance for a writer
+  // this net misses (e.g. a future dynamic-SQL restore path): a missed bump can make
+  // the numbers at most 15 min stale, never forever-wrong (the QA P1-C staleness
+  // class). The scan stores the generation captured at its START, so a write racing
+  // a scan invalidates the result conservatively.
+  let _backlogGen = 0;
+  const bumpBacklogGen = () => { _backlogGen += 1; };
+  const BACKLOG_RECONCILE_FLOOR_MS = 15 * 60 * 1000;
   // `pending` is COUNTED, never projected. It mirrors selectPendingEnrichment's
   // predicate EXACTLY (nlp_processed 0/NULL + content-bearing) so it counts the work
   // the drainer will actually pick up — and therefore REACHES 0.
@@ -330,7 +352,39 @@ export function createMessagesNamespace(deps) {
     return { done, total, pending };
   }
 
-  return {
+  // D-132 — the write methods that invalidate the backlog caches. The bump
+  // happens AFTER the write completes (finally-wrapped at the API boundary
+  // below), never before it: a bump-before lets a scan that starts inside the
+  // write's await window capture the NEW generation while reading PRE-write
+  // data, and the caches then quiesce on stale numbers for up to the reconcile
+  // floor (round-1 review, MED). Bump-after's only cost is a possible extra
+  // rescan when a scan races a commit — conservative in the safe direction.
+  // finally = bumps even on a failed write (also conservative). The list is
+  // pinned by verify:backlog-quiescence Q7.
+  const BACKLOG_WRITE_METHODS = ['insert', 'updateMetadata', 'updateEnrichment', 'markForReembed',
+    'resetEnrichmentGiveUps', 'updateNlp', 'updateCategories', 'restampLegacyCategories',
+    'redact', 'deleteIds', 'setSalience', 'insertIgnore', 'updateContent',
+    'backfillContentHash', 'adoptOrphanChatHistory'];
+  const withBacklogBump = (fn) => async function bumped(...a) {
+    try { return await fn.apply(this, a); } finally { bumpBacklogGen(); }
+  };
+  const wrapBacklogWriters = (api) => {
+    for (const m of BACKLOG_WRITE_METHODS) {
+      if (typeof api[m] !== 'function') throw new TypeError(`backlog-bump wiring: messages.${m} missing`);
+      api[m] = withBacklogBump(api[m]);
+    }
+    return api;
+  };
+
+  return wrapBacklogWriters({
+    /**
+     * D-132 — out-of-namespace raw writers to `messages` (drainer reclaim /
+     * self-heal, full-export-import's vector pass + restore) MUST call this
+     * after their write so the polled backlog caches revalidate. In-namespace
+     * methods bump automatically.
+     */
+    noteBacklogWrite() { bumpBacklogGen(); },
+
     async insert(rows) {
       const arr = Array.isArray(rows) ? rows : [rows];
       assertSafeColumns(Object.keys(arr[0] || {}), 'messages');
@@ -640,10 +694,20 @@ export function createMessagesNamespace(deps) {
       const ttlMs = cached && cached.value.pending > 0 ? 8000
         : cached && cached.value.total === 0 ? 8000
           : 60000;
-      if (cached && (Date.now() - cached.at) < ttlMs) return cached.value;
+      const t = now();
+      if (cached && (t - cached.at) < ttlMs) return cached.value;
+      // D-132: write-quiescent → the numbers cannot have moved; serve without
+      // rescanning (up to the reconcile floor — see _backlogGen above).
+      // ⚠️ NEVER for a total:0 snapshot: that is the TRANSIENT pre-import state
+      // (QA P1-C), and import writers can be dynamic-SQL the generation net does
+      // not see — while an empty-table scan is cheap (the multi-second decrypt
+      // cost only exists once total > 0). Quiescence is a big-vault optimization;
+      // total:0 keeps the short-TTL revalidation unconditionally.
+      if (cached && cached.value.total > 0 && cached.gen === _backlogGen && (t - cached.at) < BACKLOG_RECONCILE_FLOOR_MS) return cached.value;
       if (!_backlogInFlight) {
+        const genAtStart = _backlogGen;
         _backlogInFlight = _computeEmbedBacklog(userId)
-          .then((v) => { _backlog = { userId, value: v, at: Date.now() }; return v; })
+          .then((v) => { _backlog = { userId, value: v, at: now(), gen: genAtStart }; return v; })
           .finally(() => { _backlogInFlight = null; });
       }
       if (cached) return cached.value;   // serve stale instantly — never block a poll
@@ -665,10 +729,13 @@ export function createMessagesNamespace(deps) {
     async categoriesBacklogCached(userId) {
       const cached = _catBacklog && _catBacklog.userId === userId ? _catBacklog : null;
       const ttlMs = cached && cached.value.pending > 0 ? 8000 : 60000;
-      if (cached && (Date.now() - cached.at) < ttlMs) return cached.value;
+      const t = now();
+      if (cached && (t - cached.at) < ttlMs) return cached.value;
+      if (cached && cached.value.total > 0 && cached.gen === _backlogGen && (t - cached.at) < BACKLOG_RECONCILE_FLOOR_MS) return cached.value; // D-132: write-quiescent (never for transient total:0 — P1-C)
       if (!_catBacklogInFlight) {
+        const genAtStart = _backlogGen;
         _catBacklogInFlight = _computeCategoriesBacklog(userId)
-          .then((v) => { _catBacklog = { userId, value: v, at: Date.now() }; return v; })
+          .then((v) => { _catBacklog = { userId, value: v, at: now(), gen: genAtStart }; return v; })
           .finally(() => { _catBacklogInFlight = null; });
       }
       if (cached) return cached.value;
@@ -687,10 +754,13 @@ export function createMessagesNamespace(deps) {
     async nlpBacklogCached(userId) {
       const cached = _nlpBacklog && _nlpBacklog.userId === userId ? _nlpBacklog : null;
       const ttlMs = cached && cached.value.pending > 0 ? 8000 : 60000;
-      if (cached && (Date.now() - cached.at) < ttlMs) return cached.value;
+      const t = now();
+      if (cached && (t - cached.at) < ttlMs) return cached.value;
+      if (cached && cached.value.total > 0 && cached.gen === _backlogGen && (t - cached.at) < BACKLOG_RECONCILE_FLOOR_MS) return cached.value; // D-132: write-quiescent (never for transient total:0 — P1-C)
       if (!_nlpBacklogInFlight) {
+        const genAtStart = _backlogGen;
         _nlpBacklogInFlight = _computeNlpBacklog(userId)
-          .then((v) => { _nlpBacklog = { userId, value: v, at: Date.now() }; return v; })
+          .then((v) => { _nlpBacklog = { userId, value: v, at: now(), gen: genAtStart }; return v; })
           .finally(() => { _nlpBacklogInFlight = null; });
       }
       if (cached) return cached.value;
@@ -1591,5 +1661,5 @@ export function createMessagesNamespace(deps) {
         .map((row) => ({ ...row, similarity: scoreMap.get(row.id) || 0 }))
         .sort((a, b) => b.similarity - a.similarity);
     },
-  };
+  });
 }

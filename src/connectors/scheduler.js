@@ -13,6 +13,7 @@ import { captureMessage } from '../ingest/capture.js';
 import { getAdapter, listAdapters } from './registry.js';
 import { createConnectorStore } from './store.js';
 import { createPkce, createState, buildAuthUrl, exchangeCode } from './oauth.js';
+import { isImportQuiesced } from '../db/import-quiesce.js';
 
 const MAX_ITEMS_PER_SYNC = 500;
 const MAX_RECENT_RUNS = 10;   // per-connector run log kept in :state (audit-lite)
@@ -277,6 +278,10 @@ export function startConnectorScheduler({ runner, intervalMs = 5 * 60 * 1000 }) 
 
   async function cycle() {
     if (stopped) return;
+    // D-128: a bulk import owns the vault — connector pulls write up to 500 items/sync
+    // through captureMessage on the shared connection (with FKs OFF for the import's
+    // whole window). Stand down for the cycle; the next tick after release syncs.
+    if (isImportQuiesced()) return;
     try {
       const ids = await runner.store.listIds();
       for (const id of ids) {

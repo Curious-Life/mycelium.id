@@ -11,6 +11,8 @@
 // the canonical portal route.
 
 import { spawn } from 'node:child_process';
+import { runArmedVaultCopy } from './db/vault-copy.js';
+import { registerCrashKillChild } from './system/crash-reaper.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -312,6 +314,7 @@ export function startClusteringJob({ dbPath, userId, db, measureOnly = false } =
         env: childEnv,                       // allowlist only — no ambient secrets
         stdio: ['ignore', 'pipe', 'pipe'], // stdout parsed for progress; stderr captured (bounded)
       });
+      registerCrashKillChild(child, 'pipeline-job'); // D-136: the crash path must reap what cancelJob would
       state.child = child; // expose for cancelJob (never surfaced via getJob)
       genAdm.bindChild(child);              // governor releases on close/error (first wins) — crash-release #2
 
@@ -526,7 +529,15 @@ export function startBackfillJob({ db, dbPath, columns } = {}) {
       //    the live writer. @see the vault-concurrency-fix design.
       state.stageLabel = 'backup';
       backupPath = `${path0}.pre-backfill-${startedAt}`;
-      safeVaultCopy(rawDb, backupPath);
+      // D-130: prefer the OFF-LOOP copy child (boot arms it with the db-file
+      // key) so a multi-GB backup does not stall the event loop; an un-armed
+      // process (tests, non-canonical vaults) falls back to the previous sync
+      // path — the backup guarantee itself is unchanged and still precedes any
+      // column rewrite.
+      {
+        const r = await runArmedVaultCopy({ destPath: backupPath, expectSrc: path0 });
+        if (!r.ok) safeVaultCopy(rawDb, backupPath);
+      }
       state.step = 1;
 
       // 2. Per-column backfill on the keyed handle (the engine yields + suspends WAL).
@@ -683,6 +694,7 @@ export function startClaimDiscoveryJob({ dbPath, userId, cadence } = {}) {
     adm.release();
     return { pid: null };
   }
+  registerCrashKillChild(child, 'claim-discovery'); // D-136
   adm.bindChild(child);          // governor releases on close/error — crash-release #2
   let err = '';
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
@@ -775,6 +787,7 @@ export function startChronicleNarrationJob({ dbPath, userId, territoryId = null 
     return { pid: null };
   }
   chronicleChildRunning = true;
+  registerCrashKillChild(child, 'describe-chronicles'); // D-136
   adm.bindChild(child);          // governor releases on close/error (first wins) — crash-release #2
   let err = '';
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
@@ -861,6 +874,7 @@ export function startClusterNamingJob({ dbPath, userId } = {}) {
     return { pid: null };
   }
   namingChildRunning = true;
+  registerCrashKillChild(child, 'describe-clusters'); // D-136
   adm.bindChild(child);
   let err = '';
   child.stderr.on('data', (d) => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });

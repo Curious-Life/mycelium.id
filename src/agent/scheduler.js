@@ -25,6 +25,7 @@ import { createLane } from './lane.js';
 import { computeNextRun, parseSchedule } from './scheduler-time.js';
 import { classifyProviderError } from './provider-errors.js';
 import { runAgentTurn } from './run-turn.js';
+import { isImportQuiesced } from '../db/import-quiesce.js';
 import { isWriteTrustedProvenance } from './autonomy-tools.js';
 import { cycleTurnOpts, cycleByName } from './cycle-prompts.js';
 import { finalizeCycleOutput, cycleDeliveryId } from './cycle-output.js';
@@ -326,6 +327,9 @@ export function createScheduler({ db, userId, tools = [], handlers = {}, deliver
 
   async function tick() {
     if (stopped) return;
+    // D-128: while a bulk import owns the vault, scheduled turns (which write freely)
+    // stand down for the tick. Tasks stay due; the next tick after release fires them.
+    if (isImportQuiesced()) return;
     let due = [];
     try { due = await db.harness.dueTasks(new Date().toISOString()); }
     catch (e) { logger(`scheduler: tick query failed (${errCode(e)})`); return; }

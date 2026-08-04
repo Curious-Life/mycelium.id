@@ -25,6 +25,23 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+// MUTATION-TESTED: (round-1 gate review H10, 2026-08-04) the drainer's L2 defer
+// skip deleted (entry gate + mid-run break — the feed would say "deferred"
+// while L2 burns, the QA9 HIGH-6 status-lies class) → L2-DEFER-behavior RED.
+// ⚠️ TWO HARNESS HOLES FOUND BY WATCHING THIS MUTATION: run 1 stayed GREEN
+// because the 1200-row backlog was exhausted (zero movement proved nothing —
+// fixed with the non-vacuity re-arm); run 2 stayed GREEN because the check
+// sampled l2Total after the first L1 pass but BEFORE the cycle's L2 block
+// (fixed by waiting for running===false). Run 3 RED. Restored → GO.
+// MUTATION-TESTED: (round-1 gate review H8, 2026-08-04) restorePauseOnce made
+// to read a misspelled key (enrichL2Defered) — a restart would silently
+// un-defer and resume the ~153 h pass against the owner's standing choice →
+// L2-DEFER-restore RED. Restored → GO.
+// MUTATION-TESTED: (D-132, 2026-08-04) enrichProjection's `deferred` arm removed
+// (status falls through to 'running' while the drainer skips the L2 block — the
+// frozen plausible-wrong countdown class) → L2-DEFER and L2-DEFER-wire RED
+// (status 'running', a non-null ETA) while L2-DEFER-resume and every other
+// check stay GREEN. Restored → GO.
 import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
@@ -32,7 +49,7 @@ process.env.ENCRYPTION_MASTER_KEY ||= crypto.randomBytes(32).toString('hex');
 
 const { categorizeEta, enrichEta, categorizeProjection, enrichProjection, portalActivityRouter } =
   await import('../src/portal-activity.js');
-const { startEnrichDrainer, resumeEnrichProcessing, pauseEnrichProcessing } =
+const { startEnrichDrainer, resumeEnrichProcessing, pauseEnrichProcessing, deferEnrich, resumeEnrich, isEnrichDeferred } =
   await import('../src/enrich/drainer.js');
 const { createMessagesNamespace } = await import('../src/db/messages.js');
 
@@ -178,7 +195,7 @@ let wiredRow = { cat: null, enr: null, active: null };
   // interval is huge so cycle 2 never starts — so 1200 of each leaves ~1000/~800 pending and the
   // rows keep rendering. (Sized like embed-eta's E4, which read its ceiling from source; do not
   // guess it.)
-  const { db, pendCat, pendNlp } = makeVault({
+  const { db, pendCat, pendNlp, rows: vaultRows } = makeVault({
     l1Ids: Array.from({ length: 1200 }, (_, i) => `c${i}`),
     l2Ids: Array.from({ length: 1200 }, (_, i) => `n${i}`),
   });
@@ -220,7 +237,86 @@ let wiredRow = { cat: null, enr: null, active: null };
   rec('AGG-wire. the /activity feed aggregates the L2 (enrich) row alongside L1 (categorize)',
     r.status === 200 && kinds.includes('categorize') && kinds.includes('enrich'),
     `active kinds = [${kinds.join(', ')}] (must include both categorize AND enrich)`);
+
+  // ── L2-DEFER (D-132): the OWNER-deferred L2 renders 'deferred' — a fourth value,
+  // distinct from paused (a stop the reminder nudges) and waiting (scheduling) — with
+  // no ETA and no "on-device", on the REAL projection AND the REAL feed route.
+  deferEnrich();
+  const defRow = await enrichProjection(db, 'u');
+  rec('L2-DEFER. owner-deferred ⇒ status deferred · eta null · process null · stage says so',
+    defRow !== null && defRow.status === 'deferred' && defRow.etaSeconds === null
+      && defRow.process === null && / deferred$/.test(defRow.stage) && defRow.model === MODEL,
+    `row=${JSON.stringify(defRow)}`);
+  const rDef = await call('/activity');
+  const defFeed = (rDef.body?.active || []).find((x) => x.kind === 'enrich');
+  rec('L2-DEFER-wire. the feed carries the deferred row (visible, honest — never dropped)',
+    rDef.status === 200 && !!defFeed && defFeed.status === 'deferred' && defFeed.etaSeconds === null,
+    `feed row=${JSON.stringify(defFeed)}`);
+  resumeEnrich();
+  const backRow = await enrichProjection(db, 'u');
+  rec('L2-DEFER-resume. resume ⇒ the row leaves deferred (back to running/waiting)',
+    backRow !== null && backRow.status !== 'deferred',
+    `row status=${backRow?.status}`);
+
+  // L2-DEFER-behavior (round-1 gate review H10): the label was proven above; now
+  // the BEHAVIOR — under defer, a full drainer cycle advances L1 but writes ZERO
+  // L2 rows (with the skip deleted, the feed would say "deferred" while L2 burns —
+  // the QA9 HIGH-6 status-lies class).
+  {
+    // Let the resume-kicked cycle SETTLE first: defer is honored between passes
+    // (one ≤50-row pass is deliberately indivisible — the drainer's documented
+    // pause granularity), so deferring against an in-flight cycle lets exactly
+    // one pass finish and would fail this check for the wrong reason (it did,
+    // on this gate's first run: l2 100→150, one pass). With the drainer idle,
+    // the ENTRY gate skips the whole L2 block and zero movement is the bar.
+    for (;;) {
+      const before = d.status().l2Total || 0;
+      await new Promise((r) => setTimeout(r, 300));
+      if (!d.status().running && (d.status().l2Total || 0) === before) break;
+    }
+    // NON-VACUITY (this check's own first mutation run stayed GREEN because the
+    // 1200-row backlog was exhausted by then — zero movement proved nothing):
+    // re-arm fresh pending rows for BOTH stages so a leaked L2 pass would show.
+    for (let i = 0; i < 200; i++) {
+      vaultRows.set(`dz${i}`, { id: `dz${i}`, content: `row dz${i} about minds`, categories_processed: 2, nlp_processed: 2 });
+      vaultRows.set(`dc${i}`, { id: `dc${i}`, content: `row dc${i} about minds`, categories_processed: 0, nlp_processed: 3 });
+    }
+    rec('L2-DEFER-behavior-nonvacuous. pending L2 rows exist before the deferred cycle', pendNlp().length > 0, `pendNlp=${pendNlp().length}`);
+    deferEnrich();
+    const l2Before = d.status().l2Total || 0;
+    const l1Before = d.status().l1Total || 0;
+    d.nudge();
+    await waitFor(() => (d.status().l1Total || 0) > l1Before); // the cycle really ran (L1 moved)…
+    await waitFor(() => d.status().running === false);         // …and FINISHED — sampling l2Total
+    // mid-cycle (after L1, before the L2 block) let the skip-deleted mutation
+    // stay GREEN on this check's second run; the L2 block runs AFTER L1 in the
+    // cycle, so only a completed cycle proves zero L2 movement.
+    rec('L2-DEFER-behavior. a deferred cycle advances L1 but enriches ZERO L2 rows',
+      (d.status().l2Total || 0) === l2Before && (d.status().l1Total || 0) > l1Before,
+      `l2 ${l2Before}→${d.status().l2Total} · l1 ${l1Before}→${d.status().l1Total}`);
+    resumeEnrich();
+  }
   d.stop();
+
+  // L2-DEFER-restore (round-1 gate review H8): the persisted key survives a
+  // restart — a FRESH drainer whose settings carry enrichL2Deferred:true must
+  // come up deferred without any route call (the D13 silent-undo class on the
+  // restore half of the lifecycle).
+  {
+    resumeEnrich(); // prove the restore sets it, not a leftover from this gate
+    const { db: db2 } = makeVault({ l1Ids: ['r1'], l2Ids: ['r2'] });
+    db2.users = { getSettings: async () => ({ enrichL2Deferred: true }) };
+    const d2 = startEnrichDrainer({
+      db: db2, userId: 'u', intervalMs: 10_000_000, log: () => {},
+      classify: classifyOk, enrich: enrichOk, daemon: daemon(), ollama: ollama(),
+      embed: { async health() { return { status: 'ok', loaded: true, dim: 768 }; }, async embed() { return new Array(768).fill(0.01); } },
+    });
+    await waitFor(() => isEnrichDeferred());
+    rec('L2-DEFER-restore. a fresh drainer restores the persisted defer (survives restart)',
+      isEnrichDeferred() === true, `isEnrichDeferred=${isEnrichDeferred()}`);
+    d2.stop();
+    resumeEnrich();
+  }
 }
 
 // ─────────── DEFERRED: while embedding still drains, L1+L2 do NOT run — the rows must SAY SO ───────────

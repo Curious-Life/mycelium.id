@@ -8,7 +8,7 @@ import express from 'express';
 import Busboy from 'busboy';
 import { existsSync } from 'node:fs';
 import { unlock } from '../crypto/keys.js';
-import { buildVaultArchive, restoreVaultArchive, ARCHIVE_EXT, BACKUP_SOFT_LIMIT_BYTES } from './backup.js';
+import { streamVaultArchive, restoreVaultArchive, ARCHIVE_EXT, BACKUP_SOFT_LIMIT_BYTES } from './backup.js';
 import { mindDir, voiceSamplesRoot } from '../paths.js';
 import {
   generateUserMaster, deriveSystemKey, normalizeKey,
@@ -41,8 +41,23 @@ function sanitizeErr(err) {
  * @param {string} [deps.uploadsRoot]  uploads dir (for backup/restore-backup)
  * @param {string} [deps.remoteConfigPath]  remote.json (optional, non-secret, in backup)
  */
-export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPath, lockFile, dbPath, uploadsRoot, remoteConfigPath }) {
+export function accountRouter({ isInitialized, completeBoot, getBootError, getBootPhase, kcvPath, lockFile, dbPath, uploadsRoot, remoteConfigPath }) {
   const router = express.Router();
+
+  // D-130 REVIEW BLOCKER (round 1) — the vault-MUTATING ceremonies must refuse
+  // while a boot is IN FLIGHT. Listen-before-boot made this surface reachable
+  // during a minutes-long boot (the awaited off-loop snapshot on a large
+  // restore); an overwrite-restore or a destroy racing an active migration is
+  // the concurrent-writer corruption class the init lock exists to prevent —
+  // and the portal's booting re-poll is client politeness, not a guarantee
+  // (§2 defense in depth: the SERVER refuses). 409 + booting so the client
+  // knows to wait; /status stays readable throughout.
+  const refuseWhileBooting = (req, res, next) => {
+    const phase = typeof getBootPhase === 'function' ? getBootPhase() : null;
+    if (phase) return res.status(409).json({ error: 'booting', bootPhase: phase, message: 'The vault is opening — try again when it finishes.' });
+    next();
+  };
+  for (const p of ['/setup', '/restore', '/restore-backup', '/unlock']) router.post(p, refuseWhileBooting);
   router.use(express.json({ limit: '64kb' }));
 
   // Defence in depth (these routes mint/return the master key): reject anything
@@ -77,6 +92,13 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
       // | boot_failed), so the UI shows the specific recovery instead of "not set up".
       // null when the vault is open or genuinely uncreated.
       bootError: (typeof getBootError === 'function' ? getBootError() : null) || null,
+      // D-130 — a boot is IN FLIGHT (e.g. the awaited off-loop vault copy on a
+      // large restore). The portal must show "opening" + re-poll, and MUST NOT
+      // route to /setup: open:false + booting:true over a populated vault is the
+      // D-080 create-over-a-real-vault hazard shape. bootPhase: 'snapshot' |
+      // 'migrating' | 'starting' (content-free).
+      booting: Boolean(typeof getBootPhase === 'function' ? getBootPhase() : null),
+      bootPhase: (typeof getBootPhase === 'function' ? getBootPhase() : null) || null,
       keychainAvailable: keychainAvailable(),
     });
   });
@@ -212,17 +234,36 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, kcvPa
     if (!isInitialized()) return res.status(409).json({ error: 'vault_not_open' });
     if (!dbPath || !vaultPresence({ dbPath, kcvPath }).any) return res.status(400).json({ error: 'no_vault' });
     try {
-      const { buffer, manifest } = await buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteConfigPath, mindRoot: mindDir(), voiceSamplesRoot: voiceSamplesRoot() });
-      if (buffer.length > BACKUP_SOFT_LIMIT_BYTES) {
-        console.warn(`[backup] large vault snapshot: ${buffer.length} bytes (> soft limit) — buffered in memory`);
-      }
+      // D-122: STREAMED, never buffered. The old buildVaultArchive path materialised the
+      // whole archive in memory and failed outright on the operator's ~3 GB vault (the one
+      // backup that mattered had to be hand-built with `zip -0`). streamVaultArchive keeps
+      // peak memory at one read chunk regardless of vault size. No Content-Length (chunked
+      // transfer); the manifest header still precedes the body because the manifest is
+      // computed from stats before the first byte streams.
       const stamp = new Date().toISOString().slice(0, 10);
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Disposition', `attachment; filename="mycelium-vault-${stamp}${ARCHIVE_EXT}"`);
-      res.setHeader('Content-Length', buffer.length);
-      res.setHeader('X-Vault-Manifest', JSON.stringify({ v: manifest.v, createdAt: manifest.createdAt, uploadCount: manifest.uploadCount }));
-      return res.end(buffer);
+      // ⚠️ LOAD-BEARING, not an optimization. The compression middleware's NO_COMPRESS
+      // path filter evaluates req.path at FIRST-WRITE time, when the router context has
+      // reduced it to '/backup' — so the anchored /api\/v1\/account/ pattern misses and
+      // gzip wraps this response. That wrapper does not forward write() callbacks, which
+      // deadlocks any callback-paced streamer (found live: the D-122 stream hung exactly
+      // there). no-transform is honored by compression independent of its path filter,
+      // and is also simply TRUE of this body: a ciphertext archive must never be
+      // transformed in flight.
+      res.setHeader('Cache-Control', 'no-transform');
+      await streamVaultArchive({
+        dbPath, kcvPath, uploadsRoot, remoteConfigPath, mindRoot: mindDir(), voiceSamplesRoot: voiceSamplesRoot(),
+        out: res,
+        // Fires before the first body byte, so the header still makes it out.
+        onManifest: (m) => res.setHeader('X-Vault-Manifest', JSON.stringify({ v: m.v, createdAt: m.createdAt, uploadCount: m.uploadCount })),
+      });
+      return; // streamVaultArchive's finalize() ended the response
     } catch (err) {
+      // D-077's lesson: a failure mid-stream must never complete a whole-looking body.
+      // If headers already went out, DESTROY the socket so the client sees a broken
+      // download instead of a silently short archive; otherwise answer a clean 500.
+      if (res.headersSent) { try { res.destroy(err instanceof Error ? err : new Error(String(err))); } catch { /* */ } return; }
       return res.status(500).json({ error: 'backup_failed', message: sanitizeErr(err) });
     }
   });

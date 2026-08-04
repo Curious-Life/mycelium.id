@@ -94,6 +94,7 @@ import { createPairRouters } from './portal-pair.js';
 import { createE2ERouter } from './portal-e2e.js';
 import { createPathThrottle } from './http/rate-limit.js';
 import { recordDurabilityEvent, isCorruptionError } from './db/durability-log.js';
+import { reapChildrenOnCrash } from './system/crash-reaper.js';
 import { isVaultHalted, vaultHaltState } from './db/vault-halt.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -570,6 +571,11 @@ export async function startRestServer({
   let dbHandle = null;
   let closeHandle = null;
   let booting = false;
+  // D-130 — the honest boot phase for /account/status while completeBoot runs
+  // ('snapshot' during the awaited off-loop vault copy, 'migrating' during
+  // schema apply, 'starting' otherwise). null when no boot is in flight.
+  let bootPhase = null;
+  const getBootPhase = () => (booting ? (bootPhase || 'starting') : null);
   // The live connector runner, hoisted OUT of completeBoot so the always-mounted
   // destroy route can reach it (factory reset must revoke each provider's OAuth
   // grant upstream — QA P0.9). null until the vault opens ⇒ nothing to revoke.
@@ -612,6 +618,7 @@ export async function startRestServer({
     try {
       const opts = { ...bootOpts, ...extraKeys };
       delete opts.reason;
+      opts.onPhase = (p) => { bootPhase = p; }; // D-130: surfaced via getBootPhase
       // Resolve keys up front so we NEVER create an empty vault when there are
       // none (resolveKeys throws KeySourceError → caller stays in setup mode).
       if (opts.userHex === undefined || opts.systemHex === undefined) {
@@ -946,61 +953,74 @@ export async function startRestServer({
       try { vaultReadiness?.warm(); } catch { /* boot must not depend on it */ }
     } finally {
       booting = false;
+      bootPhase = null;
     }
   }
 
-  // Tests/verify inject keys → the vault MUST open (rethrow on failure). A normal
-  // app launch reads keys from the source; if they're missing or the vault won't
-  // open, fall back to SETUP MODE so the UI can create or restore it.
-  const keysInjected = userHex !== undefined && systemHex !== undefined;
-  if (keysInjected) {
-    await completeBoot();
-  } else {
-    try {
+  // D-130 — LISTEN BEFORE BOOT. The boot below can legitimately take minutes
+  // (awaited off-loop vault copy on a large restore); binding the port first
+  // lets the shell's webview load and /account/status answer honestly
+  // (booting + phase) instead of connection-refused. Every data route 503s
+  // until vaultSubApp exists (the vault guard below), and startRestServer
+  // still RESOLVES only after boot settles — verify:rest-realboot's
+  // "resolves => open" contract is unchanged. On a rethrowing boot
+  // (injected keys) the listener is closed before the error propagates, so
+  // gates that assert a failed start leave no orphan server.
+  const runBootSequence = async () => {
+    // Tests/verify inject keys → the vault MUST open (rethrow on failure). A normal
+    // app launch reads keys from the source; if they're missing or the vault won't
+    // open, fall back to SETUP MODE so the UI can create or restore it.
+    const keysInjected = userHex !== undefined && systemHex !== undefined;
+    if (keysInjected) {
       await completeBoot();
-    } catch (err) {
-      // D-080 (P0, data loss). THE decision this defect was made of: "I cannot
-      // read this vault" is NOT "there is no vault here". The old test asked
-      // existsSync(kcv.json) — a SIDECAR — and a missing verifier fell through to
-      // "no vault yet — entering setup mode", which is the state from which a new,
-      // empty vault gets created over a real one. Ask the DATA (mycelium.db), and
-      // treat EITHER artifact as proof that a vault lives here.
-      const present = vaultPresence({ dbPath: effectiveDbPath, kcvPath: effectiveKcvPath });
-      if (present.any) {
-        bootError = classifyBootError(err);
-        // FAIL CLOSED (CLAUDE.md §3) → RECOVERY-ONLY MODE, not setup mode.
-        //
-        // The fix's first draft aborted the process here. That is wrong, and an
-        // existing gate proves it: verify:account B3-B7 boots against an existing
-        // vault with NO resolvable key and then pastes the correct recovery key to
-        // re-open it. Aborting deletes the only in-app way back into your own vault
-        // after a Keychain loss / new Mac / migrated account — which would push a
-        // user toward deleting the data dir, i.e. straight back to losing the vault.
-        //
-        // So the process stays up to serve exactly ONE thing — the recovery-key
-        // paste — with every creating path refused (this is what makes it safe, and
-        // each has its own gate check): /account/setup returns 409 vault_exists,
-        // unlock() will not mint a kcv.json for a key that cannot open an encrypted
-        // vault, /account/status reports needsSetup:false + needsRecoveryKey:true,
-        // and nothing has applied a schema or opened a writable handle. No vault is
-        // created, truncated or written over on this path.
-        // Record the failure BEFORE anything else. Until now the boot-failure path wrote
-        // only to stderr, so every vault that was dead on arrival left zero forensic
-        // trail: on the machine that motivated this change, neither
-        // durability-events.jsonl nor corruption-events.jsonl existed at all, despite the
-        // black box having shipped. A boot that cannot open the vault is exactly the
-        // event worth recording. Content-free (§1): a classification, never the message.
-        recordDurabilityEvent('vault-boot-failed', { reason: bootError, code: String(err?.code || '') || null });
-        console.error(unopenableVaultMessage({
-          dbPath: effectiveDbPath, kcvPath: effectiveKcvPath, reason: bootError,
-        }));
-        // The raw reason is operator-only (it can name key material).
-        console.error(`[mycelium] vault not opened (${bootError}): ${err?.message || err}`);
-      } else {
-        console.error(`[mycelium] no vault yet — entering setup mode (${err?.message || err})`);
+    } else {
+      try {
+        await completeBoot();
+      } catch (err) {
+        // D-080 (P0, data loss). THE decision this defect was made of: "I cannot
+        // read this vault" is NOT "there is no vault here". The old test asked
+        // existsSync(kcv.json) — a SIDECAR — and a missing verifier fell through to
+        // "no vault yet — entering setup mode", which is the state from which a new,
+        // empty vault gets created over a real one. Ask the DATA (mycelium.db), and
+        // treat EITHER artifact as proof that a vault lives here.
+        const present = vaultPresence({ dbPath: effectiveDbPath, kcvPath: effectiveKcvPath });
+        if (present.any) {
+          bootError = classifyBootError(err);
+          // FAIL CLOSED (CLAUDE.md §3) → RECOVERY-ONLY MODE, not setup mode.
+          //
+          // The fix's first draft aborted the process here. That is wrong, and an
+          // existing gate proves it: verify:account B3-B7 boots against an existing
+          // vault with NO resolvable key and then pastes the correct recovery key to
+          // re-open it. Aborting deletes the only in-app way back into your own vault
+          // after a Keychain loss / new Mac / migrated account — which would push a
+          // user toward deleting the data dir, i.e. straight back to losing the vault.
+          //
+          // So the process stays up to serve exactly ONE thing — the recovery-key
+          // paste — with every creating path refused (this is what makes it safe, and
+          // each has its own gate check): /account/setup returns 409 vault_exists,
+          // unlock() will not mint a kcv.json for a key that cannot open an encrypted
+          // vault, /account/status reports needsSetup:false + needsRecoveryKey:true,
+          // and nothing has applied a schema or opened a writable handle. No vault is
+          // created, truncated or written over on this path.
+          // Record the failure BEFORE anything else. Until now the boot-failure path wrote
+          // only to stderr, so every vault that was dead on arrival left zero forensic
+          // trail: on the machine that motivated this change, neither
+          // durability-events.jsonl nor corruption-events.jsonl existed at all, despite the
+          // black box having shipped. A boot that cannot open the vault is exactly the
+          // event worth recording. Content-free (§1): a classification, never the message.
+          recordDurabilityEvent('vault-boot-failed', { reason: bootError, code: String(err?.code || '') || null });
+          console.error(unopenableVaultMessage({
+            dbPath: effectiveDbPath, kcvPath: effectiveKcvPath, reason: bootError,
+          }));
+          // The raw reason is operator-only (it can name key material).
+          console.error(`[mycelium] vault not opened (${bootError}): ${err?.message || err}`);
+        } else {
+          console.error(`[mycelium] no vault yet — entering setup mode (${err?.message || err})`);
+        }
       }
     }
-  }
+  };
+
   const resolvedUserId = userId || process.env.MYCELIUM_USER_ID || 'local-user';
 
   const app = express();
@@ -1044,6 +1064,7 @@ export async function startRestServer({
     isInitialized: () => Boolean(vaultSubApp),
     completeBoot,
     getBootError,
+    getBootPhase, // D-130: booting + phase for honest status during a long boot
     kcvPath: effectiveKcvPath,
     lockFile: effectiveLockPath,
     dbPath: effectiveDbPath,
@@ -1058,6 +1079,13 @@ export async function startRestServer({
   // OUTSIDE the app-data dir), so a reset does not leave encrypted mind-files
   // behind. revokeRelay best-effort releases a managed handle server-side; the
   // seamless relaunch is the Tauri layer (destroy_and_relaunch → app.restart()).
+  // D-130 blocker fix: the factory-reset wipe must also refuse mid-boot (same
+  // rationale as the account-ceremony guard — a wipe racing an active migration).
+  app.post('/api/v1/account/destroy', (req, res, next) => {
+    const phase = getBootPhase();
+    if (phase) return res.status(409).json({ error: 'booting', bootPhase: phase, message: 'The vault is opening — try again when it finishes.' });
+    next();
+  });
   app.use('/api/v1/account', destroyRouter({
     isTrustedLoopback,
     readMaster: () => { try { return readUserMaster(); } catch { return null; } },
@@ -1202,6 +1230,11 @@ export async function startRestServer({
                 : 'Your vault exists but failed to open. See recovery options.',
         });
       }
+      // D-130: a boot IN FLIGHT is neither "not created" nor an error — say so
+      // (non-portal clients — phone app, shell — read this, not /account/status).
+      if (getBootPhase()) {
+        return res.status(503).json({ error: 'vault_booting', reason: getBootPhase(), message: 'The vault is opening — retry shortly.' });
+      }
       return res.status(503).json({ error: 'vault_not_initialized', reason: 'not_created', message: 'Your vault is not set up yet.' });
     }
     return next();
@@ -1261,6 +1294,14 @@ export async function startRestServer({
     });
   }
 
+  // D-130 REVIEW BLOCKER (round 1): kick the boot BEFORE the port opens, so the
+  // `booting` latch (set synchronously inside completeBoot) is armed before any
+  // request can observe the gap. The early .catch() only parks the rejection —
+  // the real await below still rethrows; without it, a boot that fails before
+  // the listen callback fires would trip unhandledRejection (now fatal).
+  const bootSequencePromise = runBootSequence();
+  bootSequencePromise.catch(() => { /* parked — re-awaited below */ });
+
   const server = await new Promise((resolve, reject) => {
     const s = app.listen(port, host, () => resolve(s));
     s.on('error', reject);
@@ -1269,6 +1310,16 @@ export async function startRestServer({
   const addr = server.address();
   const boundPort = typeof addr === 'object' && addr ? addr.port : port;
   const url = `http://${host}:${boundPort}`;
+
+  // D-130: await the boot the port is already answering for (kicked before
+  // listen — see bootSequencePromise — so `booting` was set before any request
+  // could land).
+  try {
+    await bootSequencePromise;
+  } catch (err) {
+    try { server.close(); } catch { /* */ }
+    throw err;
+  }
 
   // ── Optional native TLS listener (S-REST-TLS) ──────────────────────────────
   // The plain-http server above stays LOOPBACK-only (desktop / Tauri / a loopback
@@ -1325,6 +1376,12 @@ export async function startRestServer({
 const REST_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 async function main() {
+  // D-136 REVIEW BLOCKER (round 1): the crash policy must be armed BEFORE the
+  // boot, not after — completeBoot spawns ollama/embed/transcribe/channel-daemon
+  // and (since D-130) legitimately runs for minutes; an uncaught error in that
+  // window used to take Node's default death and orphan every child (the exact
+  // leak this policy exists to close), in the exact window this PR lengthens.
+  installCrashPolicy();
   const port = Number(process.env.MYCELIUM_REST_PORT ?? 8787);
   const host = process.env.MYCELIUM_REST_HOST ?? '127.0.0.1';
   // The portal/REST surface gates the recovery key + account/key-minting routes
@@ -1355,15 +1412,22 @@ async function main() {
   // the public one kept the unbounded version after this was fixed here.
   // @see src/db/vault-lease.js bindBoundedShutdown.
   bindBoundedShutdown({ server, close, log: (m) => process.stderr.write(`${m}\n`) });
+}
 
-  // CRASH POLICY (durability): this process died silently THREE times in one day from
-  // uncaught async errors (SQLITE_CORRUPT in a background task) — Node's default kills
-  // the process with stderr that a Finder launch discards, the Tauri shell never noticed,
-  // and the UI showed "Load failed" with zero forensics. Policy: record the event in the
-  // durability log (content-free — code/name only, never a message that could echo user
-  // text), then EXIT CLEANLY rather than limp on: after an uncaught error mid-write the
-  // process state is untrusted, and the shell's watchdog (main.rs) restarts us — a clean
-  // 5-second restart beats an hour of undefined behavior on a cognitive vault (§3).
+// CRASH POLICY (durability): this process died silently THREE times in one day from
+// uncaught async errors (SQLITE_CORRUPT in a background task) — Node's default kills
+// the process with stderr that a Finder launch discards, the Tauri shell never noticed,
+// and the UI showed "Load failed" with zero forensics. Policy: record the event in the
+// durability log (content-free — code/name only, never a message that could echo user
+// text), REAP OUR SPAWNED CHILDREN (D-136: the crash exit used to orphan every child —
+// channel-daemon, embed/transcribe/tts, ollama, pipeline jobs — and the restarted
+// server ADOPTED them as never-kill, so one crash leaked a core-burning daemon
+// forever; signal, never wait — D-108), then EXIT rather than limp on: after an
+// uncaught error mid-write the process state is untrusted, and the shell's watchdog
+// (main.rs) restarts us — a clean 5-second restart beats an hour of undefined
+// behavior on a cognitive vault (§3). Exported so the crash-reap gate can drive the
+// REAL handler path in a fixture process without booting the REST server.
+export function installCrashPolicy({ exit = process.exit.bind(process), reap = reapChildrenOnCrash } = {}) {
   const fatal = (kind) => (err) => {
     try {
       recordDurabilityEvent(kind, {
@@ -1372,7 +1436,11 @@ async function main() {
       });
     } catch { /* the black box must never block the exit */ }
     try { process.stderr.write(`[server-rest] ${kind}: ${String(err?.code || err?.name || 'error')} — exiting for the watchdog to restart\n`); } catch { /* */ }
-    process.exit(1);
+    // D-136: children first, then exit. reapChildrenOnCrash is synchronous and
+    // never waits; when we are the group leader (packaged app) it group-SIGKILLs
+    // the whole family INCLUDING this process — which is fine, we are exiting.
+    try { reap({ log: (m) => process.stderr.write(`${m}\n`) }); } catch { /* never block the exit */ }
+    exit(1);
   };
   process.on('uncaughtException', fatal('uncaught-exception'));
   process.on('unhandledRejection', fatal('unhandled-rejection'));
@@ -1387,6 +1455,11 @@ const restFlag = process.argv.includes('--rest');
 if (invokedDirectly || restFlag) {
   main().catch((err) => {
     process.stderr.write(`fatal: ${String(err?.message ?? err)}\n`);
+    // D-136: a boot-path failure can already have spawned supervisor children
+    // (the boot runs after listen since D-130, and supervisors start inside it) —
+    // same reap, same no-wait rule; the handlers installCrashPolicy armed at the
+    // top of main() cover the async paths, this covers the awaited rejection.
+    try { reapChildrenOnCrash({ log: (m) => process.stderr.write(`${m}\n`) }); } catch { /* */ }
     process.exit(1);
   });
 }

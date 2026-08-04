@@ -128,4 +128,18 @@ jobs:
         run: |
           python3 -m venv /tmp/audit-venv
           /tmp/audit-venv/bin/pip install --quiet --upgrade pip pip-audit
-          /tmp/audit-venv/bin/pip-audit -r pipeline/requirements.lock.txt --require-hashes
+          # ── cryptography 48.0.1 — three CVEs published 2026-08-04, IGNORED with cause (D-137) ──
+          # All three live in code paths this pipeline NEVER invokes (crypto_local.py imports
+          # ONLY hazmat AESGCM / HKDF / hashes / aes_key_wrap — grep it):
+          #   CVE-2026-69247  PKCS#7 EnvelopedData decryption Bleichenbacher oracle (fix: 50.0.0)
+          #   CVE-2026-69248  X.509 verifier wildcard-DNS permittedSubtrees escape  (fix: 49.0.0)
+          #   CVE-2026-69249  X.509 duplicate self-signed intermediates path blowup (fix: 49.0.0)
+          # No PKCS#7 use, no certificate verification anywhere under pipeline/. The REAL
+          # remediation is a decision, not a bump: requirements.txt caps <49 because 49.x
+          # dropped Intel/universal2 wheels — clearing all three needs >=50, which forces a
+          # Rust source build for the x86_64 bundle (or retiring it) + regenerating the hash
+          # lock. Tracked as D-137 in the defect ledger; remove these ignores there.
+          /tmp/audit-venv/bin/pip-audit -r pipeline/requirements.lock.txt --require-hashes \
+            --ignore-vuln CVE-2026-69247 \
+            --ignore-vuln CVE-2026-69248 \
+            --ignore-vuln CVE-2026-69249

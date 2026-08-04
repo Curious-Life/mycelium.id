@@ -14,6 +14,7 @@
 // embedder (PATH/HOME/HF_*) plus the chosen model tag.
 
 import { spawn } from 'node:child_process';
+import { registerCrashKillChild } from '../system/crash-reaper.js';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -268,6 +269,7 @@ export function startTranscribeSupervisor({
         setHealth('down', 'Could not start the transcription engine.', String(e?.message || e));
         failures++; backoff(); return;
       }
+      registerCrashKillChild(child, 'transcribe-service'); // D-136: the crash path must reap what stop() would
       spawnedByUs = true; errBuf = '';
       child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
       child.on('error', () => { /* surfaced via exit/last stderr */ });

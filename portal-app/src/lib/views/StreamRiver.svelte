@@ -104,8 +104,14 @@
 		loadingMore = false;
 	}
 
+	// An item whose createdAt does not parse would render as an "Invalid Date" group —
+	// and since the feed is time-ordered, it pins to the TOP of the river (operator QA,
+	// 2026-08-04). Hide undateable entries entirely: a timeline has no honest place for a
+	// point it cannot place in time. (The data itself is untouched — library/search still
+	// show it; only the time-ordered river skips it.)
+	const dated = $derived(items.filter((it) => Number.isFinite(new Date(it.createdAt).getTime())));
 	const filtered = $derived(
-		externalSource ? items.filter((it) => canonicalClientSource(it.source) === externalSource) : items,
+		externalSource ? dated.filter((it) => canonicalClientSource(it.source) === externalSource) : dated,
 	);
 
 	// Group by calendar day (same scheme as the legacy timeline).

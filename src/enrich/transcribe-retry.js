@@ -32,6 +32,8 @@
 // `doTranscribe` is injectable, so a mark here would fire against a stub in the gates and would
 // double-write on the real path for no gain.
 
+import { isImportQuiesced } from '../db/import-quiesce.js';
+
 const DEFAULT_INTERVAL_MS = 20000;
 const PER_CYCLE = Number(process.env.MYCELIUM_TRANSCRIBE_RETRY_BATCH) || 2; // decodes are heavy — a couple per cycle
 const ATTEMPT_CAP = Number(process.env.MYCELIUM_TRANSCRIBE_RETRY_CAP) || 3;
@@ -79,14 +81,36 @@ export function startTranscribeRetry({
     running = true;
     try {
       _lastCycleAt = Date.now();
+      // D-128: a bulk import owns the vault — this drain's attachment writes must not
+      // interleave with a mass raw restore. Re-checked every cycle; work is deferred, not lost.
+      if (isImportQuiesced()) return;
+      // ── D-133: AN AUTHORITATIVE DISABLE, RE-CHECKED EVERY CYCLE ──
+      // On 2026-07-30 the operator spent a session trying to stop this loop: env throttles
+      // didn't stop it, killing :8093 just made the supervisor respawn it, and the only
+      // thing that worked was nulling the transcriber model. Embed and categorize both have
+      // persisted pauses; this drain had NONE. Two switches, both consulted per cycle (the
+      // restorePauseOnce lesson — a disable read once is no disable):
+      //   • env  MYCELIUM_TRANSCRIBE_RETRY_DISABLED=1  (operator/session scope)
+      //   • settings.transcribeDrainPaused             (persisted, survives restarts)
+      if (String(process.env.MYCELIUM_TRANSCRIBE_RETRY_DISABLED || '') === '1') return;
+      try {
+        const s = await db.users?.getSettings?.(userId);
+        if (s && (s.transcribeDrainPaused === true || s.transcribeDrainPaused === 1 || s.transcribeDrainPaused === '1')) return;
+      } catch { /* a failed settings read never blocks the drain (fail-soft to RUNNING, like the embed pause) */ }
       // Only drain when the transcriber is actually ready — an unconfigured/loading vault waits.
       let health = null;
       try { health = await readHealth(); } catch { health = null; }
       if (!health || health.status !== 'ok') return;
 
       let ids = [];
-      try { ids = await db.attachments.listPendingTranscription(userId, { limit: PER_CYCLE + capped.size }); }
+      // +1 over the working limit so the status/log can tell "exactly N pending" from
+      // "N+ pending" — a LIMITed count printed as the whole backlog claimed a 500-file
+      // queue was '2 pending' (independent review, 2026-08-03: a stronger version of the
+      // misleading message D-133 is about).
+      const workLimit = PER_CYCLE + capped.size;
+      try { ids = await db.attachments.listPendingTranscription(userId, { limit: workLimit + 1 }); }
       catch { ids = []; }
+      const backlogMore = ids.length > workLimit;
       _lastPendingCount = ids.length;
       const work = ids.filter((id) => !capped.has(id)).slice(0, PER_CYCLE);
       let done = 0, busy = 0, resumed = 0;
@@ -116,7 +140,10 @@ export function startTranscribeRetry({
         attempts.set(id, n);
         if (n >= ATTEMPT_CAP) { capped.add(id); attempts.delete(id); }
       }
-      if (done || busy || resumed) log(`[transcribe-retry] transcribed ${done}, ${resumed} advanced (partial, resuming), ${busy} deferred (compute-busy), ${capped.size} capped this boot`);
+      // D-133: say COMPLETED, and name the backlog. The old line — "transcribed 2,
+      // 0 advanced" — read as a stuck loop while it was legitimately draining the
+      // oldest 2 of a large backlog each cycle; the operator fought it for a session.
+      if (done || busy || resumed) log(`[transcribe-retry] completed ${done} of ${backlogMore ? `${workLimit}+` : _lastPendingCount} pending, resumed ${resumed} partial, deferred ${busy} (compute-busy), ${capped.size} capped this boot`);
     } catch (err) {
       log(`[transcribe-retry] cycle error: ${String(err?.message || err)}`);
     } finally {

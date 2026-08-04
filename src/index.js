@@ -12,6 +12,7 @@ import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
 import { maybeScheduleIntegrityCheck } from './db/integrity.js';
 import { startSnapshotSchedule } from './db/snapshot-schedule.js';
+import { armVaultCopy } from './db/vault-copy.js';
 import { bindStdioLifetime } from './db/mcp-lifetime.js';
 import { claimVaultOwnership, bindBoundedShutdown } from './db/vault-lease.js';
 import { initVaultStorage } from './db/init.js';
@@ -54,6 +55,7 @@ export async function boot({
   userHex,
   systemHex,
   userId = process.env.MYCELIUM_USER_ID || 'local-user',
+  onPhase = null, // D-130: boot-phase reporter ('snapshot'|'migrating') for /account/status honesty
   // embedder: the query-time mind-search embedder ({ embed, health }). Defaults
   // to the embed-service client (:8091) via resolveDefaultEmbedder() so semantic
   // search is live out of the box; the backend fail-softs to BM25 per-query when
@@ -241,7 +243,7 @@ export async function boot({
   }
 
   const dbKeyHex = initStorage
-    ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m) })
+    ? await initVaultStorage({ dbPath, userHex, log: (m) => console.error(m), onPhase })
     : resolveDbKeyHex(userHex, dbPath); // open-only (e.g. public server): no schema apply, fail-closed
 
   // FAIL CLOSED (belt to the default-on suspenders): once at-rest is enabled — the real
@@ -279,6 +281,7 @@ export async function boot({
   // @see src/db/snapshot-schedule.js, the vault fail-stop design.
   if (isCanonicalVault) {
     startSnapshotSchedule({ dbPath, dbKeyHex, isCanonical: true, log: (m) => console.error(m) });
+    armVaultCopy({ dbPath, dbKeyHex }); // D-130: lets jobs.js take off-loop consistent copies without key plumbing
   }
   const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"

@@ -8,6 +8,10 @@
 //   B. the loopback MCP endpoint over a real vault: initialize + tools/list shows
 //      `reply` when AGENT_URL is set; a non-loopback request is refused (403).
 // PASS/FAIL ledger; exits 0 only on full GO.
+// MUTATION-TESTED: (D-129, 2026-08-03) shouldRun reverted to the pre-fix "any token"
+// predicate (`return Boolean(hasTg || hasDc)`) → D129a, D129b and D129c all RED (the
+// half-configured Discord shapes spawn again and health shows the generic copy) while
+// D129d control stays GREEN. Restored → GO.
 import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { rmSync, mkdirSync } from 'node:fs';
@@ -75,6 +79,43 @@ try {
     // SECURITY: keyless — no vault key material ever flows to the daemon.
     const keyish = ['MYCELIUM_KEY_SOURCE', 'USER_MASTER', 'SYSTEM_KEY', 'MYCELIUM_USER_HEX', 'MYCELIUM_SYSTEM_HEX', 'MYCELIUM_DATA_DIR'];
     check('child env carries NO vault keys (keyless)', keyish.every((k) => !(k in env)));
+    _resetChannelSupervisor();
+  }
+
+  // ── Part A2b (D-129): a config the daemon will provably REFUSE must never spawn ──
+  // The daemon's own boot rule (config.js assertEgressConfig) throws whenever
+  // DISCORD_BOT_TOKEN is set without OWNER_DISCORD_ID — even beside a healthy Telegram
+  // token. The old "any token" predicate spawned it anyway: exit(1) → backoff → respawn
+  // every ~30s forever (the operator's `restart #N` log spam). The supervisor must
+  // mirror the daemon's rule and say WHY in health, not the generic "channels are off".
+  {
+    _resetChannelSupervisor();
+    const spawn = fakeSpawn();
+    startChannelSupervisor({ db: fakeDb({ CHANNEL_ENABLED: '1', DISCORD_BOT_TOKEN: 'dtok' }), userId: 'u', spawn, fetch: probeFail, log: () => {} });
+    await settle();
+    check('D129a: discord token w/o owner id → daemon NOT spawned (would exit(1) forever)', spawn.calls.length === 0);
+    const h = getChannelHealth();
+    check('D129b: blocked config → health=down with the OWNER_DISCORD_ID reason, not "channels are off"',
+      h.status === 'down' && /OWNER_DISCORD_ID/.test(String(h.message || '')));
+    _resetChannelSupervisor();
+  }
+  {
+    // Half-configured Discord BESIDE a healthy Telegram: the daemon still throws
+    // (its discord check is unconditional), so this must not spawn either.
+    _resetChannelSupervisor();
+    const spawn = fakeSpawn();
+    startChannelSupervisor({ db: fakeDb({ CHANNEL_ENABLED: '1', TELEGRAM_BOT_TOKEN: 'tok', DISCORD_BOT_TOKEN: 'dtok' }), userId: 'u', spawn, fetch: probeFail, log: () => {} });
+    await settle();
+    check('D129c: tg token + half-configured discord → still NOT spawned (daemon throws on that shape)', spawn.calls.length === 0);
+    _resetChannelSupervisor();
+  }
+  {
+    // CONTROL — proves D129a is non-vacuous: COMPLETE discord config does spawn.
+    _resetChannelSupervisor();
+    const spawn = fakeSpawn();
+    startChannelSupervisor({ db: fakeDb({ CHANNEL_ENABLED: '1', DISCORD_BOT_TOKEN: 'dtok', OWNER_DISCORD_ID: '123' }), userId: 'u', spawn, fetch: probeFail, log: () => {} });
+    await settle();
+    check('D129d (control): discord token + owner id → daemon spawned', spawn.calls.length === 1);
     _resetChannelSupervisor();
   }
 

@@ -68,6 +68,31 @@ export const CHAT_GAP = 12;
 /** Horizontal strip that must stay on-screen so the chat can always be dragged back. */
 export const CHAT_MIN_VISIBLE = 60;
 
+/**
+ * D-134 — the absolute cap on the PERSISTED (desired) height. The desired size is
+ * deliberately not viewport-bounded (that is the whole defect: mount persisted the
+ * viewport-clamped render, so one launch in a small window permanently shrank the
+ * saved size), but a poisoned localStorage entry must still die in one load — so
+ * desired gets ABSOLUTE bounds only. Width already has CHAT_MAX_W; height's
+ * viewport-independent cap is this: comfortably above any real display's usable
+ * room, far below a poisoned 5000.
+ */
+export const CHAT_DESIRED_MAX_H = 2000;
+
+/**
+ * D-134 — sanitize the size the user CHOSE against absolute bounds only (never
+ * the current viewport). Render-time clamping stays clampChatGeometry's job;
+ * this pair is what mount persists, so the user's desktop size survives a
+ * phone-sized launch. Total on its inputs; never throws.
+ */
+export function sanitizeDesiredSize(g: { width?: unknown; height?: unknown } | null | undefined): { width: number; height: number } {
+	const finiteOr = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+	return {
+		width: Math.min(CHAT_MAX_W, Math.max(CHAT_MIN_W, finiteOr(g?.width, 720))),
+		height: Math.min(CHAT_DESIRED_MAX_H, Math.max(CHAT_MIN_H_HARD, finiteOr(g?.height, 550))),
+	};
+}
+
 export interface Viewport {
 	vw: number;
 	vh: number;

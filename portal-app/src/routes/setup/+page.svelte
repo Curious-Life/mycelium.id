@@ -40,9 +40,17 @@
 	onMount(async () => {
 		try { deviceLabel = /Mac/i.test(navigator.userAgent) ? 'this Mac' : 'this computer'; } catch { /* keep default */ }
 		try {
-			const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
-			if (res.ok) {
-				const s = await res.json();
+			// D-130: never treat an in-flight boot as "no vault" — wait it out
+			// (the awaited off-loop vault copy on a restore can take minutes).
+			let s = null;
+			for (;;) {
+				const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
+				if (!res.ok) break;
+				s = await res.json();
+				if (!s.booting) break;
+				await new Promise((r) => setTimeout(r, 2000));
+			}
+			if (s) {
 				keychainAvailable = s.keychainAvailable !== false;
 				bootError = s.bootError || null;
 				if (s.initialized) { enterVault(); return; }

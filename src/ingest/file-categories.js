@@ -65,11 +65,24 @@ export const SWEEP_MAX_DEPTH = 8;
  * and ~/Library (never "useful context", and enormous). Kept here rather than in
  * either walker so they cannot drift apart again.
  */
-export const SWEEP_SKIP_DIRS = new Set(['.git', '.svn', '.hg', 'node_modules', '.Trash', '.trash', '.cache', 'Caches', '.npm', '.obsidian', '.smart-env', 'Library']);
+export const SWEEP_SKIP_DIRS = new Set(['.git', '.svn', '.hg', 'node_modules', '.Trash', '.trash', '.cache', 'Caches', '.npm', '.obsidian', '.smart-env', 'Library', 'huggingface']);
+/**
+ * Compiled/model BUNDLES that present as directories (D-126). A "what could I
+ * import" presence-scan has no business inside model weights or app bundles —
+ * and on this Mac one of them (`TextDecoder.mlmodelc`, iCloud-evicted to a
+ * dataless placeholder) wedged a synchronous `readdirSync` in
+ * `__getdirentries64` indefinitely, head-of-line-blocking the entire REST
+ * server. Skipping them by suffix means the walk never even LOOKS inside, so a
+ * mere scan can never force an iCloud materialization of gigabytes of weights.
+ * Shared by detector AND importer (the D-070 consent rule): these bundles are
+ * neither counted nor imported.
+ */
+const COMPILED_BUNDLE_RE = /\.(mlmodelc|mlpackage|framework|app|xcarchive|lproj)$/i;
+export function isCompiledBundleDir(name) { return COMPILED_BUNDLE_RE.test(String(name)); }
 /** True when a directory entry name must not be descended by either walk. */
 export function isSkippedSweepDir(name) {
   const n = String(name);
-  return n.startsWith('.') || SWEEP_SKIP_DIRS.has(n) || isManagedPackageDir(n);
+  return n.startsWith('.') || SWEEP_SKIP_DIRS.has(n) || isManagedPackageDir(n) || isCompiledBundleDir(n);
 }
 
 // The subset of `document` extensions whose bytes are UTF-8 text we can read

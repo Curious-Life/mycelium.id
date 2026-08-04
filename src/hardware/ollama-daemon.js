@@ -26,6 +26,7 @@
 // on PATH resolving `ollama`.
 
 import { spawn as nodeSpawn, execFile as nodeExecFile } from 'node:child_process';
+import { registerCrashKillChild } from '../system/crash-reaper.js';
 import { existsSync as nodeExistsSync } from 'node:fs';
 import net from 'node:net';
 import { join } from 'node:path';
@@ -352,6 +353,7 @@ export function createOllamaDaemon({
       if (spawnEnv[k] == null) spawnEnv[k] = v;
     }
     child = spawn(bin, ['serve'], { detached: false, stdio: ['ignore', 'ignore', 'pipe'], env: spawnEnv });
+    registerCrashKillChild(child, 'ollama-serve'); // D-136: the crash path must reap what stop() would
     spawnedByUs = true;
     child.stderr?.on?.('data', (d) => { errBuf = (errBuf + String(d)).slice(-4096); });
     child.on?.('exit', () => { child = null; });

@@ -16,6 +16,7 @@
 
 import { openEnvelope } from './envelope.js';
 import { didWebHost } from './did.js';
+import { isImportQuiesced } from '../db/import-quiesce.js';
 
 const DEFAULT_INTERVAL_MS = 15000;
 const MAX_SKIP_CYCLES = 40;
@@ -108,6 +109,9 @@ export function createFederationPullLoop({ db, userId, identity, selfDid, resolv
     if (ticking) return; // a previous tick is still in flight → skip this one (no overlapping runs)
     ticking = true;
     try {
+      // D-128: a bulk import owns the vault — this loop INSERTs into federation_seen /
+      // connections on the shared connection. Stand down; deliveries retry by design.
+      if (isImportQuiesced()) return;
       if (skip > 0) { skip--; return; }
       try { await cycle(); fails = 0; }
       catch (e) {

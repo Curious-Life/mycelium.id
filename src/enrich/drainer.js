@@ -16,8 +16,10 @@ import { localInfer } from '../inference/local.js';
 import { createOllamaClient, classifyOllamaFault, OLLAMA_FAULT } from '../hardware/ollama.js';
 import { createEnrichmentService, EMBED_MAX_ATTEMPTS } from './service.js';
 import { createCategoryClassifier, DEFAULT_LABEL_MODEL } from './categories.js';
+import { lookupModel } from '../inference/model-registry.js';
 import { createMessageEnricher } from './enricher.js';
 import { admit, CLASS } from '../core/compute-governor.js';
+import { isImportQuiesced } from '../db/import-quiesce.js';
 
 // Wall-clock budget for ONE cycle's L1+L2 (categorize + enrich) block. See the long note at its
 // use site: cycle() is single-flight and the embed drain runs above the block, so an unbounded
@@ -104,6 +106,13 @@ let _current = null;
 // old "all of it" semantics for the global StatusPopover control and the reminder — see there.
 let _embedPaused = false;
 let _categorizePaused = false;
+// D-132 (QA11) — the L2 semantic-enrich pass gets its OWN defer latch, distinct from
+// _categorizePaused (which honestly gates L1+L2 together as the shared-model "pause").
+// DEFER is an owner posture, not a pause: "run embed + L1 now, do the ~153 h L2 pass
+// later" — the first-run answer to "responsive but not done for six days". Deferring
+// L2 blocks nothing downstream (readiness has no L2 threshold; generate keys on
+// embedded/points), which is exactly why the feed row must stay visible + honest.
+let _enrichDeferred = false;
 let _pauseRestored = false;           // latch: the persisted flags are read ONCE, at first cycle
 
 /** Kick the live enrichment drainer if one is running (no-op otherwise). */
@@ -238,6 +247,7 @@ export async function selfHealStrandedEmbeds(db, userId) {
     + " AND (nlp_error IS NULL OR nlp_error NOT LIKE 'embed-capped:%')",
     [userId],
   );
+  db.messages?.noteBacklogWrite?.(); // D-132: raw write outside the namespace — revalidate the polled caches
 }
 
 /**
@@ -259,6 +269,7 @@ export async function reclaimGaveUpRows(db, userId) {
     'UPDATE messages SET categories_processed = 0 WHERE user_id = ? AND categories_processed = -1',
     [userId],
   );
+  db.messages?.noteBacklogWrite?.(); // D-132: raw write outside the namespace — revalidate the polled caches
 }
 
 /**
@@ -310,6 +321,11 @@ export function isEmbedPaused() { return _embedPaused; }
 export function pauseCategorize() { _categorizePaused = true; return true; }
 export function resumeCategorize() { _categorizePaused = false; nudgeEnrichDrainer(); return true; }
 export function isCategorizePaused() { return _categorizePaused; }
+// D-132 — defer/resume the L2 semantic-enrich pass only (route persists FIRST, applies
+// second — portal-compat.js — same D13 rule as the pauses above).
+export function deferEnrich() { _enrichDeferred = true; return true; }
+export function resumeEnrich() { _enrichDeferred = false; nudgeEnrichDrainer(); return true; }
+export function isEnrichDeferred() { return _enrichDeferred; }
 // NB: there is deliberately no in-memory `pausedAt`. WHEN the owner paused is persisted
 // (settings.enrichProcessingPausedAt) and returned by the pause route; §3.2's
 // readiness.processing.pausedAt will read it from settings when that slice is built (it is
@@ -347,6 +363,9 @@ async function restorePauseOnce(db, userId, log) {
     const legacy = s?.enrichProcessingPaused === true;
     if (s?.enrichEmbedPaused === true || legacy) _embedPaused = true;
     if (s?.enrichCategorizePaused === true || legacy) _categorizePaused = true;
+    // D-132: the L2 defer is its own key — NOT implied by legacy (legacy pause already
+    // stops L2 via _categorizePaused). Only an explicit, successfully-read true defers.
+    if (s?.enrichL2Deferred === true) _enrichDeferred = true;
     if (_embedPaused || _categorizePaused) {
       const which = _embedPaused && _categorizePaused ? 'processing' : (_embedPaused ? 'embedding' : 'categorizing');
       log(`[enrich] ${which} is PAUSED by the owner (persisted) — resume from the activity panel`);
@@ -525,6 +544,7 @@ export function startEnrichDrainer({
   const ollamaClient = () => ollama || createOllamaClient({ baseUrl: daemon?.getBaseUrl?.() });
   const svc = createEnrichmentService({ messages: db.messages, embed, getMasterKey, classify });
   let running = false;
+  let _quiesceNoted = false; // D-128: log the stand-down/resume transition once, not every 15s
   let pending = false;
   let _cappedReclaimed = false; // boot reclaim of gave-up rows runs ONCE per drainer start
   let _skips = 0; // consecutive cycles skipped because the embed service looked unhealthy
@@ -641,7 +661,16 @@ export function startEnrichDrainer({
     _labelModel = model;
     _labelClassify = createCategoryClassifier({
       model, // recorded as per-row provenance (categories_model, 0041)
-      infer: (prompt) => localInfer({ prompt, model, format: 'json', maxTokens: 40, numCtx: 1024, think: false }),
+      // D-132 (U-C): the second arg carries the BATCH call's scaled budgets
+      // (classify.batch computes maxTokens/numCtx from K + prompt size); the
+      // single path passes none and keeps today's exact caps. numCtx is clamped
+      // to the model's REAL context window (model-registry — the catalog's 8192
+      // for the default labeler; prefix-matching 'qwen3' would 5x-overstate it).
+      infer: (prompt, o) => localInfer({
+        prompt, model, format: 'json', think: false,
+        maxTokens: o?.maxTokens ?? 40,
+        numCtx: Math.min(o?.numCtx ?? 1024, lookupModel(model)?.contextWindow || 8192),
+      }),
     });
     return _labelClassify;
   }
@@ -1037,6 +1066,11 @@ export function startEnrichDrainer({
     if (isCategorizePaused()) {
       return { status: 'paused', message: 'Enrichment is paused — pending messages are waiting.', detail: null, model: m, progress: null };
     }
+    // D-132: DEFERRED is an owner posture distinct from paused — L2 alone is set aside
+    // (embed + L1 keep running). Never 'ok': that would be the dormancy this member exposes.
+    if (isEnrichDeferred()) {
+      return { status: 'deferred', message: 'Semantic enrichment is deferred — resume it from the pipeline panel when you want entities and gists extracted.', detail: null, model: m, progress: null };
+    }
     if (_faults.has(m)) {
       // Same classified message as the labeler (see there) — keyed on `_approvedEnrichModel`
       // and this model's own fault slot, so an enrich-only disk-full never reads as the labeler.
@@ -1051,6 +1085,17 @@ export function startEnrichDrainer({
     if (running) { pending = true; return; } // single-flight; coalesce concurrent nudges
     running = true;
     try {
+      // ── D-128: A BULK IMPORT OWNS THE VAULT — STAND DOWN FOR THE CYCLE ──
+      // Re-checked EVERY cycle (the restorePauseOnce lesson: a latch read once is no
+      // latch). While full-export-import holds the quiesce, this drain's writes would
+      // interleave with a mass raw restore running with FKs off on the shared
+      // connection — the proven SQLITE_CORRUPT ingress of 2026-07-30. The import
+      // nudges the drainer when it finishes, so no work is lost, only deferred.
+      if (isImportQuiesced()) {
+        if (!_quiesceNoted) { _quiesceNoted = true; log('[enrich] standing down: a bulk import holds the vault (D-128); resuming after it completes'); }
+        return;
+      }
+      if (_quiesceNoted) { _quiesceNoted = false; log('[enrich] bulk import finished — resuming the drain'); }
       // ── RESOLVE + STAMP THE APPROVED MODELS FIRST, ABOVE EVERYTHING THAT CAN THROW ──
       // These two are pure settings READS: they wake nothing, install nothing, download nothing.
       // Read the resolver bodies for that — defaultLabelModel/defaultEnrichModel call
@@ -1580,7 +1625,9 @@ export function startEnrichDrainer({
         }
         // L2: hybrid semantic enrichment (entities + gist) — gated on the enrich model being present;
         // the enricher degrades to regex if the model is down, so rows never stall.
-        if (enrichReady) {
+        // D-132: an owner-deferred L2 skips the block entirely (embed + L1 unaffected);
+        // the feed renders the deferred row honestly (portal-activity 'deferred').
+        if (enrichReady && !isEnrichDeferred()) {
           // Same MED fix as the L1 block above: on a locked vault updateNlp throws AND the
           // catch's −1 write throws, so the throw escapes enrichNlpOnce entirely — around the
           // pass, past the barren counter. Block-level errs or the rate freezes-and-promises.
@@ -1596,7 +1643,7 @@ export function startEnrichDrainer({
             // (L1: zero). "A pause the user watches their fans ignore is the same broken promise
             // as no pause at all" — and #204's copy says "pause ANY of it", so this line is what
             // makes that sentence true (independent review HIGH-6, 2026-07-17).
-            if (isCategorizePaused()) break;
+            if (isCategorizePaused() || isEnrichDeferred()) break; // D-132: defer honored mid-run too
             if (catAdm.shouldYield()) break;   // interactive preemption — yield the model slot between batches (§3.4)
             // ⚠️ `i > 0` — L2 IS GUARANTEED ITS FIRST PASS, and reversing this was a real
             // regression the review caught (QA9, MEDIUM-4). The first draft omitted the exemption
@@ -1730,6 +1777,9 @@ export function startEnrichDrainer({
       // chat turn). SAME contract as categorizeWaitingOnEmbed — a scheduling `waiting`, never a
       // pause, never a fault — so the pipeline slice renders it as `waiting`, not a stalled lane.
       categorizeWaitingOnCompute: _catWaitingOnCompute,
+      // D-132: the owner deferred the L2 pass (its own latch — the projections read the
+      // drainer's decision, never re-derive it).
+      enrichDeferred: _enrichDeferred,
       // D-001 (finding #2): the embed drain itself is deferred this cycle by the BULK governor
       // (memory pressure / a resident model loaded / BULK budget). Same `waiting` contract.
       embedWaitingOnCompute: _embedWaitingOnCompute,

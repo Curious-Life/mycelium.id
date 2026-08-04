@@ -17,7 +17,7 @@ import Database from 'better-sqlite3';
 import express from 'express';
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getDb } from '../src/db/index.js';
@@ -162,6 +162,22 @@ async function main() {
   const httpJson = await res.json();
   rec('GET /streams returns items[] + nextCursor', res.status === 200 && Array.isArray(httpJson.items) && httpJson.items.length === 7);
   server.close();
+
+  // ── R-DATE: the river HIDES undateable items (operator QA, 2026-08-04) ─────────
+  // A feed item whose createdAt does not parse rendered as an "Invalid Date" group
+  // pinned to the TOP of the time-ordered river. The view filters them out before
+  // grouping. Source-layer check + mutation (a mounted drive of StreamRiver would need
+  // the full timeline harness; the property is one filter expression, and the mutation
+  // proves the check sees it).
+  // MUTATION-TESTED: (2026-08-04) the `dated` filter in StreamRiver.svelte removed
+  // (filtered derived straight from items) → R-DATE REDs. Restored → GREEN.
+  {
+    const river = readFileSync('portal-app/src/lib/views/StreamRiver.svelte', 'utf8');
+    const hasFilter = /Number\.isFinite\(new Date\(it\.createdAt\)\.getTime\(\)\)/.test(river);
+    const filterFeedsGrouping = /externalSource \? dated\.filter|: dated,/.test(river);
+    rec('R-DATE: the river filters undateable items before grouping (no "Invalid Date" group at top)',
+      hasFilter && filterFeedsGrouping);
+  }
 
   close();
   rmSync(dir, { recursive: true, force: true });

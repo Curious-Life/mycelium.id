@@ -34,8 +34,14 @@ export function applyMigrations(db, dir = MIGRATIONS_DIR) {
   // LEDGER (see db/migration-ledger.js): record what shaped this vault + skip what's already
   // applied (real vault: 458ms → 3ms per boot). Bootstrap: an un-ledgered vault has an EMPTY
   // ledger → every file runs the idempotent path exactly as before, then is recorded.
-  // Divergence is REPORTED, never gated — a boot-time refusal on a Finder-launched app is an
-  // unrecoverable white screen, and dev/prod share one vault so branch skew is routine.
+  // Divergence is REPORTED at boot, never a boot refusal — a boot-time refusal on a
+  // Finder-launched app is an unrecoverable white screen. But D-121: the DESTRUCTIVE act —
+  // re-asserting a migration whose content differs from what this vault recorded as applied —
+  // IS refused (see the changed-file guard in the apply loop below). The original rationale
+  // for applying anyway ("dev/prod share one vault so branch skew is routine") died with
+  // D-082's dataDir split (#406): a dev build can no longer open the production vault, so a
+  // changed hash now means a genuinely divergent lineage, and divergent DDL asserted into a
+  // live vault is the proven freelist-corruption mechanism (2026-07-27/30 incidents).
   ensureLedger(db);
   const present = new Map(files.map((f) => [f, sha256(readFileSync(join(dir, f), 'utf8'))]));
   const ledger = readLedger(db);
@@ -47,9 +53,25 @@ export function applyMigrations(db, dir = MIGRATIONS_DIR) {
   }
   if (findings.changed.length) {
     console.error(`[mycelium] VAULT LINEAGE: migration file(s) changed after being applied ` +
-      `(${findings.changed.slice(0, 4).join(', ')}${findings.changed.length > 4 ? ', …' : ''}). Re-recording; not re-applying.`);
+      `(${findings.changed.slice(0, 4).join(', ')}${findings.changed.length > 4 ? ', …' : ''}). ` +
+      `Refusing to re-apply them (D-121 — divergent DDL is the corruption mechanism); the vault keeps ` +
+      `the lineage it recorded. Set MYCELIUM_LINEAGE_REAPPLY=1 to apply this build's version deliberately.`);
   }
   assertLineageStrict(findings); // no-op unless MYCELIUM_STRICT_LINEAGE=1 (CI only)
+
+  // D-121 FAIL CLOSED ON THE DESTRUCTIVE ACT. A file whose recorded hash differs from this
+  // build's content was applied by ANOTHER lineage (or edited after landing). Re-running it
+  // asserts this build's DDL over the other lineage's — the exact mechanism that freelist-
+  // corrupted the operator's vault. The safe act is to SKIP: the vault already carries A
+  // version of this migration, boot proceeds, and the warning above stays visible on every
+  // boot (deliberately not re-recorded — the ledger is an audit trail of what actually ran,
+  // and recording an unapplied hash would make it lie). A dev reworking a migration in place
+  // opts in explicitly with MYCELIUM_LINEAGE_REAPPLY=1; a comment-only edit loses nothing by
+  // being skipped, because the recorded version already ran. Missing-table repair still works:
+  // the self-heal below re-applies UNCHANGED files, and a genuinely needed schema change ships
+  // as a NEW migration file, which is never skipped by this guard.
+  const changedSet = new Set(findings.changed);
+  const reapplyChanged = process.env.MYCELIUM_LINEAGE_REAPPLY === '1';
 
   // SELF-HEAL (regression guard): the pre-ledger code re-asserted every file on every boot,
   // so a dropped/missing table silently came back. Skip-if-applied removes that safety net.
@@ -58,7 +80,15 @@ export function applyMigrations(db, dir = MIGRATIONS_DIR) {
   // guarded ADD COLUMN + the two self-idempotent backfills).
   // Only meaningful once the ledger would make us SKIP: on a fresh/bootstrap vault every
   // table is "missing" by definition — that's the initial apply, not a heal.
-  const missing = ledger.size ? missingExpectedTables(db, dir, files) : [];
+  // D-121 interaction (found by independent review): the heal's expected-table set must
+  // exclude tables that only a CHANGED (refused) file would create — otherwise an edited
+  // migration that adds a table makes the heal fire EVERY boot forever, re-applying all
+  // migrations each time (the very DDL re-assertion D-121 exists to stop) while the one
+  // file that would create the table stays refused. The table genuinely cannot appear, so
+  // expecting it is a permanent false alarm; the changed-file warning above already names
+  // the stranded file on every boot.
+  const healFiles = reapplyChanged ? files : files.filter((f) => !changedSet.has(f));
+  const missing = ledger.size ? missingExpectedTables(db, dir, healFiles) : [];
   const heal = missing.length > 0;
   if (heal) {
     console.error(`[mycelium] vault schema is missing ${missing.length} expected table(s) ` +
@@ -68,6 +98,12 @@ export function applyMigrations(db, dir = MIGRATIONS_DIR) {
   const applied = [];
   for (const f of files) {
     if (!heal && ledger.get(f) === present.get(f)) continue; // already applied, unchanged → skip
+    if (changedSet.has(f) && !reapplyChanged) {
+      // D-121: never auto-assert a divergent version of an already-applied migration (see above).
+      console.error(`[mycelium] VAULT LINEAGE: skipping changed migration ${f} ` +
+        `(recorded ${(ledger.get(f) || '').slice(0, 12)}…, this build ${(present.get(f) || '').slice(0, 12)}…)`);
+      continue;
+    }
     const sql = readFileSync(join(dir, f), 'utf8');
     applyOne(db, sql);
     recordApplied(db, f, present.get(f));

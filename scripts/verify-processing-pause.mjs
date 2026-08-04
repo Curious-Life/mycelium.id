@@ -23,6 +23,13 @@
 //
 // PASS/FAIL ledger + VERDICT + EXIT=<code>.
 
+// MUTATION-TESTED: (D-132, 2026-08-04) the defer route's persistEnrichDefer call
+// removed (apply-without-persist — the D13 silent-undo shape) → PD1 AND PD3 RED
+// (enrichL2Deferred never lands in settings; the failed-write probe 200s a defer
+// it cannot remember) while PD2 and every P* stay GREEN. Restored → GO.
+// MUTATION-TESTED: (round-1 gate review H9, 2026-08-04) the defer route's
+// deferEnrich() apply call dropped (200 + persisted, but the live latch never
+// flips — the defer takes effect only after a restart) → PD1b RED. Restored → GO.
 import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import crypto from 'node:crypto';
 import { rmSync, mkdirSync } from 'node:fs';
@@ -30,6 +37,7 @@ import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/db/migrate.js';
 import { startRestServer } from '../src/server-rest.js';
 import { startEmbedSupervisor, getEmbedSupervisor, _resetEmbedSupervisor } from '../src/embed/supervisor.js';
+import { isEnrichDeferred } from '../src/enrich/drainer.js';
 
 const DB = 'data/verify-processing-pause.db';
 const KCV = 'data/verify-processing-pause-kcv.json';
@@ -166,6 +174,34 @@ async function main() {
     rec('P11. a failed per-stage persist → 500 (never a silent per-stage pause)',
       stageFailed.status === 500 && s11?.enrichEmbedPaused !== true,
       `status=${stageFailed.status} body=${JSON.stringify(stageFailed.body)} embed=${s11?.enrichEmbedPaused}`);
+
+    // ── P-DEFER (D-132): the L2 defer routes persist ONLY enrichL2Deferred ──
+    await db.users.updateSettings(uid, { ...SEED });
+    const dp = await post('/api/v1/portal/enrichment/enrich/defer');
+    const sD = await db.users.getSettings(uid);
+    rec('PD1. enrich/defer → enrichL2Deferred true ONLY (pause keys + taskModels untouched)',
+      dp.status === 200 && sD?.enrichL2Deferred === true
+      && sD?.enrichCategorizePaused !== true && sD?.enrichEmbedPaused !== true
+      && sD?.taskModels?.enrich?.model === 'qwen3.5:4b',
+      `status=${dp.status} deferred=${sD?.enrichL2Deferred} cat=${sD?.enrichCategorizePaused} embed=${sD?.enrichEmbedPaused}`);
+    // Round-1 gate review H9: the route must APPLY, not only persist — a
+    // 200-with-persist whose live latch never flips takes effect only after a
+    // restart (the inverse of the D13 silent undo).
+    rec('PD1b. …and the LIVE latch flipped (isEnrichDeferred true after the POST)',
+      isEnrichDeferred() === true, `isEnrichDeferred=${isEnrichDeferred()}`);
+    const dr = await post('/api/v1/portal/enrichment/enrich/resume');
+    const sD2 = await db.users.getSettings(uid);
+    rec('PD2. enrich/resume → enrichL2Deferred false, neighbours survive',
+      dr.status === 200 && sD2?.enrichL2Deferred === false && sD2?.timezone === 'Europe/Riga',
+      `status=${dr.status} deferred=${sD2?.enrichL2Deferred}`);
+    rec('PD2b. …and the LIVE latch cleared', isEnrichDeferred() === false, `isEnrichDeferred=${isEnrichDeferred()}`);
+    db.users.updateSettings = async () => { throw new Error('disk full'); };
+    const dFail = await post('/api/v1/portal/enrichment/enrich/defer');
+    db.users.updateSettings = realUpdate;
+    const sD3 = await db.users.getSettings(uid);
+    rec('PD3. a failed defer persist → 500 (never a silent defer)',
+      dFail.status === 500 && sD3?.enrichL2Deferred !== true,
+      `status=${dFail.status} deferred=${sD3?.enrichL2Deferred}`);
 
     // ── P12: the embedder retry route (the fresh-install un-hang) is MOUNTED, session-gated (it
     // rides the same vaultAuth as every /api route), FAIL-SAFE, and HONEST. This boot injects keys,

@@ -13,6 +13,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { spawn as spawnChild } from 'node:child_process';
+import { registerCrashKillChild } from '../system/crash-reaper.js';
+import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { categoryOf, FILE_CATEGORIES, SWEEP_MAX_DEPTH, isSkippedSweepDir } from './file-categories.js';
 
@@ -229,6 +232,69 @@ export function detectSources({ home = os.homedir() } = {}) {
     try { const r = det(home); if (r) out.push(r); } catch { /* one detector failing never breaks the scan */ }
   }
   return out;
+}
+
+// ── D-126: the sweep, OFF the event loop, with a deadline that cannot be defeated ──
+// detectSources() is a synchronous readdirSync walk. Run on the server's single thread,
+// one iCloud-dataless directory blocked it inside `__getdirentries64` INDEFINITELY
+// (live-reproduced 2026-07-30) — and because a blocked sync syscall preempts nothing,
+// every other endpoint timed out until the process was killed. Depth caps and file caps
+// cannot help: they are only consulted BETWEEN readdirSync calls, and the wedge is one
+// call never returning. Only process isolation makes the scan killable, so this spawns
+// detect-sources-child.js (the snapshot-worker pattern) and resolves ON THE TIMER,
+// without waiting for the child to die — a child stuck in an uninterruptible syscall
+// may ignore even SIGKILL until the syscall returns, and the server must not wait for
+// that. The orphan is unref()ed so it can never hold the server open either.
+const DETECT_CHILD = new URL('./detect-sources-child.js', import.meta.url);
+let _detectInflight = null; // single-flight: rapid re-entries share one child (review F8)
+export function detectSourcesOffLoop({
+  timeoutMs = Number(process.env.MYCELIUM_DETECT_TIMEOUT_MS) || 30_000,
+  childPath = DETECT_CHILD, // injectable so the gate can drive a wedged child deterministically
+} = {}) {
+  if (_detectInflight) return _detectInflight; // one home-walk at a time, shared result
+  const p = new Promise((resolve) => {
+    let child;
+    let settled = false;
+    let out = '';
+    const finish = (v) => { if (settled) return; settled = true; clearTimeout(timer); _detectInflight = null; resolve(v); };
+    const timer = setTimeout(() => {
+      try { child?.kill('SIGKILL'); } catch { /* already gone */ }
+      try { child?.unref(); } catch { /* */ }
+      finish({ sources: [], blocked: [], timedOut: true });
+    }, timeoutMs);
+    try {
+      child = spawnChild(process.execPath, [fileURLToPath(childPath)], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        // ⚠️ EXPLICIT ALLOWLIST, never the parent env (independent security review,
+        // 2026-08-03; CLAUDE.md §4). Boot pins the vault MASTER KEY into this process's
+        // env, and a directory walker needs zero secrets — inheriting would put the key
+        // into a new process on every scan (visible to same-user `ps -Eww`, carried by
+        // any orphan the deadline abandons). Same discipline as jobs.js and the channel
+        // supervisor's keyless child env.
+        env: {
+          PATH: process.env.PATH || '',
+          HOME: process.env.HOME || '',
+          ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+        },
+      });
+      registerCrashKillChild(child, 'detect-sources-child'); // D-136: a wedged walker must not outlive a crash
+    } catch {
+      finish({ sources: [], blocked: [], failed: true });
+      return;
+    }
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => finish({ sources: [], blocked: [], failed: true }));
+    child.on('close', () => {
+      try {
+        const j = JSON.parse(out);
+        finish({ sources: Array.isArray(j?.sources) ? j.sources : [], blocked: Array.isArray(j?.blocked) ? j.blocked : [], timedOut: false });
+      } catch {
+        finish({ sources: [], blocked: [], failed: true });
+      }
+    });
+  });
+  _detectInflight = p;
+  return p;
 }
 
 // ── macOS TCC first-scan diagnosability (ON-5) ───────────────────────────────

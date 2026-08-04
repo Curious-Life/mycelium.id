@@ -22,7 +22,7 @@ import { applyMigrations, migrationsWouldWrite } from './migrate.js';
 import { resolveDbKeyHex, atRestEnabled, vaultIsEncrypted } from './open.js';
 import { deriveDbKey } from '../account/keystore.js';
 import { ensureVaultEncrypted, isPlaintextSqlite } from '../account/db-cipher-migrate.js';
-import { maybeSnapshotBeforeMigrate } from '../account/snapshot-on-boot.js';
+import { maybeSnapshotBeforeMigrate, maybeSnapshotBeforeMigrateOffloop } from '../account/snapshot-on-boot.js';
 import { guardAgainstForeignWal, recordVaultBinding } from './wal-guard.js';
 import { vaultLooksStructurallySane, verifyVaultIntegritySync } from './vault-halt.js';
 import { writeVaultCorruptMarker } from './integrity.js';
@@ -425,7 +425,7 @@ export function ensureVaultSchema(dbFile, userHex) {
  *
  * @param {{ dbPath: string, userHex: string, log?: (m:string)=>void }} p
  */
-export async function initVaultStorage({ dbPath, userHex, log = (m) => console.error(m) }) {
+export async function initVaultStorage({ dbPath, userHex, log = (m) => console.error(m), onPhase = null }) {
   mkdirSync(dirname(dbPath), { recursive: true });
   const lockPath = join(dirname(dbPath), '.vault-init.lock');
   await acquireLock(lockPath);
@@ -470,8 +470,28 @@ export async function initVaultStorage({ dbPath, userHex, log = (m) => console.e
     //     the check and the decision are atomic with respect to the sibling process.
     assertVaultSafeToRewrite({ dbPath, userHex, log });
 
+    // 0d. D-130 — the pre-migration snapshot, OFF the event loop. The copy runs
+    //     in an awaited child (src/db/vault-copy.js) while we hold the init lock,
+    //     so /account/status can answer during a multi-minute copy of a large
+    //     vault (the operator's 788 MB restore pegged a core 15+ min here when
+    //     the copy was synchronous). Key derivation mirrors ensureVaultSchema
+    //     exactly; on success the fingerprint is recorded, so ensureVaultSchema's
+    //     internal sync snapshot call NO-OPS (and stays as the unchanged path for
+    //     its direct callers, e.g. the at-rest gates). Fail-closed split
+    //     unchanged: a failed copy with a migration pending refuses the boot.
+    onPhase?.('snapshot');
+    {
+      const snapKeyed = vaultIsEncrypted(dbPath) || (atRestEnabled() && !existsSync(dbPath));
+      await maybeSnapshotBeforeMigrateOffloop({
+        dbFile: dbPath,
+        dbKeyHex: snapKeyed ? deriveDbKey(userHex) : null,
+        log,
+      });
+    }
+
     // 1. Schema (key-aware: born-encrypted for a fresh at-rest vault; keyed for an
     //    already-encrypted one; plaintext otherwise).
+    onPhase?.('migrating');
     ensureVaultSchema(dbPath, userHex);
 
     // 2. Migrate an EXISTING plaintext vault to whole-file cipher — ONLY when at-rest

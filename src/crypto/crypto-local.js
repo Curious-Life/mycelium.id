@@ -81,6 +81,26 @@ function logScopeViolation(field, scopeMessage) {
   console.warn(`[SCOPE VIOLATION] field="${field}" ${scopeMessage}`);
 }
 
+// D-127: the SAME dedup discipline for decrypt errors, which never got it. On the
+// 2026-07-30 restore, ~996 identical `[DECRYPT ERROR] field="hrv_avg"` lines flooded
+// boot, and plaintext attachment `description`/`file_name` values that happen to
+// shape-match isEncrypted() log on EVERY library read — pure noise that also slows the
+// hot read path (a console.warn per row per field). Behaviour is unchanged: the value
+// still passes through as-is; stderr just sees each unique (field, error) pair once,
+// with a per-field running count kept for the summary line every 500th suppression.
+const _loggedDecryptErrors = new Map(); // `${field}|${message}` → suppressed count
+function logDecryptError(field, message) {
+  const key = `${field}|${message}`;
+  const n = _loggedDecryptErrors.get(key);
+  if (n === undefined) {
+    _loggedDecryptErrors.set(key, 0);
+    console.warn(`[DECRYPT ERROR] field="${field}": ${message} (further identical errors suppressed)`);
+    return;
+  }
+  _loggedDecryptErrors.set(key, n + 1);
+  if ((n + 1) % 500 === 0) console.warn(`[DECRYPT ERROR] field="${field}": ${message} (${n + 1} identical errors suppressed so far)`);
+}
+
 // Scope-decryption guardian — wraps the allowedScopes check inside decrypt().
 // Every decrypt() call runs through this guardian; metrics reflect real traffic.
 const scopeGuardian = guardians.register({
@@ -1445,7 +1465,7 @@ async function decryptFields(record, masterKey, allowedScopes = null, opts = {})
           logScopeViolation(key, err.message);
           _auditCallback?.('scope.violation', { field: key, scope: err.message });
         } else {
-          console.warn(`[DECRYPT ERROR] field="${key}": ${err.message}`);
+          logDecryptError(key, err.message);
           // Corrupted or incompatible data — leave as-is
         }
       }
@@ -1748,7 +1768,7 @@ async function autoDecryptResults(rows, masterKey, allowedScopes = null, opts = 
             logScopeViolation(key, err.message);
             _auditCallback?.('scope.violation', { field: key, scope: err.message });
           } else {
-            console.warn(`[DECRYPT ERROR] field="${key}": ${err.message}`);
+            logDecryptError(key, err.message);
           }
           // Leave as ciphertext
         }

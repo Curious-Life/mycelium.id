@@ -145,6 +145,11 @@
 //   ⚠️ HOLE FOUND AND CLOSED: P2/P4 originally used `isChatReachable` as their oracle, which bounds
 //   x and y with the SAME helpers the clamp uses, so this mutation left both GREEN with the chat
 //   560px below the fold. `reachable()` now re-derives the rule from the viewport alone.
+// MUTATION-TESTED: [D-134, M17] the mount restore reverted to `desiredWidth = g.width;
+//   desiredHeight = g.height;` (persisting the viewport-clamped render — the pre-fix D-134 state)
+//   → R13b REDs ("mount overwrote the desired width with the viewport-clamped render (1000 →
+//   358)") while R6 and R13 stay GREEN — which is exactly why R13b had to exist: the poisoned-
+//   entry check and the resize-path check both survive the mount-path overwrite. Restored → GO.
 // MUTATION-TESTED: [D-065, M16] the reactive `containerStyle()` stopped emitting
 //   `--chat-translate`, so the property existed nowhere → R1 REDs naming it ("the container lost
 //   --chat-translate"), R5 and R6 RED too.
@@ -347,7 +352,7 @@ const onScreen = (s, vh) => s.rect.top >= 0 && s.rect.bottom <= vh + 1
   && s.rect.right >= MIN_VISIBLE_PX && s.rect.left <= 1280 - MIN_VISIBLE_PX;
 
 let widthonly, topgrip, bottomgrip, fuzz, persisted, windowresize, firstNew, firstOld, collapse, reexpand,
-  collapsedGrip, shrinkgrow;
+  collapsedGrip, shrinkgrow, narrowMount;
 try {
   widthonly = run('widthonly');
   topgrip = run('topgrip');
@@ -358,6 +363,7 @@ try {
   reexpand = run('collapsedthenexpand');
   collapsedGrip = run('collapsedbottomgrip');
   shrinkgrow = run('viewportshrinkgrow');
+  narrowMount = run('persisted', { VW: '390', LS_SIZE: '{"width":1000,"height":800}', LS_POS: '{"x":100,"y":700}' });
   firstNew = run('firstmessage');
   firstOld = run('firstmessage_old');
   collapse = run('collapsehonoured');
@@ -500,6 +506,19 @@ t('R13. ⭐ a TRANSIENT viewport narrowing does not permanently shrink the size 
     `the narrow viewport overwrote the persisted width (${JSON.parse(start.ls.size).width} → ${JSON.parse(narrow.ls.size).width}) — one phone visit or Ctrl+ zoom would shrink the desktop chat forever`);
   assert.equal(back.rect.width, start.rect.width,
     `the chat did not recover when the viewport grew back (${start.rect.width} → ${back.rect.width})`);
+});
+
+t('R13b. ⭐ D-134 — MOUNTING in a small window renders clamped but PERSISTS the desired size', () => {
+  // R13 covers the resize-event path; this is the MOUNT path — the D-134 residual: mount used to
+  // assign the viewport-clamped geometry to desired* and then saveChatSize(), so one launch in a
+  // 390px window permanently shrank the saved 1000px chat. Render clamped, persist desired.
+  const s0 = narrowMount.steps[0];
+  assert.ok(s0.rect.width <= 390, `the chat did not fit the 390px viewport at mount (${s0.rect.width}px)`);
+  const size = JSON.parse(s0.ls.size);
+  assert.equal(size.width, 1000,
+    `mount overwrote the desired width with the viewport-clamped render (1000 → ${size.width}) — one small-window launch shrinks the saved size forever (D-134)`);
+  assert.equal(size.height, 800,
+    `mount overwrote the desired height (800 → ${size.height})`);
 });
 
 // ── W1 ── the CALL SITES, not just the mechanism ────────────────────────────────────────────────

@@ -24,7 +24,7 @@
 	import { toasts } from '$lib/stores/toast';
 	import { browser } from '$app/environment';
 	import { onMount, untrack } from 'svelte';
-	import { clampChatGeometry, CHAT_INPUT_BAR, CHAT_GAP, CHAT_TOP_MARGIN } from '$lib/chat-geometry';
+	import { clampChatGeometry, sanitizeDesiredSize, CHAT_INPUT_BAR, CHAT_GAP, CHAT_TOP_MARGIN } from '$lib/chat-geometry';
 
 	interface Props {
 		visible?: boolean;
@@ -311,8 +311,18 @@
 			viewport(),
 			{ expanded: true },
 		);
-		desiredWidth = g.width;
-		desiredHeight = g.height;
+		// D-134 — render clamped, persist DESIRED. `g` is bounded by the CURRENT
+		// viewport; assigning it to desired* (as this mount used to) meant one
+		// launch in a small window permanently shrank the saved size — the exact
+		// overwrite the doctrine above forbids. The desired pair gets ABSOLUTE
+		// sanitization only (poisoned entries still die in one load); the render
+		// pair gets the viewport clamp.
+		const sane = sanitizeDesiredSize({
+			width: (savedSize as { width?: number } | null)?.width,
+			height: (savedSize as { height?: number } | null)?.height,
+		});
+		desiredWidth = sane.width;
+		desiredHeight = sane.height;
 		chatWidth = g.width;
 		chatHeight = g.height;
 		if (hadPos) position = { x: g.x, y: g.y };

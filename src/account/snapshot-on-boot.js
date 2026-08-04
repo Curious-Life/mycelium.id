@@ -29,6 +29,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { atRestEnabled } from '../db/open.js';
 import { isPlaintextSqlite } from './db-cipher-migrate.js';
+import { runVaultCopyChild } from '../db/vault-copy.js';
 
 const KEEP = Number(process.env.MYCELIUM_SNAPSHOT_KEEP) || 15;
 
@@ -185,6 +186,86 @@ export function maybeSnapshotBeforeMigrate({ dbFile, dbKeyHex, migrationsDir = '
   }
   pruneSnapshots(snapDir, KEEP, log);
   log?.(`[snapshot] pre-boot snapshot → ${dest}`);
+  return dest;
+}
+
+/**
+ * D-130 — the OFF-LOOP twin of maybeSnapshotBeforeMigrate: identical triggers,
+ * identical fail-closed split (migrating + failure → throw; baseline failure →
+ * loud log, boot continues), but the copy runs in an awaited CHILD process
+ * (src/db/vault-copy.js) so the event loop stays free and /account/status can
+ * answer honestly during a multi-minute copy. Runs in initVaultStorage under
+ * the init lock, BEFORE ensureVaultSchema — whose internal sync call then
+ * NO-OPS because a successful copy here records the fingerprint + baseline
+ * (the sync path stays intact for direct callers, e.g. the at-rest gates).
+ *
+ * ⚠️ LOCKSTEP: the decision skeleton below mirrors maybeSnapshotBeforeMigrate
+ * line for line (shared helpers; same ordering; same messages). A semantic
+ * change to one MUST land in both — verify:boot-snapshot-offloop drives this
+ * one's fail-closed split; verify:snapshot-on-boot drives the sync one's.
+ *
+ * @param {{ dbFile:string, dbKeyHex:string|null, migrationsDir?:string,
+ *           log?:Function, copyChild?:typeof runVaultCopyChild }} o
+ * @returns {Promise<string|null>} the snapshot path written, or null if skipped.
+ */
+export async function maybeSnapshotBeforeMigrateOffloop({ dbFile, dbKeyHex, migrationsDir = 'migrations', log, copyChild = runVaultCopyChild } = {}) {
+  if (!snapshotEnabled()) return null;
+  if (!dbFile || !existsSync(dbFile)) return null;       // fresh vault — nothing to back up
+  // A 0-BYTE file is also a fresh vault (verify:vault-fail-stop's "boots fresh,
+  // is NOT condemned" case — a create-then-crash leaves one). There is nothing
+  // to protect, and the copy child's verify-before-rename RIGHTLY refuses an
+  // empty-schema copy — which here would fail-close a boot that should proceed.
+  // (Found by the full chain on the convergence pass, 2026-08-04.)
+  try { if (statSync(dbFile).size === 0) return null; } catch { return null; }
+  const fp = migrationsFingerprint(migrationsDir);
+  if (!fp) return null;                                   // no migrations dir — nothing to gate on
+
+  const snapDir = path.join(path.dirname(dbFile), 'snapshots');
+  const fpFile = path.join(snapDir, '.last-migrations-fp');
+  let last = '';
+  try { last = readFileSync(fpFile, 'utf8').trim(); } catch { /* none yet */ }
+  const migrating = fp !== last;
+  const haveBaseline = existingSnapshots(snapDir).length > 0;
+  if (!migrating && haveBaseline) return null;            // nothing pending, already covered
+
+  // Same plaintext-about-to-encrypt skip as the sync twin (CLAUDE.md §1/§7).
+  if (!dbKeyHex && atRestEnabled() && isPlaintextSqlite(dbFile)) {
+    log?.('[snapshot] skipped: the vault is plaintext and at-rest is about to encrypt it — a snapshot here would be a plaintext copy (the migration keeps its own pre-cipher backup)');
+    return null;
+  }
+
+  let dest = null;
+  try {
+    mkdirSync(snapDir, { recursive: true });
+    if (hasRoomFor(dbFile, snapDir) === false) {
+      const msg = '[snapshot] NOT ENOUGH DISK SPACE to snapshot the vault before boot — your vault has NO local backup right now. Free some space and relaunch.';
+      if (migrating) throw new Error(`${msg} Refusing to migrate an un-backed-up vault.`);
+      log?.(msg);
+      return null;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    dest = path.join(snapDir, `pre-migrate-${stamp}-${process.pid}-${randomBytes(3).toString('hex')}.db`);
+    const r = await copyChild({ srcDbPath: dbFile, destPath: dest, dbKeyHex, log });
+    if (!r.ok) throw new Error(`vault copy child failed (${r.reason || 'unknown'})`);
+    // Only record the fingerprint AFTER a successful snapshot (same rule as the
+    // sync twin) — this is also what makes ensureVaultSchema's sync call no-op.
+    writeFileSync(fpFile, fp);
+  } catch (e) {
+    if (dest) for (const sfx of ['', '-wal', '-shm', '.tmp']) { try { rmSync(dest + sfx, { force: true }); } catch { /* */ } }
+    if (migrating) {
+      throw new Error(
+        `[snapshot] pre-migration snapshot FAILED (${e?.message || e}). Refusing to migrate an `
+        + 'un-backed-up vault. Set MYCELIUM_SNAPSHOT_ON_BOOT=0 to bypass (not recommended).',
+      );
+    }
+    // Baseline only, nothing destructive pending: say so loudly, never block boot.
+    // (ensureVaultSchema's sync call will retry synchronously — worst case is
+    // exactly the pre-D-130 behaviour, and only on this already-failed path.)
+    log?.(`[snapshot] baseline snapshot FAILED (${e?.message || e}) — the vault has no local backup. Boot continues; no schema change is pending.`);
+    return null;
+  }
+  pruneSnapshots(snapDir, KEEP, log);
+  log?.(`[snapshot] pre-boot snapshot (off-loop) → ${dest}`);
   return dest;
 }
 

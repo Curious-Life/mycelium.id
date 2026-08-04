@@ -174,6 +174,19 @@
 	// Stop/Resume on the live feed rows (moved here with the panel from Header — §3.9/R3).
 	let categorizeBusy = $state(false);
 	let processingError = $state<string | null>(null);
+	// D-132: defer/resume the L2 semantic-enrich pass only (its own key + route —
+	// embed and L1 keep running; the enrich row renders 'deferred' with no ETA).
+	let enrichBusy = $state(false);
+	async function toggleEnrichDefer(deferred: boolean) {
+		if (enrichBusy) return;
+		enrichBusy = true;
+		try {
+			await apiPost(deferred ? '/portal/enrichment/enrich/resume' : '/portal/enrichment/enrich/defer', {});
+		} catch {
+			processingError = deferred ? "Couldn't resume — try again." : "Couldn't defer — try again.";
+		} finally { enrichBusy = false; }
+	}
+
 	async function toggleCategorize(paused: boolean) {
 		if (categorizeBusy) return;
 		categorizeBusy = true;
@@ -454,6 +467,15 @@
 						disabled={categorizeBusy}
 						title={j.status === 'paused' ? 'Resume processing your messages' : 'Stop processing on this computer (you can resume anytime)'}
 					>{j.status === 'paused' ? 'Resume' : 'Stop'}</button>
+				{:else if j.kind === 'enrich'}
+					<!-- D-132: L2 is separately DEFERRABLE — "do the deep pass later" without
+					     stopping embed/L1. Distinct from the shared Stop above by design. -->
+					<button
+						class="ml-auto flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-text-tertiary)] disabled:opacity-50"
+						onclick={() => toggleEnrichDefer(j.status === 'deferred')}
+						disabled={enrichBusy}
+						title={j.status === 'deferred' ? 'Resume the deep semantic pass' : 'Defer the deep semantic pass — run it later (embedding and sorting continue)'}
+					>{j.status === 'deferred' ? 'Resume' : 'Defer'}</button>
 				{/if}
 			</div>
 			<!-- The persist failed ⇒ the click did NOT take effect. Say so: the server refuses

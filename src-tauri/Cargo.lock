@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "mycelium"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "libc",
  "serde_json",

@@ -74,14 +74,22 @@ const S = ${JSON.stringify({
   // known-true first, then the count fails — the only shape that distinguishes HOLDING an answer
   // from SETTING one (at mount `generated` is false, so "unknown ⇒ hidden" is vacuous).
   unknownAfterFirstRead: process.env.UNKNOWN_AFTER_FIRST_READ === '1',
+  // D-123 second layer: the DATA slice fail-degrades server-side to
+  // { total: 0, unknown: true } inside a 200 (readiness.js WAL/lock contention path).
+  // A degraded answer must never decide the first-run gate.
+  dataUnknown: process.env.DATA_UNKNOWN === '1',
 })};
 let reads = 0;
 export async function api(path) {
   const p = String(path);
   if (p.includes('/portal/readiness')) { globalThis.__statusReads.push(p); reads++; }
+  // D-123: a readiness read that FAILS — the shape of the operator's 67k-vault loads.
+  // Counted first (the retry-poll assertion needs the count), then refused.
+  if (${process.env.FAIL_READINESS === '1'}) return { ok: false, json: async () => ({}) };
   const gen = S.flipAfterFirstRead ? reads > 1 : S.generated;
   return { ok: true, json: async () => ({
-    data: { total: S.total, embedded: S.total, pending: 0 },
+    data: S.dataUnknown ? { total: 0, embedded: 0, pending: 0, unprocessable: 0, unknown: true }
+      : { total: S.total, embedded: S.total, pending: 0 },
     ai: { connected: S.ai, activeProvider: S.ai ? 'local' : null },
     channel: { connected: S.channel },
     mindscape: (S.mindscapeUnknown || (S.unknownAfterFirstRead && reads > 1))
@@ -117,10 +125,15 @@ let js = out.js.code
   .replace(/from ['"]\$app\/navigation['"]/g, `from './goto-stub.js'`)
   .replace(/from ['"]\.\/MyceliumCanvas\.svelte['"]/g, `from './canvas.js'`)
   // S11: the welcome MODAL became the OnboardingWizard child. This harness proves the
-  // RAIL's liveness, not the wizard — so stub the wizard leaf exactly like MyceliumCanvas
-  // (the real wizard is a full sub-tree; compiling it here is neither needed nor in scope).
-  .replace(/from ['"]\.\/wizard\/OnboardingWizard\.svelte['"]/g, `from './canvas.js'`);
+  // RAIL's liveness + the WIZARD GATE (D-123), not the wizard's interior — so the wizard
+  // leaf is a compiled one-element MARKER stub: `wizardOpen` is only observable as
+  // whether this marker is in the DOM (reading the variable would be the mistake the
+  // rail checks already name: a true flag that renders nothing).
+  .replace(/from ['"]\.\/wizard\/OnboardingWizard\.svelte['"]/g, `from './wizard-stub.js'`);
 writeFileSync(`${GEN}/Flow.js`, js);
+// The wizard marker stub — a real compiled Svelte component so mount semantics match.
+const wizOut = compile('<div class="wizard-stub-marker"></div>', { generate: 'client', name: 'WizardStub', css: 'injected' });
+writeFileSync(`${GEN}/wizard-stub.js`, wizOut.js.code);
 
 const { JSDOM } = await import('jsdom');
 const dom = new JSDOM('<!doctype html><html><body><div id="host"></div></body></html>', { url: 'http://localhost/' });
@@ -139,6 +152,21 @@ try {
   flushSync();
   await new Promise((r) => setTimeout(r, 30));
   const afterMount = globalThis.__statusReads.length;
+  const wizard = () => !!dom.window.document.querySelector('.wizard-stub-marker');
+
+  // ── D-123 probe: readiness FAILING must never open first-run over an unknown vault ──
+  // The wizard stays CLOSED at mount and after a poll tick, and the poll keeps RETRYING
+  // (reads grow) so a fresh vault whose first fetch failed still gets its wizard later.
+  if (process.env.FAIL_READINESS === '1' || process.env.DATA_UNKNOWN === '1') {
+    result.ok = true;
+    result.wizardAtMount = wizard();
+    await new Promise((r) => setTimeout(r, 4600)); // one poll tick @4s
+    result.wizardAfterPoll = wizard();
+    result.readsAfterPoll = globalThis.__statusReads.length;
+    console.log(JSON.stringify(result));
+    rmSync(GEN, { recursive: true, force: true });
+    process.exit(0);
+  }
 
   // ⚠️ THE TRANSITION PROBE MUST NOT SHARE A RUN WITH THE SIGNAL PROBE. U3 fires
   // signalGuidanceRestored() twice, each triggering a refresh — so by the time we measured, the
@@ -185,6 +213,8 @@ try {
   result.railButtons = railEl
     ? [...railEl.querySelectorAll('button')].map((b) => b.textContent.replace(/\s+/g, ' ').trim())
     : [];
+  // D-123: the wizard gate, observed from the DOM (marker stub), never from the variable.
+  result.wizardRendered = wizard();
 } catch (e) {
   result.error = String(e?.message || e);
 }

@@ -25,6 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { isVaultHalted, readVaultCorruptMarker } from './vault-halt.js';
+import { isImportQuiesced } from './import-quiesce.js';
 import { recordDurabilityEvent } from './durability-log.js';
 
 const WORKER = fileURLToPath(new URL('./snapshot-worker.mjs', import.meta.url));
@@ -92,6 +93,10 @@ export function maybeScheduleSnapshot({ dbPath, dbKeyHex = null, isCanonical = t
     const every = intervalMs();
     if (every <= 0) return { scheduled: false, reason: 'disabled' };
 
+    // D-128: never VACUUM the vault while a bulk import is mid-restore — the detached
+    // worker copying pages under a mass raw write is half of the corruption pair the
+    // quiesce exists to prevent. The schedule re-fires later; nothing is lost.
+    if (isImportQuiesced()) return { scheduled: false, reason: 'import-quiesced' };
     // Never snapshot a vault we have already caught being damaged: the copy would be
     // damaged too, and rotation would spend the slot that still holds a good one.
     // The worker re-checks the on-disk marker itself (it is the cross-process signal);

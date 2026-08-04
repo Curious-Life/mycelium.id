@@ -160,7 +160,12 @@ export async function checkAvailability(raw, { env = process.env, fetchImpl = gl
     const r = await cpFetch(fetchImpl, `${base}/v1/handle/${encodeURIComponent(v.handle)}`);
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return { available: false, reason: data?.error || 'that handle is taken' };
-    return { available: data?.available !== false, reason: data?.reason };
+    // D-124: `=== true`, never `!== false`. A 200 whose body lacks/garbles `available`
+    // must read UNAVAILABLE — the docstring above says FAIL CLOSED and for the
+    // malformed-200 case this line was the one fail-OPEN reading of it: a control-plane
+    // shape change would have reported every handle as free.
+    if (data?.available !== true) return { available: false, reason: data?.reason || 'the control plane gave no availability answer', unreachable: data?.available === undefined ? true : undefined };
+    return { available: true, reason: data?.reason };
   } catch {
     return { available: false, reason: "couldn't reach the control plane to check", unreachable: true };
   }

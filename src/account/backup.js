@@ -30,6 +30,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { assertEntryCount } from '../ingest/import-parsers.js';
 import { resolveDbKeyHex } from '../db/open.js';
+import { createZipStream } from './zip-stream.js';
 import { vaultPresence } from './vault-presence.js';
 
 export const ARCHIVE_VERSION = 1;
@@ -314,6 +315,74 @@ export async function buildVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteCo
 
     const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
     return { buffer, manifest };
+  } finally {
+    try { if (existsSync(tmpSnap)) rmSync(tmpSnap); } catch { /* */ }
+  }
+}
+
+/**
+ * D-122: the same `.myvault` archive, STREAMED to a Writable — peak memory flat in
+ * vault size. buildVaultArchive above buffers the WHOLE archive (plus a readFileSync of
+ * every member), which failed outright on the operator's ~3 GB vault; the backup had to
+ * be hand-built with `zip -0`. This path exists so the product's own backup works on the
+ * vaults that most need backing up.
+ *
+ * Same member set, same manifest fields, same restore-format contract (validated by the
+ * existing restore validator): manifest.json v:1, kcvSha256, mycelium.db snapshot,
+ * kcv.json, optional remote.json, uploads/, magic-checked mind/ + voice-samples/.
+ * The manifest is computed BEFORE streaming (sizes from stat, kcv hashed — both cheap)
+ * so the router can send X-Vault-Manifest as a header ahead of the body.
+ *
+ * @param {object} p same paths as buildVaultArchive, plus:
+ * @param {import('node:stream').Writable} p.out  destination (HTTP response / file)
+ * @param {number} [p.zip64Threshold]  TEST-ONLY zip64 forcing (see zip-stream.js)
+ * @returns {Promise<{ manifest: object, bytes: number }>}
+ */
+export async function streamVaultArchive({ dbPath, kcvPath, uploadsRoot, remoteConfigPath, mindRoot, voiceSamplesRoot, app = 'mycelium-v1', out, zip64Threshold, onManifest }) {
+  if (!existsSync(kcvPath)) throw new Error('refusing to back up: no kcv.json (vault not initialised)');
+  if (!out || typeof out.write !== 'function') throw new Error('streamVaultArchive: a Writable `out` is required');
+  const dbKeyHex = resolveDbKeyHex(process.env.ENCRYPTION_MASTER_KEY || '', dbPath);
+  const tmpSnap = path.join(os.tmpdir(), `myvault-snap-${process.pid}-${sha256(Buffer.from(dbPath + Date.now())).slice(0, 12)}.db`);
+  try {
+    await snapshotDb(dbPath, tmpSnap, { dbKeyHex });
+    const kcvBuf = readFileSync(kcvPath); // small sidecar — the one deliberate buffer
+    const uploads = uploadsRoot ? walk(uploadsRoot) : [];
+    const mindWalked = (mindRoot && existsSync(mindRoot)) ? walkNoSymlink(mindRoot) : [];
+    const mind = mindWalked.filter((f) => hasMagic(f.abs, MIND_MAGIC));
+    const voiceWalked = (voiceSamplesRoot && existsSync(voiceSamplesRoot)) ? walkNoSymlink(voiceSamplesRoot) : [];
+    const voice = voiceWalked.filter((f) => hasMagic(f.abs, VOICE_MAGIC));
+    if (mindRoot && mind.length === 0) {
+      console.warn('[backup] agent mind interior appears EMPTY — the backup carries no mind files (wrong agentRoot? not yet initialised?).');
+    }
+    const manifest = {
+      v: ARCHIVE_VERSION,
+      createdAt: new Date().toISOString(),
+      app,
+      dbBytes: statSync(tmpSnap).size,
+      kcvSha256: sha256(kcvBuf),
+      uploadCount: uploads.length,
+      mindCount: mind.length,
+      voiceCount: voice.length,
+    };
+    // The manifest is complete BEFORE the first byte streams — callers that need it in
+    // response HEADERS (the router's X-Vault-Manifest) take it here.
+    if (typeof onManifest === 'function') onManifest(manifest);
+    const z = createZipStream(out, zip64Threshold ? { zip64Threshold } : {});
+    await z.addFile('mycelium.db', tmpSnap);
+    await z.addBuffer('kcv.json', kcvBuf);
+    if (remoteConfigPath && existsSync(remoteConfigPath)) await z.addFile('remote.json', remoteConfigPath);
+    for (const f of uploads) await z.addFile(`uploads/${f.rel}`, f.abs);
+    for (const f of mindWalked) {
+      if (!mind.includes(f)) { console.warn(`[backup] skipping non-MIND-magic file in mind/: ${f.rel}`); continue; }
+      await z.addFile(`mind/${f.rel}`, f.abs);
+    }
+    for (const f of voiceWalked) {
+      if (!voice.includes(f)) { console.warn(`[backup] skipping non-MVS1-magic file in voice-samples/: ${f.rel}`); continue; }
+      await z.addFile(`voice-samples/${f.rel}`, f.abs);
+    }
+    await z.addBuffer('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2)));
+    const { bytes } = await z.finalize();
+    return { manifest, bytes };
   } finally {
     try { if (existsSync(tmpSnap)) rmSync(tmpSnap); } catch { /* */ }
   }

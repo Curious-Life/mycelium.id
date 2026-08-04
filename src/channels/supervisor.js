@@ -26,6 +26,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { dataDir } from '../paths.js';
+import { registerCrashKillChild } from '../system/crash-reaper.js';
 
 /**
  * Where the daemon's persistent per-turn outcome log lands: <dataDir>/logs/
@@ -176,14 +177,27 @@ export function startChannelSupervisor({
     MYCELIUM_CHANNEL_TURN_LOG: channelTurnLogPath(),
   });
 
-  // Should the daemon run right now? Enabled + at least one platform token.
+  // Should the daemon run right now? Enabled + a config the daemon will actually ACCEPT.
+  // D-129: this predicate must MIRROR the daemon's own boot rule (packages/channel-daemon/
+  // config.js assertEgressConfig), not approximate it. It used to be "any token", but the
+  // daemon (a) requires OWNER_DISCORD_ID whenever DISCORD_BOT_TOKEN is set — even with a
+  // healthy Telegram config — and (b) refuses to boot with neither platform complete. So
+  // "any token" spawned a child the daemon was guaranteed to refuse: exit(1) → capped
+  // backoff → respawn every ~30s, forever, burning cycles and spamming the log. A config
+  // the daemon will provably reject must never spawn; the health line says what to fix.
+  // Returns false or a { blocked: <honest reason> } object the tick surfaces.
   async function shouldRun() {
     try {
       const enabled = (await db.secrets.get(userId, 'CHANNEL_ENABLED')) === '1';
       if (!enabled) return false;
       const hasTg = await db.secrets.has(userId, 'TELEGRAM_BOT_TOKEN');
       const hasDc = await db.secrets.has(userId, 'DISCORD_BOT_TOKEN');
-      return Boolean(hasTg || hasDc);
+      const hasDcOwner = await db.secrets.has(userId, 'OWNER_DISCORD_ID');
+      if (hasDc && !hasDcOwner) {
+        return { blocked: 'Discord has a bot token but no owner id — the bridge refuses to start until OWNER_DISCORD_ID is set (or the Discord token is removed) in Settings → Channels.' };
+      }
+      if (!hasTg && !hasDc) return false;
+      return true;
     } catch { return false; }
   }
 
@@ -212,6 +226,7 @@ export function startChannelSupervisor({
       setHealth('down', 'Could not start the channel bridge.', String(e?.message || e));
       failures++; backoff(); return;
     }
+    registerCrashKillChild(child, 'channel-daemon'); // D-136: the crash path must reap what stop() would
     spawnedByUs = true; errBuf = '';
     child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
     child.on('error', () => { /* surfaced via exit/last stderr */ });
@@ -245,10 +260,14 @@ export function startChannelSupervisor({
 
   async function tick() {
     if (stopped) return;
-    if (!(await shouldRun())) {
-      // Channels disabled / no token → ensure nothing is running.
+    const runnable = await shouldRun();
+    if (runnable !== true) {
+      // Channels disabled / no token / a config the daemon would refuse → nothing runs.
       if (child) killChild();
-      setHealth('disabled', 'Channels are off (enable + add a bot token in Settings → Channels).');
+      // D-129: a BLOCKED config gets its own honest reason, not the generic "off" copy —
+      // "channels are off" about a half-finished Discord setup is the D-013 class.
+      if (runnable && runnable.blocked) setHealth('down', runnable.blocked);
+      else setHealth('disabled', 'Channels are off (enable + add a bot token in Settings → Channels).');
       failures = 0;
       return;
     }

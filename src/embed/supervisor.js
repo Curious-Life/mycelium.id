@@ -25,6 +25,7 @@
 // the offline-model HF_* hints) — no vault keys ever flow to it.
 
 import { spawn } from 'node:child_process';
+import { registerCrashKillChild } from '../system/crash-reaper.js';
 import { existsSync } from 'node:fs';
 import { venvPythonPath, systemPython } from '../system/platform-env.js';
 import { looksLikePortConflict, reapOwnOrphanOnPort, createRestartGovernor } from '../system/service-guard.js';
@@ -221,6 +222,7 @@ export function startEmbedSupervisor({
         setHealth('down', 'Could not start the embedding engine.', String(e?.message || e));
         failures++; backoff(); return;
       }
+      registerCrashKillChild(child, 'embed-service'); // D-136: the crash path must reap what stop() would
       spawnedByUs = true; errBuf = '';
       child.stderr?.on('data', (d) => { errBuf = (errBuf + d.toString()).slice(-4096); });
       child.on('error', () => { /* surfaced via exit/last stderr */ });

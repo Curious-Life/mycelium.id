@@ -37,9 +37,19 @@
 		// before the vault is open ("setup mode"). Don't redirect AWAY from /setup
 		// here — the recovery-key reveal must survive the vault becoming initialised.
 		try {
-			const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
-			if (res.ok) {
-				const s = await res.json();
+			// D-130: a boot can be legitimately IN FLIGHT for minutes (the awaited
+			// off-loop vault copy on a large restore). booting:true must NEVER route
+			// to /setup — open:false over a populated vault is the exact D-080
+			// create-over-a-real-vault hazard. Re-poll until the boot settles.
+			let s = null;
+			for (;;) {
+				const res = await fetch('/api/v1/account/status', { credentials: 'same-origin' });
+				if (!res.ok) { s = null; break; }
+				s = await res.json();
+				if (!s.booting) break;
+				await new Promise((r) => setTimeout(r, 2000));
+			}
+			if (s) {
 				// Passphrase-locked (created, not yet unlocked this launch) → /unlock.
 				if (s.locked && !isUnlockPage) { goto('/unlock'); return; }
 				// Not created (or keys lost, no passphrase) → first-run /setup.

@@ -20,6 +20,7 @@
 // Scoped to the interactive chat (trusted input) only. See
 // the harness-CLI design for the stream-json mapping + threat model.
 import { spawn as nodeSpawn } from 'node:child_process';
+import { registerCrashKillChild } from '../system/crash-reaper.js';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -180,6 +181,7 @@ export function createClaudeCliLoop({ claudeBin, restPort, model, configDir, log
         logger(`[cli] stripped NUL byte(s) from ${_nulHits} argv entr${_nulHits === 1 ? 'y' : 'ies'} — vault text is damaged (corruption artifact); the turn proceeds, but the vault needs a repair pass`);
       }
       const child = spawnImpl(claudeBin, safeArgs, { env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+      registerCrashKillChild(child, 'claude-cli-turn'); // D-136
 
       const cleanup = () => {
         clearInterval(watch);

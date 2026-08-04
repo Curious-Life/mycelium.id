@@ -9,6 +9,16 @@
 // nothing lands in the ledger to diverge FROM. This gate locks in the corrected behavior:
 // report + self-heal + keep booting, and prove schemaDrift() sees a ledger-less foreign build.
 
+// MUTATION-TESTED: (D-121, 2026-08-03) the changed-file guard in src/db/migrate.js was disabled
+// (`if (changedSet.has(f) && !reapplyChanged)` → `if (false && …)`) → D121a REDs (divergent_extra
+// column lands + applied-list includes the changed file), D121c REDs, D121d REDs (heal becomes a
+// back door); D121b stays GREEN as the control. Guard restored → 16/16 GREEN. This is the exact
+// pre-fix behaviour: before D-121 the loop skipped only on hash-EQUAL, so a changed file WAS
+// re-applied while the comment above it claimed "not re-applying".
+// MUTATION-TESTED: (D-121, 2026-08-03, post-review) the heal's expected-table scoping
+// reverted (`healFiles = files`) → D121e REDs: the second boot heal-loops over the table
+// the refused file can never create (the security review's F4, reproduced then fixed).
+// Restored → 17/17 GREEN.
 import './lib/gate-stdout.mjs'; // MUST be first: flushes VERDICT on a piped stdout
 import Database from 'better-sqlite3';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readdirSync } from 'node:fs';
@@ -81,6 +91,92 @@ t('HIGH-2: an edited migration file WARNS but still BOOTS (8/54 were edited afte
   write(MUT, '0041_categories_provenance.sql', 'ALTER TABLE messages ADD COLUMN categories_provenance TEXT; -- typo fix');
   const applied = quiet(() => applyMigrations(d, MUT));
   assert.ok(Array.isArray(applied), 'a comment fix must not refuse boot on every existing vault');
+  d.close();
+});
+
+// ── D-121: divergent lineage must never RE-ASSERT its DDL (fail closed on the destructive act) ──
+// The 2026-07-27/30 corruption mechanism: two lineages fork at one number, and re-applying the
+// other build's version of an already-applied file asserts conflicting DDL into a live vault.
+// The old loop skipped only on hash-EQUAL, so a changed file WAS re-applied — while the comment
+// above it claimed "not re-applying". These checks pin the corrected behaviour.
+t('D121a: a hash-CHANGED migration is NOT re-applied — its DDL never lands, the ledger keeps the truth', () => {
+  const d = db();
+  applyMigrations(d, DEV);
+  const before = readLedger(d).get('0041_categories_provenance.sql');
+  const DIV = mkdir('divergent');
+  write(DIV, '0001_init.sql', 'CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, content TEXT);\nCREATE TABLE IF NOT EXISTS facts (id TEXT PRIMARY KEY);');
+  write(DIV, '0041_categories_provenance.sql', 'ALTER TABLE messages ADD COLUMN categories_provenance TEXT;\nALTER TABLE messages ADD COLUMN divergent_extra TEXT;');
+  const applied = quiet(() => applyMigrations(d, DIV));
+  assert.ok(!applied.includes('0041_categories_provenance.sql'), 'changed file must not be in the applied list');
+  const cols = d.prepare(`PRAGMA table_info(messages)`).all().map((c) => c.name);
+  assert.ok(!cols.includes('divergent_extra'), 'the divergent DDL must NOT have been asserted');
+  assert.equal(readLedger(d).get('0041_categories_provenance.sql'), before,
+    'the ledger must still record what ACTUALLY ran — an unapplied hash recorded would be a lie');
+  d.close();
+});
+
+t('D121b (control): MYCELIUM_LINEAGE_REAPPLY=1 DOES apply the changed file — proves D121a is non-vacuous', () => {
+  const d = db();
+  applyMigrations(d, DEV);
+  const DIV = mkdir('divergent-optin');
+  write(DIV, '0001_init.sql', 'CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, content TEXT);\nCREATE TABLE IF NOT EXISTS facts (id TEXT PRIMARY KEY);');
+  write(DIV, '0041_categories_provenance.sql', 'ALTER TABLE messages ADD COLUMN categories_provenance TEXT;\nALTER TABLE messages ADD COLUMN divergent_extra TEXT;');
+  process.env.MYCELIUM_LINEAGE_REAPPLY = '1';
+  try { quiet(() => applyMigrations(d, DIV)); } finally { delete process.env.MYCELIUM_LINEAGE_REAPPLY; }
+  const cols = d.prepare(`PRAGMA table_info(messages)`).all().map((c) => c.name);
+  assert.ok(cols.includes('divergent_extra'), 'the explicit opt-in must apply this build\'s version');
+  d.close();
+});
+
+t('D121c: a NEW migration beside a changed one still applies — the refusal is per-file, not global', () => {
+  const d = db();
+  applyMigrations(d, DEV);
+  const DIV = mkdir('divergent-plus-new');
+  write(DIV, '0001_init.sql', 'CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, content TEXT);\nCREATE TABLE IF NOT EXISTS facts (id TEXT PRIMARY KEY);');
+  write(DIV, '0041_categories_provenance.sql', 'ALTER TABLE messages ADD COLUMN categories_provenance TEXT;\nALTER TABLE messages ADD COLUMN divergent_extra TEXT;');
+  write(DIV, '0050_new_table.sql', 'CREATE TABLE IF NOT EXISTS qa10_new (id TEXT PRIMARY KEY);');
+  const applied = quiet(() => applyMigrations(d, DIV));
+  // (the new file's expected table also trips the self-heal, which legitimately re-applies
+  //  UNCHANGED files — the claim here is only: new applies, changed still refused)
+  assert.ok(applied.includes('0050_new_table.sql'), 'the genuinely new file applies');
+  assert.ok(!applied.includes('0041_categories_provenance.sql'), 'the changed file stays refused');
+  assert.ok(d.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='qa10_new'`).get(), 'new table created');
+  const cols = d.prepare(`PRAGMA table_info(messages)`).all().map((c) => c.name);
+  assert.ok(!cols.includes('divergent_extra'), 'divergent DDL still absent');
+  d.close();
+});
+
+t('D121d: the self-heal re-applies UNCHANGED files but still refuses the changed one', () => {
+  const d = db();
+  applyMigrations(d, DEV);
+  d.exec('DROP TABLE facts'); // trigger heal
+  const DIV = mkdir('divergent-heal');
+  write(DIV, '0001_init.sql', 'CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, content TEXT);\nCREATE TABLE IF NOT EXISTS facts (id TEXT PRIMARY KEY);');
+  write(DIV, '0041_categories_provenance.sql', 'ALTER TABLE messages ADD COLUMN categories_provenance TEXT;\nALTER TABLE messages ADD COLUMN divergent_extra TEXT;');
+  const applied = quiet(() => applyMigrations(d, DIV));
+  assert.ok(d.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='facts'`).get(), 'dropped table healed');
+  const cols = d.prepare(`PRAGMA table_info(messages)`).all().map((c) => c.name);
+  assert.ok(!cols.includes('divergent_extra'), 'heal must not become a back door for divergent DDL');
+  assert.ok(!applied.includes('0041_categories_provenance.sql'), 'changed file refused even under heal');
+  d.close();
+});
+
+t('D121e: a changed file that ADDS a table does NOT trip the self-heal every boot (no heal loop)', () => {
+  // Independent security review (2026-08-03): with the heal's expected-table set computed
+  // from ALL of this build's files, an edited migration adding a table made the heal fire
+  // EVERY boot forever — re-applying all migrations each time (the DDL re-assertion D-121
+  // exists to stop) while the changed file stayed refused and its table never appeared.
+  // The expected set now excludes refused files' tables.
+  const d = db();
+  applyMigrations(d, DEV);
+  const DIV = mkdir('divergent-newtable');
+  write(DIV, '0001_init.sql', 'CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, content TEXT);\nCREATE TABLE IF NOT EXISTS facts (id TEXT PRIMARY KEY);');
+  write(DIV, '0041_categories_provenance.sql', 'ALTER TABLE messages ADD COLUMN categories_provenance TEXT;\nCREATE TABLE IF NOT EXISTS div_only_table (id TEXT PRIMARY KEY);');
+  const boot2 = quiet(() => applyMigrations(d, DIV));
+  const boot3 = quiet(() => applyMigrations(d, DIV));
+  assert.deepEqual(boot2, [], 'the changed file is refused and nothing else needs applying');
+  assert.deepEqual(boot3, [], 'and the NEXT boot must not heal-loop over the table the refusal makes impossible');
+  assert.ok(!d.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='div_only_table'`).get(), 'the divergent table stays absent (refused, not healed in)');
   d.close();
 });
 

@@ -789,7 +789,11 @@ export const IMPORT_SETTINGS_POLICY = Object.freeze({
     verdict: 'refuse',
     why: 'THE ROUND-4 P1. enrich/drainer.js re-reads it on every boot into _embedPaused; a bundle-set `true` stops the user\'s own embedding silently and keeps it stopped across reboots. Identical hazard to the denied `pipeline_state` table one layer up ("a planted row stalls the user\'s own enrichment") — this box\'s runtime state, never a bundle\'s.',
   },
-  enrichCategorizePaused: {
+  enrichL2Deferred: {
+      verdict: 'refuse',
+      why: 'D-132 — the owner\'s standing "defer the L2 semantic-enrich pass" posture; drainer.js restores it into _enrichDeferred on every boot. A bundle silently and durably stops the user\'s own semantic enrichment (same class as the pause keys around it).',
+    },
+    enrichCategorizePaused: {
     verdict: 'refuse',
     why: 'the categorize half of the same P1 — drainer.js reads it into _categorizePaused on every boot. A bundle silently and durably stops the user\'s own categorization.',
   },
@@ -800,6 +804,10 @@ export const IMPORT_SETTINGS_POLICY = Object.freeze({
   enrichProcessingPausedAt: {
     verdict: 'refuse',
     why: 'the durable "paused since" stamp read by readiness.js:589. Bundle-chosen (the observed exploit used 2099) it also FORGES the pipeline-status the user reads to notice the pause. This box\'s runtime state.',
+  },
+  transcribeDrainPaused: {
+    verdict: 'refuse',
+    why: 'D-133\'s persisted pause for the background transcription drain (enrich/transcribe-retry.js re-reads it EVERY cycle — by design, so the pause is authoritative). Exactly the enrichEmbedPaused hazard one lane over: a bundle-set `true` silently and durably stops the user\'s own transcription. This box\'s runtime state, never a bundle\'s.',
   },
   // ── RAW-SQL keys: written/read by src/db/spaces.js via `UPDATE users SET settings = ?`,
   //    which scanSettingsKeys structurally cannot see. Classified BY HAND (round-5).

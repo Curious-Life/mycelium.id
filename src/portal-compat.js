@@ -1,7 +1,7 @@
 import express from 'express';
 import { createReadiness } from './readiness.js';
 import { getEmbedderHealth, getEmbedSupervisor } from './embed/supervisor.js';
-import { nudgeEnrichDrainer, resetPullBackoff, resetEnrichGiveUpCounters, pauseEnrichProcessing, resumeEnrichProcessing, pauseEmbed, resumeEmbed, pauseCategorize, resumeCategorize, isCategorizePaused, defaultLabelModel } from './enrich/drainer.js';
+import { nudgeEnrichDrainer, resetPullBackoff, resetEnrichGiveUpCounters, pauseEnrichProcessing, resumeEnrichProcessing, pauseEmbed, resumeEmbed, pauseCategorize, resumeCategorize, isCategorizePaused, deferEnrich, resumeEnrich, defaultLabelModel } from './enrich/drainer.js';
 import { assembleTimelineMessages } from './streams/assemble-messages.js';
 import { clampStored } from './enrich/text-limits.js';
 import { resolveInferenceConfigForTask } from './inference/resolve.js';
@@ -1446,6 +1446,27 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
   stagePauseRoute('embed', false, resumeEmbed);
   stagePauseRoute('categorize', true, pauseCategorize);
   stagePauseRoute('categorize', false, resumeCategorize);
+
+  // ── D-132: DEFER/RESUME the L2 semantic-enrich pass. Its own key + latch —
+  // deliberately NOT through stagePauseRoute (its ternary maps every non-embed
+  // stage onto the categorize key, which would silently pause L1 too). Same
+  // D13 rule: PERSIST FIRST, APPLY SECOND. ──
+  const persistEnrichDefer = async (deferred) => {
+    const s2 = (await db.users.getSettings(userId)) || {};
+    await db.users.updateSettings(userId, { ...s2, enrichL2Deferred: Boolean(deferred) });
+  };
+  router.post('/enrichment/enrich/defer', async (_req, res) => {
+    try { await persistEnrichDefer(true); }
+    catch { return fail(res, 500, 'could not defer enrichment'); }
+    deferEnrich();
+    ok(res, { deferred: true });
+  });
+  router.post('/enrichment/enrich/resume', async (_req, res) => {
+    try { await persistEnrichDefer(false); }
+    catch { return fail(res, 500, 'could not resume enrichment'); }
+    resumeEnrich(); // clears the latch + kicks a cycle so L2 moves at once
+    ok(res, { deferred: false });
+  });
 
   router.post('/enrichment/embed/restart', async (_req, res) => {
     let reset;

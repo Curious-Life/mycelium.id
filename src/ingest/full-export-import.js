@@ -31,6 +31,7 @@ import { putBlob, isUserNamespacedBlobPath } from './blob-store.js';
 import { getMasterKey } from '../crypto/crypto-local.js';
 import { encodeVectorRaw } from '../search/ann/decode.js';
 import { POLICY_DENY_TABLES, isImportAllowed } from './import-credential-policy.js';
+import { acquireImportQuiesce } from '../db/import-quiesce.js';
 
 const MAX_ATTACHMENT_BYTES = Number(process.env.MYCELIUM_IMPORT_ATTACHMENT_LIMIT_BYTES) || 100 * 1024 * 1024;
 const MAX_AGENT_FILE_BYTES = 5 * 1024 * 1024;
@@ -159,6 +160,16 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
   const stats = Object.create(null);
   const dbDir = path.join(root, 'db');
 
+  // D-128: STILL EVERY BACKGROUND WRITER FIRST. This restore is a mass raw write —
+  // including the vector pass's tens of thousands of UPDATEs — on the app's long-lived
+  // SHARED connection, with FK enforcement deferred below. On 2026-07-30 it ran while the
+  // enrich drainer kept writing the same rows and a detached snapshot worker could VACUUM
+  // the same file: SQLITE_CORRUPT mid-import, vault HALTED. The latch is held for the
+  // whole restore and released in the same `finally` that restores FKs. Scope note: the
+  // paced importers (local-files/obsidian, row-at-a-time through captureMessage) do NOT
+  // hold this latch — they write through the normal capture path and pausing enrichment
+  // for their whole multi-hour run is a product decision, not a corruption fix.
+  const releaseQuiesce = acquireImportQuiesce('full-export-import');
   // A full-vault restore writes tables in readdir (alphabetical) order, so a
   // child lands before its parent (contact_territories before people,
   // document_versions before documents, identity_channels before users) — with
@@ -244,8 +255,10 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
     });
     stats[`${table}.${col}`] = { updated, bad };
   };
+  db.messages?.noteBacklogWrite?.(); // D-132: restoreTable('messages') is a dynamic-SQL writer the backlog-cache net cannot see
   await vectorPass('clustering_points.256d.ndjson', 'clustering_points', 'nomic_embedding', 256, false);
   await vectorPass('messages.768d.ndjson', 'messages', 'embedding_768', 768, true);
+  db.messages?.noteBacklogWrite?.(); // D-132: the vector pass raw-updates messages (embedding_768 + nlp_processed)
   await vectorPass('documents.768d.ndjson', 'documents', 'embedding_768', 768, false);
   await vectorPass('territory_profiles.768d.ndjson', 'territory_profiles', 'embedding_768', 768, false);
   await vectorPass('realms.768d.ndjson', 'realms', 'embedding_768', 768, false);
@@ -351,5 +364,6 @@ export async function importFullExport({ db, userId, dirPath, enqueueEnrichment 
     return { imported, deduped, failed, malformed, stats, reportPath: report && `imports/full-export-report-${String(manifest.exportedAt || report.importedAt).slice(0, 10)}.json`, exportedAt: manifest.exportedAt ?? null };
   } finally {
     await db.rawQuery('PRAGMA foreign_keys = ON').catch(() => {});
+    releaseQuiesce(); // D-128: writers may resume only once FKs are back on
   }
 }

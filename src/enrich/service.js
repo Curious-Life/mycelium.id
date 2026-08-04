@@ -358,11 +358,55 @@ export function createEnrichmentService(deps) {
     let enriched = 0;
     let failed = 0;
     let gaveUp = 0;
+
+    // ── D-132 (U-C): BATCH-FIRST. One model call labels up to K substantive rows
+    // (K = MYCELIUM_L1_BATCH, default 8; 1 disables — the revert lever). The
+    // fixed prompt prefix (~1.7k chars) is paid once instead of K times.
+    // SEMANTICS ARE STRICTLY ADDITIVE, never replacing the per-row contract:
+    //   • a failed/unparseable BATCH call burns ZERO attempts (the embed rule:
+    //     "a pass with zero progress burns zero attempts") — rows simply fall
+    //     through to the unchanged per-row loop below, whose outage/attempt
+    //     logic is untouched;
+    //   • only rows the STRICT id-keyed parser matched are written from the
+    //     batch; every other row takes the single path this same pass.
+    const batchK = Math.max(1, Number(process.env.MYCELIUM_L1_BATCH ?? 8) || 1);
+    /** @type {Map<string, any>|null} row.id → labels resolved by the batch call */
+    let batchLabels = null;
+    if (typeof fn?.batch === 'function' && batchK > 1) {
+      const cand = rows
+        .map((r) => ({ id: r.id, content: (r.content || '').trim() }))
+        .filter((r) => r.content)
+        .slice(0, batchK);
+      if (cand.length >= 2) {
+        try {
+          const res = await fn.batch(cand.map((c) => c.content));
+          batchLabels = new Map();
+          cand.forEach((c, idx) => { if (res?.[idx]) batchLabels.set(c.id, res[idx]); });
+        } catch { batchLabels = null; /* outage/failure → zero burn; per-row path decides */ }
+      }
+    }
+
     for (const row of rows) {
       const content = (row.content || '').trim();
       if (!content) { // nothing to classify — mark attempted so it isn't re-selected
         await messages.updateCategories(row.id, userId, { categoriesProcessed: 1, taxonomyVersion: TAXONOMY_VERSION });
         _labelAttempts.delete(row.id);
+        continue;
+      }
+      // Batch-resolved → write without a second model call (provenance unchanged:
+      // fn.model produced these labels too).
+      const fromBatch = batchLabels?.get(row.id);
+      if (fromBatch) {
+        await messages.updateCategories(row.id, userId, {
+          domain: fromBatch.domain,
+          register: fromBatch.register,
+          subregister: fromBatch.subregister,
+          taxonomyVersion: TAXONOMY_VERSION,
+          model: fn.model,
+          categoriesProcessed: 1,
+        });
+        _labelAttempts.delete(row.id);
+        enriched++;
         continue;
       }
       let labels;

@@ -30,7 +30,7 @@ import { importHermes } from './ingest/hermes-import.js';
 import { importOpenClaw } from './ingest/openclaw-import.js';
 import { importLocalFiles } from './ingest/local-files-import.js';
 import { normalizeCategorySelection } from './ingest/file-categories.js';
-import { detectSources, probeSweepAccess, readClaudeCodeEntries, assertImportPathAllowed, hermesPaths, openClawPaths, localSweepRoots } from './ingest/detect-sources.js';
+import { detectSourcesOffLoop, readClaudeCodeEntries, assertImportPathAllowed, hermesPaths, openClawPaths, localSweepRoots } from './ingest/detect-sources.js';
 import { captureMessage } from './ingest/capture.js';
 import { getImportSource, importCatalog } from './ingest/registry.js';
 import { createImportJobRunner } from './ingest/import-job.js';
@@ -182,14 +182,21 @@ export function portalImportRouter({ db, userId, enqueueEnrichment }) {
   // catalog's "Found on this Mac — N · Import" CTAs. @see ingest/detect-sources.js.
   router.get('/import/detect', async (_req, res) => {
     try {
-      const sources = detectSources();
+      // D-126: the sweep runs in a KILLABLE CHILD with a wall-clock deadline — never
+      // synchronously on the event loop. One iCloud-dataless directory wedged the
+      // in-process walk in an uninterruptible syscall and took the ENTIRE server with
+      // it (every endpoint "Load failed", live-reproduced 2026-07-30). A timed-out
+      // scan now answers honestly instead of never.
+      const { sources, blocked, timedOut, failed } = await detectSourcesOffLoop();
       // ON-5: report broad-sweep roots macOS is currently BLOCKING (TCC prompt
       // pending / access denied) so the UI can distinguish "nothing here" from
       // "we couldn't look yet — grant access + re-scan." basename only (never the
       // full home path) — the presence of "Documents"/"Downloads" is all the UI
       // needs and it keeps the user's home layout out of the response.
-      const blocked = probeSweepAccess().map((p) => path.basename(p));
-      return res.json({ ok: true, sources, blocked });
+      return res.json({
+        ok: true, sources, blocked: (blocked || []).map((p) => path.basename(p)),
+        ...(timedOut ? { timedOut: true } : {}), ...(failed ? { scanFailed: true } : {}),
+      });
     } catch { return res.status(500).json({ ok: false, error: 'detection failed' }); }
   });
 
