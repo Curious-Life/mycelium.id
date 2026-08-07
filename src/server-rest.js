@@ -55,7 +55,7 @@ import { accountRouter } from './account/router.js';
 import { vaultPresence, unopenableVaultMessage } from './account/vault-presence.js';
 import { remoteRouter } from './remote/router.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
-import { startEnrichDrainer } from './enrich/drainer.js';
+import { startEnrichDrainer, setEmbedServiceBouncer } from './enrich/drainer.js';
 import { startTranscribeRetry } from './enrich/transcribe-retry.js';
 import { _setHardwareProbe as _setGovernorHardwareProbe } from './core/compute-governor.js';
 import { createRelayQueueClient } from './federation/relay-queue-client.js';
@@ -80,7 +80,7 @@ import { releaseManagedHandle } from './remote/release-handle.js';
 import { startClaimHeartbeat } from './claims/heartbeat.js';
 import { startClaimDiscoveryJob, isClusteringRunning, startClusteringJob, shouldAutoGenerate } from './jobs.js';
 import { readGenerateStats } from './generate-stats.js';
-import { startEmbedSupervisor } from './embed/supervisor.js';
+import { startEmbedSupervisor, bounceEmbedService } from './embed/supervisor.js';
 import { startQwenTtsSupervisor } from './tts/qwen3-tts-supervisor.js';
 import { startChannelSupervisor } from './channels/supervisor.js';
 import { mcpLoopbackRouter } from './mcp-loopback.js';
@@ -737,6 +737,11 @@ export async function startRestServer({
         // Pass the lazy Ollama daemon so the drainer can wake the on-box model for L1
         // categorization (in scope via the buildVaultSubApp closure). Without this the
         // enrich path never starts Ollama and every message stays untagged (CE dormancy).
+        // D-131(c): the drainer's pause/stall hook reaches the embed supervisor
+        // here (the drainer never imports the supervisor — same decoupling as
+        // onSettled). A pause or a stalled-head episode bounces the service so
+        // its in-flight/queued compute actually stops.
+        setEmbedServiceBouncer((why) => bounceEmbedService(why));
         const drainer = startEnrichDrainer({ db, userId: bootUserId, onSettled: maybeAutoGenerate, daemon: hwOllamaDaemon });
         // D-001 (round-2 review #1): the background transcription drain. A voice note whose decode
         // is refused `compute-busy` under the governor (or fails transiently) is fire-and-forget on

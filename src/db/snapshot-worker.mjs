@@ -236,6 +236,18 @@ try {
       if (!(qc.length === 1 && qc[0] === 'ok')) throw new Error(`quick_check: ${qc.join(' | ').slice(0, 100)}`);
       const tables = chk.prepare('SELECT count(*) AS n FROM sqlite_master').get()?.n ?? 0;
       if (tables === 0) throw new Error('the copy has no schema at all — not a backup');
+      // D-140 (QA11D): FULL integrity_check on the COPY, on the snapshot cadence.
+      // quick_check skips index↔row cross-checks — exactly the class a structural
+      // splice leaves behind; both 2026 incidents ran "clean for days" between
+      // quick_check-verified snapshots before a read tripped over the damage. This
+      // runs in the detached worker against the copy, so the live vault is never
+      // locked. (`cipher_integrity_check` was the spec's ask; it is a silent NO-OP
+      // in better-sqlite3-multiple-ciphers — measured 2026-08-06 — so a full
+      // structural walk of every b-tree is the strongest check this build can run.)
+      if (process.env.MYCELIUM_SNAPSHOT_FULL_CHECK !== '0') {
+        const ic = chk.prepare('PRAGMA integrity_check').all().map((r) => r.integrity_check ?? Object.values(r)[0]);
+        if (!(ic.length === 1 && ic[0] === 'ok')) throw new Error(`integrity_check: ${ic.join(' | ').slice(0, 200)}`);
+      }
     } finally { try { chk.close(); } catch { /* */ } }
   }
   // (perms were tightened immediately after VACUUM INTO — see above. A second chmod here

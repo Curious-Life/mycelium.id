@@ -71,6 +71,17 @@ export function getEmbedderHealth() { return { ..._health }; }
  */
 export function getEmbedSupervisor() { return _instance; }
 
+/**
+ * D-131(c) module-level bounce — the drainer's pause/stall hook reaches the
+ * supervisor through this (wired in server-rest via setEmbedServiceBouncer,
+ * never imported by the drainer directly — same decoupling as onSettled).
+ * Fail-soft: no supervisor (verify scripts, tests) → honest no-op result.
+ */
+export async function bounceEmbedService(reason = 'bounce') {
+  try { return (await _instance?.bounce?.(reason)) ?? { bounced: false, how: null, reason: 'no-supervisor' }; }
+  catch { return { bounced: false, how: null, reason: 'error' }; }
+}
+
 function resolvePython({ home, pythonBin }) {
   if (pythonBin) return pythonBin;
   if (process.env.MYCELIUM_PYTHON) return process.env.MYCELIUM_PYTHON;
@@ -113,6 +124,9 @@ export function startEmbedSupervisor({
   let nextStartAt = 0;       // backoff gate (epoch ms)
   let startInFlight = false;  // a tryStart is between its guard and its spawn — see below
   let stopped = false;
+  // D-131(c): a bounce() kill is EXPECTED — its exit must not count as a crash
+  // (no failures++, no governor backoff), and the respawn happens immediately.
+  let bounceExitExpected = false;
   let errBuf = '';
   let tickTimer = null;
 
@@ -230,6 +244,13 @@ export function startEmbedSupervisor({
         const wasOurs = child;
         child = null;
         if (stopped || !wasOurs) return;
+        // D-131(c): a bounce() kill is deliberate — clean restart, no crash accounting.
+        if (bounceExitExpected) {
+          bounceExitExpected = false;
+          nextStartAt = 0;
+          setHealth('starting', 'Restarting the embedding engine…', 'bounced');
+          return;
+        }
         const tail = lastErrLine();
         // Died at bind (port taken) → the orphan/foreign path, not crash accounting.
         if (looksLikePortConflict(errBuf)) {
@@ -262,7 +283,50 @@ export function startEmbedSupervisor({
   if (tickTimer.unref) tickTimer.unref();
   void tick(); // start immediately, don't wait a full tick
 
+  /**
+   * D-131(c): kill the service's CURRENT compute so a pause (or a stalled-head
+   * backoff episode) actually idles the CPU. The pause flag stops the DRAINER
+   * from sending more work, but it cannot stop compute already running or queued
+   * inside the single-threaded Python service — the operator watched
+   * `processing.paused: true` beside embed-service at 99.3% CPU (QA, 2026-08-04).
+   * The service is stateless (DEFER re-selects pending rows), so a SIGKILL loses
+   * nothing; the supervisor's normal tick respawns it for query embedding.
+   * Safety: only OUR child is killed directly; with no live child, the :8091
+   * holder is killed only under the service-guard OWN-ORPHAN PROOF — a foreign
+   * process is never touched.
+   */
+  async function bounce(reason = 'bounce') {
+    if (stopped) return { bounced: false, how: null, reason: 'stopped' };
+    if (child && spawnedByUs) {
+      bounceExitExpected = true;
+      // kill() reports failure by RETURNING false (already-exited child, ESRCH),
+      // not by throwing — an unchecked call could report {bounced:true} for a
+      // signal that was never sent, and a real-crash exit already queued would
+      // then be laundered as a bounce (round-1 review #5). Check the boolean;
+      // on failure clear the latch so the pending exit is classified honestly.
+      let sent = false;
+      try { sent = child.kill('SIGKILL') === true; } catch { sent = false; }
+      if (!sent) {
+        bounceExitExpected = false;
+        return { bounced: false, how: null, reason: 'kill-failed' };
+      }
+      log(`[embed-supervisor] bounced the embed service (${reason}) — restarting clean`);
+      return { bounced: true, how: 'child', reason };
+    }
+    // No live child of ours ⇒ any healthy :8091 holder is a service we merely
+    // ADOPTED — possibly the user's own hand-started one (the supervisor's
+    // header doctrine: "never kill a service we merely adopted", exactly as
+    // stop() honors it). REFUSE (round-1 review #2). The burn still ends:
+    // the drainer's pause/backoff stops SENDING, and an adopted service left
+    // alone goes idle once its current queue drains. Crash-orphans of OUR OWN
+    // runs no longer reach this branch at all — the D-136 crash reaper kills
+    // them at crash time; a stale pre-D-136 orphan is still reaped by
+    // handlePortConflict's own-orphan proof when it actually blocks a bind.
+    return { bounced: false, how: null, reason: 'adopted' };
+  }
+
   _instance = {
+    bounce,
     getHealth: getEmbedderHealth,
     /** Force an immediate re-evaluation (e.g. after the user clicks Retry / ran setup.sh).
      *  Also the ONLY resume path out of a governor halt (bounded-restart design). */

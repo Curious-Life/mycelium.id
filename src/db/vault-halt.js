@@ -99,26 +99,61 @@ function bypassed() {
  * @param {string} sql
  * @returns {string} e.g. "INSERT llm_usage" | "SELECT documents" | "UPDATE"
  */
+// Precompiled (D-140 review): sqlShape now runs on EVERY write via the forensic ring,
+// not only on the error path — five fresh RegExp constructions per statement were the
+// one measurable cost. Same patterns, hoisted once.
+const SHAPE_IDENT = '["`\\[]?([A-Za-z_][A-Za-z0-9_]{0,62})';
+const SHAPE_VERB_RE = /^\s*(SELECT|INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA|VACUUM|WITH)\b/i;
+const SHAPE_TABLE_RES = [
+  new RegExp(`^\\s*INSERT\\s+(?:OR\\s+\\w+\\s+)?INTO\\s+${SHAPE_IDENT}`, 'i'),
+  new RegExp(`^\\s*REPLACE\\s+INTO\\s+${SHAPE_IDENT}`, 'i'),
+  new RegExp(`^\\s*UPDATE\\s+(?:OR\\s+\\w+\\s+)?${SHAPE_IDENT}`, 'i'),
+  new RegExp(`^\\s*DELETE\\s+FROM\\s+${SHAPE_IDENT}`, 'i'),
+  new RegExp(`^\\s*SELECT\\b[^'"]*?\\sFROM\\s+${SHAPE_IDENT}`, 'i'),
+];
 export function sqlShape(sql) {
   // 1. Remove single-quoted string literals (SQLite: '' is the escape; "" and `` are
   //    IDENTIFIER quoting, so those are left for the anchored match below).
   const s = String(sql || '').replace(/'(?:[^']|'')*'/g, "''").trim();
 
-  const m = /^\s*(SELECT|INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA|VACUUM|WITH)\b/i.exec(s);
+  const m = SHAPE_VERB_RE.exec(s);
   const verb = m ? m[1].toUpperCase() : 'UNKNOWN';
 
   // 2. Anchored to the start of the statement — never a free scan of the tail.
   //    A SELECT's FROM is the one clause that legitimately floats, so it is matched only
   //    up to the first clause keyword that can introduce user data.
-  const ident = '["`\\[]?([A-Za-z_][A-Za-z0-9_]{0,62})';
-  const t =
-    new RegExp(`^\\s*INSERT\\s+(?:OR\\s+\\w+\\s+)?INTO\\s+${ident}`, 'i').exec(s) ||
-    new RegExp(`^\\s*REPLACE\\s+INTO\\s+${ident}`, 'i').exec(s) ||
-    new RegExp(`^\\s*UPDATE\\s+(?:OR\\s+\\w+\\s+)?${ident}`, 'i').exec(s) ||
-    new RegExp(`^\\s*DELETE\\s+FROM\\s+${ident}`, 'i').exec(s) ||
-    new RegExp(`^\\s*SELECT\\b[^'"]*?\\sFROM\\s+${ident}`, 'i').exec(s);
+  let t = null;
+  for (const re of SHAPE_TABLE_RES) { t = re.exec(s); if (t) break; }
 
   return t ? `${verb} ${t[1]}` : verb;
+}
+
+/**
+ * D-140 (QA11D): the in-flight transaction-shape ring. The corrupt-event record used
+ * to carry only the ONE statement that tripped the latch — but the tripping read is
+ * routinely a bystander (07-30 tripped on `UPDATE messages`, 08-05 on
+ * `SELECT fisher_trajectory`; neither is suspected of CAUSING the damage). What the
+ * autopsy needed and did not have is what else was being written around that moment.
+ * The adapter notes every WRITE's shape here (verb + table only — content-free by the
+ * same contract as sqlShape); the trip aggregates the last window into the forensic
+ * record. Bounded, allocation-light, never throws.
+ */
+const SHAPE_RING_MAX = 64;
+const _shapeRing = []; // [epochMs, shape]
+export function noteWriteShape(shape) {
+  try {
+    _shapeRing.push([Date.now(), shape]);
+    if (_shapeRing.length > SHAPE_RING_MAX) _shapeRing.shift();
+  } catch { /* never let telemetry touch the write path */ }
+}
+/** Aggregate the ring into { "INSERT messages": 41, ... } + the window span. */
+export function recentWriteShapes() {
+  const counts = {};
+  for (const [, s] of _shapeRing) counts[s] = (counts[s] || 0) + 1;
+  const span = _shapeRing.length
+    ? { fromMs: _shapeRing[0][0], toMs: _shapeRing[_shapeRing.length - 1][0], n: _shapeRing.length }
+    : { n: 0 };
+  return { counts, span };
 }
 
 /**
@@ -162,6 +197,8 @@ export function tripVaultHalt(err, ctx = {}) {
       code: _state.sqliteCode,
       op: _state.op,
       source: 'query-chokepoint',
+      // D-140: what was being WRITTEN around the trip — verb+table aggregates only.
+      inFlight: recentWriteShapes(),
     });
   } catch { /* black box must never take the plane down */ }
 

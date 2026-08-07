@@ -1294,6 +1294,14 @@ export function portalCompatRouter({ db, userId, readiness: injected }) {
       // re-queues them. Also a count only.
       messages: { total, enriched: embedded, embedded, pending, unprocessable, gaveUp },
       service: { rate: '0' }, // per-second throughput not measured in V1
+      // ⚠️ LOAD-BEARING COUPLING (D-131 re-review, 2026-08-04): MindscapeView's
+      // pollEnrichment AUTO-POSTS /enrichment/trigger — a DELIBERATE-grade nudge
+      // that clears the stalled-head backoff — whenever pending > 0 AND activeJob
+      // is null. This synthesized non-null activeJob is the only thing keeping
+      // that auto-trigger dead. If you make activeJob honest (null while backed
+      // off / idle), you re-open the bounce-per-5s storm through the front door:
+      // first guard or remove the Svelte auto-trigger (MindscapeView.svelte
+      // pollEnrichment), or downgrade /enrichment/trigger's nudge grade.
       activeJob: pending > 0 ? { id: 'enrich', status: 'running' } : null,
     });
   });

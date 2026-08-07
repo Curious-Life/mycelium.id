@@ -693,7 +693,7 @@ export const selectedContact = derived(mindscapeState, s => {
 export const contactMessages = derived(mindscapeState, s => s?.contactMessages ?? []);
 export const contactMessagesLoading = derived(mindscapeState, s => s?.contactMessagesLoading ?? false);
 
-// Alias for MindscapeNav compatibility (MYA-0.2 uses $mindscapePoints)
+// Alias for MindscapeNav compatibility (an earlier client used $mindscapePoints)
 export const mindscapePoints = mindscapeState;
 
 // Timeline health — written by Mindscape3D, read by the page health bar

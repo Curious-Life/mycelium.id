@@ -49,7 +49,7 @@ Grep is the start, not the end. Code references hide in:
 - **Config** in `ecosystem.config.cjs`, `agents/*.json`, `wrangler.toml`, `.env`, `.claude/settings.json`.
 - **D1 schema** in `packages/core/db-d1/schema.sql` and per-tenant equivalents.
 - **Worker bindings** in `packages/worker/wrangler.toml` (D1, R2, Queues, KV, Vectorize, env).
-- **Other repos** — `mycelium.id` (open-source mirror), `MYA-0.2`, `mycelium-ios`, `mycelium-transcriber`, `mycelium.id-site`, `war-room` ($WARROOM_PATH). They may import or reference Mycelium symbols.
+- **Sibling checkouts** — any other local repo that imports or references Mycelium symbols (a fork, a client app, a companion script). Grep those too before declaring "all callers migrated."
 
 Run greps explicitly:
 ```bash
@@ -63,9 +63,7 @@ grep -rn "from ['\"]@mycelium/[^'\"]*['\"]" packages/ | grep "<symbolName>"
 grep -rn "['\"]<symbolName>['\"]" packages/
 
 # Cross-repo if applicable
-grep -rn "<symbolName>" ~/Documents/GitHub/mycelium.id/lib/ \
-  ~/Documents/GitHub/MYA-0.2/src/ \
-  ~/Documents/GitHub/mycelium-ios/MyceliumMobile/MyceliumMobile/ 2>/dev/null
+grep -rn "<symbolName>" ../<sibling-checkout>/ 2>/dev/null   # any local repo that references Mycelium symbols
 
 # Documentation
 grep -rn "<symbolName>" docs/ *.md
@@ -154,15 +152,14 @@ Execute the queries from Step 4. Numbers go in the deletion PR's description, no
 ```bash
 # Examples — vary by deletion class
 
-# For egress provenance Phase 3:
-ssh mycelium-vps "curl -s http://127.0.0.1:3004/admin/egress-audit/recent?days=7 \
+# For an audit-provenance cleanup — query the local vault's audit surface:
+curl -s "http://127.0.0.1:8787/audit/recent?days=7" \
   -H 'Authorization: Bearer <token>' \
-  | jq '[.[] | select(.provenance_kind == \"agent-explicit-via-fallback\")] | length'"
+  | jq '[.[] | select(.provenance_kind == "agent-explicit-via-fallback")] | length'
 # Expected: 0 (or near-zero with documented exceptions)
 
 # For column drop:
-cd packages/worker && npx wrangler d1 execute mycelium-db --remote \
-  --command "SELECT COUNT(*) FROM <table> WHERE <column> IS NOT NULL"
+sqlite3 mycelium.db "SELECT COUNT(*) FROM <table> WHERE <column> IS NOT NULL"
 # Expected: 0
 ```
 
@@ -203,13 +200,9 @@ If post-deploy a regression surfaces (a `(D)` row turned out to be live, a cross
 - **The `agent-egress.send` / `recovery.notifyContinuation` / `recovery.notifyRecovery` lesson** (Phase 1 of egress-provenance): the design doc identified two callers; sweep #3 surfaced a hidden third. **Always grep one more time before declaring "all callers migrated."** The third caller will have a slightly different signature or be in a sibling file you didn't expect.
 - **Phase 3 of egress-provenance** is the canonical upcoming use of this skill. Pre-flight criteria live in the egress-provenance plan: "Phase 0 audit data must show the `agent-explicit` event count growing to roughly cover the historical fallback fire count, OR investigation explaining the gap."
 - **BGE-M3 / Vectorize amputation (Wave 4b, May 2026)** is the canonical past example. Worker bindings, generateEmbedding routes, /api/embed/* + /api/enrich/* + /api/vectors/*  + /api/search/hybrid all required caller migration before deletion.
-- **Worker rename pending** (mya → mycelium): see `project_mycelium_worker_rename` memory entry. Side-by-side migration; pre-deletion criteria not yet defined. Future work for this skill.
-- **Two legacy personal agent IDs** (`personal-agent` vs `mya-personal`) — kept side by side because deletion criteria are NOT met. Documented as a permanent historical case in MEMORY.md.
-- **Bot rename pending** (`mya-telegram-bot` → `personal-telegram-bot` etc.) — `project_bot_rename_pending` memory. Same protocol applies; PM2 entries + ecosystem.config.cjs + scripts/* need atomic update.
-- **Customer fleet asymmetry**: customer VPSes only have personal-agent + telegram-bot. A symbol "used only by ops-agent" is safe to delete without customer-fleet impact, but verify with `ssh <customer> "grep <symbol> /home/claude/mycelium/packages/..."` if uncertain.
-- **The `mycelium-v2` D1 reference is stale** — production binding is `mycelium-db`. If you grep for "mycelium-v2" you'll find docs needing update; deleting it from any code path is safe but verify zero callers first.
+- **Single-process surface**: V1 runs one process per user (stdio MCP + local REST + publish). A symbol reachable from only one entrypoint is safe to delete once you've confirmed no other entrypoint (the MCP tool registry, a REST route, the scheduler) references it — grep the whole tree, not just the file you're editing.
 - **Forward-only D1 migrations**: dropping a column requires a NEW migration, not an in-place edit of the original. The original migration's history is fixed.
-- **Cross-repo callers**: mycelium.id (open-source mirror, documentation-grade), MYA-0.2 (older agent code), mycelium-ios (Swift app), mycelium-transcriber, mycelium.id-site, war-room (Python; $WARROOM_PATH). Always grep these for the symbol before declaring "all callers migrated."
+- **Cross-repo callers**: if you keep other local checkouts that reference Mycelium symbols (a fork, a client, a companion script), grep those too before declaring "all callers migrated."
 
 ## Output expectations
 

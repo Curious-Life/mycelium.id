@@ -46,7 +46,8 @@
 // take the lease, or delete this file. It stops ACCIDENTAL and FOREIGN-CODE writers, which
 // is the entire observed threat population. @see the design doc's threat model.
 import Database from 'better-sqlite3';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, statSync, openSync, closeSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, statSync, openSync, closeSync, readdirSync, readlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, join, basename, resolve } from 'node:path';
 import { realpathSync } from 'node:fs';
@@ -158,6 +159,110 @@ function anyOtherPresenceAlive(dbPath, log) {
 }
 
 /**
+ * D-140 (QA11D): does ANY process hold an OPEN FILE DESCRIPTOR on this vault's
+ * family (db / -wal / -shm)? Destructive file operations (restore's move-aside,
+ * the key probe's -shm cleanup) must refuse while one exists: renaming or
+ * unlinking those files under a live fd is a structural-splice recipe — the
+ * kill-storm harness's positive controls produce exactly the D-140 malformed
+ * signature from it.
+ *
+ * ⚠️ fd-level, deliberately NOT lease/presence-level. The first revision asked
+ * the lease + presence layer, and adversarial review REPRODUCED the lockout it
+ * causes: a recovery-mode process (boot claimed the lease at src/index.js:176,
+ * then the corrupt-marker check REFUSED — release only runs on a returning
+ * boot) holds its own lease with ZERO vault fds, and the :4711 sibling holds
+ * presence for its whole lifetime — so the flagship "vault condemned → restore
+ * a backup" flow answered 409 vault_in_use forever. The hazard is the fd, not
+ * the record; lsof answers the exact question. (The residual is the ms-scale
+ * TOCTOU between check and file op — same posture as install-vault.mjs, at
+ * zero distance.)
+ *
+ * Fail direction: lsof exit-1-with-no-output means "no process has it open"
+ * (the good case); lsof that CANNOT RUN (ENOENT / no exit status) means
+ * "cannot tell" → `true` (in use). `_exec` is a test seam.
+ */
+export function vaultInUse(dbPath, log = () => {}, { _exec } = {}) {
+  const family = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`].filter((p) => existsSync(p));
+  if (!family.length) return false;
+  // Linux: answer natively from /proc — no external binary, no output parsing, and it
+  // sees fds whose PATH was unlinked/replaced (the "(deleted)" links lsof-by-path
+  // misses: CI 2026-08-06 measured ubuntu's lsof blind to a live better-sqlite3
+  // holder in exactly the C2 topology while a plain fd was seen — path-vs-inode
+  // ambiguity this scan does not have). Per-pid EACCES is skipped safely: the vault
+  // is 0600, so a process this uid cannot inspect cannot hold it open (root aside —
+  // accepted, documented). Any WHOLE-scan failure → fail closed. The `_exec` test
+  // seam forces the lsof path so its discriminator stays testable on every platform.
+  if (process.platform === 'linux' && !_exec) {
+    try {
+      return procScanHoldsFamily(family);
+    } catch (e) {
+      try { log?.(`vault is treated as IN USE — /proc scan failed (${e?.code || e?.message})`); } catch { /* */ }
+      return true;
+    }
+  }
+  const exec = _exec || ((args) => execFileSync('lsof', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  try {
+    let out = '';
+    try {
+      out = exec(['-t', ...family]);
+    } catch (e) {
+      // Spawn failure (lsof missing / not executable) — cannot tell, refuse.
+      // ⚠️ discriminator (review round 2, REPRODUCED): a real execFileSync ENOENT
+      // throws with `status: null`, NOT `undefined` — an `=== undefined` test never
+      // fires, so a missing lsof silently failed OPEN. "Ran and exited" is the only
+      // shape with a NUMERIC status; anything else means the tool never ran.
+      if (!e || typeof e.status !== 'number') {
+        try { log?.(`vault is treated as IN USE — lsof could not run (${e?.code || e?.message})`); } catch { /* */ }
+        return true;
+      }
+      out = String(e?.stdout || ''); // lsof exits 1 when no process has the file open
+    }
+    return String(out).trim().length > 0;
+  } catch {
+    return true; // could not tell → treat as in use
+  }
+}
+
+/** Linux half of vaultInUse: does any /proc-visible process hold an fd on the family?
+ *  Two independent matchers per fd: (a) the readlink target against resolved family
+ *  paths, including the "<path> (deleted)" form a replaced/unlinked member leaves
+ *  behind; (b) stat(dev,ino) of the fd against the family's — which also catches a
+ *  holder via a HARDLINK or a same-namespace alias whose link target reads
+ *  differently (delta review: lsof matched by device+inode; path-only matching would
+ *  have been a quiet regression). Throws only on a whole-scan failure (caller fails
+ *  closed). RESIDUALS, stated honestly (delta review): a same-uid process that set
+ *  PR_SET_DUMPABLE=0 (or crossed a setuid transition) has a root-owned fd dir →
+ *  EACCES → skipped (nothing running our code does this); a holder in another mount
+ *  namespace, or one reaching the file only via io_uring fixed files / an mmap kept
+ *  after close, is invisible — SQLite's unix VFS keeps real fds open for the
+ *  connection lifetime, so no writer running our code takes those shapes. */
+function procScanHoldsFamily(family) {
+  const targets = new Set();
+  const ids = new Set(); // "dev:ino" of every family member
+  for (const p of family) {
+    targets.add(p);
+    try { targets.add(realpathSync(p)); } catch { /* keep the literal path */ }
+    try { const st = statSync(p); ids.add(`${st.dev}:${st.ino}`); } catch { /* raced away */ }
+  }
+  for (const pidStr of readdirSync('/proc')) {
+    if (!/^\d+$/.test(pidStr)) continue;
+    let fds;
+    try { fds = readdirSync(`/proc/${pidStr}/fd`); } catch { continue; } // gone or not inspectable (see residuals)
+    for (const fd of fds) {
+      let target;
+      try { target = readlinkSync(`/proc/${pidStr}/fd/${fd}`); } catch { continue; }
+      if (targets.has(target)) return true;
+      if (target.endsWith(' (deleted)') && targets.has(target.slice(0, -' (deleted)'.length))) return true;
+      // dev+ino comparison — only worth a stat when the fd points at a plausible file
+      if (target.startsWith('/')) {
+        try { const st = statSync(`/proc/${pidStr}/fd/${fd}`); if (ids.has(`${st.dev}:${st.ino}`)) return true; } catch { /* raced */ }
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Leave the vault: drop our presence and, if we were the last one here, seal it.
  * Registered on `exit` by every process that joins, so it runs on a clean exit and on the
  * SIGTERM paths that call close() (server-rest.js, mcp-lifetime.js). A SIGKILL leaves the
@@ -258,6 +363,28 @@ function readMeta(metaPath) {
  * of D-112 and of the zombie-lock brick. Deleting is only ever done here, on the claim
  * path, never from a probe.
  */
+// ── TEST SEAM (D-138): a deterministic barrier for the double-owner race gate. ──────────
+// The double-owner race lives in a microsecond window, so a probabilistic N-race loop hits
+// it only ~1/16 and therefore intermittently REDs the release path (D-138). This seam lets
+// the gate/probe force the exact interleaving EVERY run: when MYCELIUM_VAULT_LEASE_TEST_BARRIER
+// names a directory, a claimant announces it reached checkpoint `name` and blocks until the
+// orchestrator releases it, so all claimants can be made to enter the repair window together.
+// A NO-OP in every shipped process — the env var is set ONLY by scripts/verify-*/probe-* — so
+// it can never affect a real claim (asserted by the gate's R5). Same spirit as
+// __stopVaultTakeoverForTests below; kept tiny and fail-safe on purpose.
+function leaseTestBarrier(name) {
+  const dir = process.env.MYCELIUM_VAULT_LEASE_TEST_BARRIER;
+  if (!dir) return;
+  try {
+    writeFileSync(join(dir, `reached-${name}-${process.pid}`), '1');
+    const release = join(dir, `release-${name}`);
+    // BOUNDED: a gate releases within ~300 ms; the cap means even a MIS-armed prod env (the var
+    // set where it never should be) self-releases in 30 s instead of busy-pinning a core forever.
+    const deadline = Date.now() + 30_000;
+    while (!existsSync(release) && Date.now() < deadline) { /* spin — a timer would deschedule us out of the window */ }
+  } catch { /* barrier is best-effort test scaffolding; never perturb a real claim */ }
+}
+
 function openLockFile(lockPath) {
   // ⚠️ `timeout: 0` IS LOAD-BEARING, and its absence cost 5.4 SECONDS PER CLAIM.
   //
@@ -291,25 +418,82 @@ function openLockFile(lockPath) {
   } catch (e) {
     try { db?.close(); } catch { /* */ }
     if (e?.code !== 'SQLITE_NOTADB' && e?.code !== 'SQLITE_CORRUPT') throw e;
-    repairLockFile(lockPath);
-    return new Database(lockPath, opts);
+    leaseTestBarrier('saw-garbage');   // TEST SEAM (D-138): no-op unless a gate/probe arms it
+    // REPAIR IN PLACE, THEN REVALIDATE BEFORE HANDING BACK A HANDLE.
+    //
+    // The O_EXCL guard means exactly one claimant truncates; the rest are LOSERS that returned
+    // immediately (repairLockFile → false), so for a beat the lease can still be garbage. The
+    // first version returned `new Database(lockPath)` unvalidated — then claimVaultOwnership's
+    // BEGIN EXCLUSIVE was the first header read, threw SQLITE_NOTADB, and REFUSED with no retry.
+    // On a garbage lease at launch that refuses the app's OWN second sibling (D-138 review, D1) —
+    // exactly the failure this file repeatedly warns against. So force the header read HERE and
+    // retry briefly: either the winner's (sub-ms) truncate has landed and we open it valid, or we
+    // win the guard on a later pass. A file legitimately HELD by a winner answers SQLITE_BUSY,
+    // which is NOT retried here and correctly falls through to the caller's held-lease handling.
+    for (let attempt = 0; ; attempt++) {
+      repairLockFile(lockPath);
+      let fresh = null;
+      try {
+        fresh = new Database(lockPath, opts);
+        fresh.prepare('SELECT 1').get();   // header read NOW — a still-garbage file is caught here, not at BEGIN
+        return fresh;
+      } catch (again) {
+        try { fresh?.close(); } catch { /* */ }
+        if ((again?.code === 'SQLITE_NOTADB' || again?.code === 'SQLITE_CORRUPT') && attempt < REPAIR_RETRIES) {
+          sleepSync(REPAIR_RETRY_MS);       // let the guard winner finish truncating, then re-repair/re-open
+          continue;
+        }
+        throw again;                        // SQLITE_BUSY (held) or exhausted retries → caller decides
+      }
+    }
   }
 }
 
 /**
- * Replace a garbage lease file — SERIALISED, so two claimants cannot each recreate it.
+ * Is the lease file NO LONGER garbage — i.e. a valid empty DB, or HELD by a live owner?
+ * Used under the repair guard to avoid truncating a file another claimant already fixed (and
+ * may be about to lock). A HELD file answers SQLITE_BUSY, never SQLITE_NOTADB (measured —
+ * see the header block and scripts/verify-vault-lease-race.mjs R2), so "held" reads as
+ * repaired here, which is correct: a held file is by definition not garbage.
+ */
+function lockLooksRepaired(lockPath) {
+  let db = null;
+  try {
+    db = new Database(lockPath, { timeout: 0 });
+    db.prepare('SELECT 1').get();
+    return true;                                    // opened and read: a valid DB
+  } catch (e) {
+    if (e?.code === 'SQLITE_BUSY') return true;     // held by a live owner — not garbage
+    return false;                                   // NOTADB / CORRUPT → still needs repair
+  } finally { try { db?.close(); } catch { /* */ } }
+}
+
+/**
+ * Repair a garbage lease file IN PLACE, so its inode never changes — which is what closes
+ * the double-owner race (D-138), provably rather than probabilistically.
  *
- * The unserialised version was the double-owner race: both racers unlink the other's fresh
- * inode and take BEGIN EXCLUSIVE on DIFFERENT files, so both believe they own the vault.
- * The inode re-check after BEGIN narrows that window but provably does not close it —
- * an independent review measured two owners 1/48, and the gate's own A12 row goes RED
- * roughly one run in three under load. A guarantee that holds "usually" is not one.
+ * ── WHY IN PLACE, AND WHY THAT IS THE WHOLE FIX ────────────────────────────────────────
+ * The old repair was unlink + recreate. Two claimants racing it each unlinked the other's
+ * fresh inode and took BEGIN EXCLUSIVE on a DIFFERENT inode — so both "owned" one vault. The
+ * post-BEGIN inode re-check (in claimVaultOwnership) only NARROWED that window: better-sqlite3
+ * exposes no fd, so it compares two stats of the PATH, not the locked handle. Measured: an
+ * independent review saw 11/40 double-owners; the gate's A12 went RED 1/16 on byte-identical
+ * code across dev-main AND public-release CI (v0.1.17) — D-138.
  *
- * The fix is the primitive init.js already proved in this repo for exactly this shape: an
- * O_EXCL guard file. Exactly one process repairs; everyone else returns and retries, and
- * finds a valid file. The guard is cleared on ANY exit path, and a stale one (its holder
- * died mid-repair) is reclaimed by age — the only heuristic here, bounded to a file that
- * carries no data and whose worst case is one extra retry.
+ * The double-owner MECHANISM is entirely "two inodes, one lease". Remove the inode change and
+ * the mechanism cannot occur: `writeFileSync(lockPath, '')` is O_CREAT|O_TRUNC — it truncates
+ * the EXISTING inode (create only when absent), so every claimant always contends on the SAME
+ * inode's BEGIN EXCLUSIVE, which SQLite serialises across processes (measured — a second
+ * process sees HELD). No fd, no flock, no new dependency: the lease's own kernel-lock
+ * philosophy, one fewer moving part.
+ *
+ * The O_EXCL guard stays, but its job is now narrower and safety-critical: it serialises the
+ * truncate so a second claimant cannot zero the file a first claimant is initialising, and
+ * the re-check under it (`lockLooksRepaired`) means a file another claimant already repaired
+ * is never truncated again. A stale guard (holder died mid-repair) is reclaimed by age — the
+ * only heuristic here, bounded to a data-less file whose worst case is one extra retry.
+ * The claimVaultOwnership inode re-check is now redundant defence-in-depth (the inode cannot
+ * change), kept because belt-and-suspenders on the vault's central guarantee is cheap.
  */
 function repairLockFile(lockPath) {
   const guard = `${lockPath}.repair`;
@@ -324,8 +508,12 @@ function repairLockFile(lockPath) {
     return false;                     // let the caller retry against whatever now exists
   }
   try {
-    try { unlinkSync(lockPath); } catch { /* already gone */ }
-    const fresh = new Database(lockPath, { timeout: 0 });   // create it whole, then close
+    // Re-check UNDER the guard: another claimant may have repaired while we waited on it.
+    // Truncating a now-valid (or now-held) file would zero something someone is about to
+    // lock — so only a STILL-garbage file is truncated.
+    if (lockLooksRepaired(lockPath)) return true;
+    writeFileSync(lockPath, '');       // O_CREAT|O_TRUNC — inode PRESERVED (not unlink+recreate)
+    const fresh = new Database(lockPath, { timeout: 0 });   // reinitialise it whole, then close
     try { fresh.prepare('SELECT 1').get(); } finally { fresh.close(); }
     return true;
   } finally {
@@ -345,6 +533,11 @@ const CLAIM_RETRIES = 3;
 const CLAIM_RETRY_MS = 25;
 /** A repair guard older than this belonged to a process that died mid-repair. */
 const REPAIR_GUARD_STALE_MS = 10_000;
+/** openLockFile revalidation: how many times a repair-guard LOSER re-opens waiting for the
+ *  winner's in-place truncate to land, before giving up. The winner's truncate is sub-ms, so a
+ *  handful of short pauses closes the window without stalling boot. @see openLockFile. */
+const REPAIR_RETRIES = 5;
+const REPAIR_RETRY_MS = 25;
 
 /**
  * Block this thread for `ms`. Synchronous ON PURPOSE: claimVaultOwnership is called from

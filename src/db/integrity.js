@@ -14,7 +14,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CHECK_SCRIPT = fileURLToPath(new URL('./vault-integrity-check.mjs', import.meta.url));
-const THROTTLE_MS = 24 * 60 * 60 * 1000; // once per day
+// D-140 (QA11D): was a fixed 24 h. Both 2026 corruption events sat undetected inside a
+// single day (the 08-05 damage window was ~9 h wide, discovered only when a read
+// happened to walk the damaged region). 6 h default = detection beats the operator to
+// the symptom; env-tunable, floor 1 h so a typo cannot make the check spin.
+const THROTTLE_MS = Math.max(1, Number(process.env.MYCELIUM_INTEGRITY_INTERVAL_H) || 6) * 60 * 60 * 1000;
 const STAMP = '.last-integrity-check';
 const MARKER = '.vault-corrupt';
 
@@ -73,6 +77,24 @@ export function writeVaultCorruptMarker(dbPath, fields = {}) {
   };
   try { fs.writeFileSync(vaultCorruptMarkerPath(dbPath), `${JSON.stringify(payload)}\n`); return true; }
   catch { return false; }
+}
+
+/**
+ * D-140 (QA11D): re-arm the off-loop check PERIODICALLY, not just at boot. A server
+ * that stays up for days used to go unchecked for days — the 08-05 damage sat for
+ * ~9 h inside one uptime. Hourly re-arm; the stamp-file throttle above is the real
+ * cadence gate (default 6 h), so this costs one stat() per hour. unref'd — a timer
+ * must never hold the process open. Returns the timer for tests.
+ */
+let _periodicTimer = null;
+export function armPeriodicIntegrityCheck(opts) {
+  // SINGLETON per process (review M2): boot() is called per MCP session in the
+  // :4711 sibling (server-http.js), so an unguarded arm leaked one interval —
+  // plus its captured opts — per session, firing for vault handles long closed.
+  if (_periodicTimer) return _periodicTimer;
+  _periodicTimer = setInterval(() => { try { maybeScheduleIntegrityCheck(opts); } catch { /* never break the server */ } }, 60 * 60 * 1000);
+  _periodicTimer.unref?.();
+  return _periodicTimer;
 }
 
 export function maybeScheduleIntegrityCheck({ dbPath, userHex = null, isCanonical }) {

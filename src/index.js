@@ -10,7 +10,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { unlock } from './crypto/keys.js';
 import { getDb } from './db/index.js';
-import { maybeScheduleIntegrityCheck } from './db/integrity.js';
+import { maybeScheduleIntegrityCheck, armPeriodicIntegrityCheck } from './db/integrity.js';
 import { startSnapshotSchedule } from './db/snapshot-schedule.js';
 import { armVaultCopy } from './db/vault-copy.js';
 import { bindStdioLifetime } from './db/mcp-lifetime.js';
@@ -266,11 +266,14 @@ export async function boot({
     try { purgePlaintextBackup({ dbPath, dbKeyHex, log: (m) => console.error(m) }); }
     catch (e) { console.error(`[mycelium] at-rest: backup purge skipped (${e?.message || e})`); }
   }
-  // Early corruption detection (defense-in-depth): a DETACHED, throttled (once/day),
-  // read-only quick_check on the CANONICAL vault only. Fire-and-forget — never blocks
-  // boot (the scan is ~24 s on a 2 GB vault, so it must not run in-process). Fixtures /
-  // pipeline temp DBs are skipped. @see src/db/integrity.js.
+  // Early corruption detection (defense-in-depth): a DETACHED, throttled (default 6 h,
+  // MYCELIUM_INTEGRITY_INTERVAL_H), read-only quick_check on the CANONICAL vault only.
+  // Fire-and-forget — never blocks boot (the scan is ~24 s on a 2 GB vault, so it must
+  // not run in-process). Fixtures / pipeline temp DBs are skipped. D-140: also re-armed
+  // hourly for long uptimes — the 08-05 damage sat ~9 h undetected inside one uptime.
+  // @see src/db/integrity.js.
   maybeScheduleIntegrityCheck({ dbPath, userHex, isCanonical: isCanonicalVault });
+  armPeriodicIntegrityCheck({ dbPath, userHex, isCanonical: isCanonicalVault });
   // ROLLING SNAPSHOTS. snapshot-on-boot.js covers the pre-MIGRATION moment and stops
   // there — its trigger is "migration set changed OR no snapshot at all", so a settled
   // vault takes one baseline and never another. That is how a production vault reached

@@ -299,6 +299,7 @@ export function accountRouter({ isInitialized, completeBoot, getBootError, getBo
         return res.json({ ok: true, needsKey: true, manifest: { createdAt: manifest.createdAt, uploadCount: manifest.uploadCount }, replaced: movedAside.length > 0 });
       } catch (err) {
         if (err?.code === 'vault_exists') return res.status(409).json({ error: 'vault_exists', message: 'A vault already exists on this device. Confirm to replace it.' });
+        if (err?.code === 'vault_in_use') return res.status(409).json({ error: 'vault_in_use', message: String(err.message) });
         if (err?.code === 'invalid_archive') return res.status(400).json({ error: 'invalid_archive', message: String(err.message) });
         return res.status(500).json({ error: 'restore_backup_failed', message: sanitizeErr(err) });
       }

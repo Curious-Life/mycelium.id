@@ -90,7 +90,19 @@ async function keyOpensVault({ dbPath, userHex }) {
     return false;
   } finally {
     try { db?.close(); } catch { /* */ }
-    if (!shmExisted) { try { fs.rmSync(shm, { force: true }); } catch { /* */ } }
+    // D-140 (QA11D): the cleanup itself was a splice hazard. If a sibling process
+    // opened the vault DURING this probe, it attached to the -shm the probe
+    // materialised; unlinking it here leaves that writer on an orphaned wal-index
+    // while the next opener creates a fresh one — two writers, two indexes, the
+    // exact split-brain the kill-storm harness's P1 control corrupts with. Only
+    // remove the probe's -shm when no live process holds the vault (fail closed:
+    // in doubt, leave the file — a stray -shm is cosmetic; a split one is not).
+    if (!shmExisted) {
+      try {
+        const { vaultInUse } = await import('../db/vault-lease.js');
+        if (!vaultInUse(dbPath)) fs.rmSync(shm, { force: true });
+      } catch { /* leave the file */ }
+    }
   }
 }
 

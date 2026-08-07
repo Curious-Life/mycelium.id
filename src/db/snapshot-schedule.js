@@ -144,6 +144,9 @@ export function maybeScheduleSnapshot({ dbPath, dbKeyHex = null, isCanonical = t
         ...(dbKeyHex ? { MYCELIUM_SNAPSHOT_KEY: dbKeyHex } : {}),
         ...(process.env.MYCELIUM_SNAPSHOT_KEEP_AUTO ? { MYCELIUM_SNAPSHOT_KEEP_AUTO: process.env.MYCELIUM_SNAPSHOT_KEEP_AUTO } : {}),
         ...(process.env.MYCELIUM_SNAPSHOT_BUDGET_X ? { MYCELIUM_SNAPSHOT_BUDGET_X: process.env.MYCELIUM_SNAPSHOT_BUDGET_X } : {}),
+        // D-140 review M1: the full-integrity opt-out is read by the WORKER — an
+        // allowlist that doesn't forward it makes the documented flag silently dead.
+        ...(process.env.MYCELIUM_SNAPSHOT_FULL_CHECK ? { MYCELIUM_SNAPSHOT_FULL_CHECK: process.env.MYCELIUM_SNAPSHOT_FULL_CHECK } : {}),
       },
     });
     // Capture the worker's own verdict and make it durable. Bounded: a worker that somehow

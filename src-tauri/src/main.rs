@@ -733,9 +733,30 @@ fn main() {
                                     break;
                                 }
                                 let started = Instant::now();
+                                let dead_pid = c.id();
                                 let _ = c.wait();
                                 if let Ok(mut g) = r_pid.lock() {
                                     *g = None;
+                                }
+                                // D-140 (QA11D): the child died WITHOUT its in-process
+                                // crash-reaper firing (a kernel OOM SIGKILL is uncatchable).
+                                // Its process GROUP can still hold keyed vault-writing
+                                // pipeline children; the next generation reuses the same
+                                // MYCELIUM_VAULT_FAMILY token, so the writer lock would
+                                // ADOPT those orphans and two generations would write the
+                                // vault concurrently (the orphan-overlap topology, sweep
+                                // doc §2.3). Reap the dead generation's group BEFORE
+                                // respawning: SIGTERM → bounded grace → SIGKILL, the same
+                                // shape as quit's reap(). The pipeline children install no
+                                // SIGTERM handler, so for them this is effectively
+                                // immediate; the grace only benefits anything that does.
+                                if group_alive(dead_pid) {
+                                    term_group(dead_pid);
+                                    let reap_deadline = Instant::now() + Duration::from_secs(3);
+                                    while Instant::now() < reap_deadline && group_alive(dead_pid) {
+                                        std::thread::sleep(Duration::from_millis(100));
+                                    }
+                                    if group_alive(dead_pid) { kill_group(dead_pid); }
                                 }
                                 if r_flag.load(Ordering::SeqCst) {
                                     break;
@@ -849,9 +870,23 @@ fn main() {
                                     }
                                     eprintln!("[mycelium] remote MCP (OAuth) server on 127.0.0.1:4711 (supervised)");
                                     let started = Instant::now();
+                                    let dead_pid = c.id();
                                     let _ = c.wait();
                                     if let Ok(mut g) = sup_pid.lock() {
                                         *g = None;
+                                    }
+                                    // D-140 (QA11D): same orphan reap as the server-rest
+                                    // supervisor — a crash the child's own reaper could not
+                                    // catch may leave keyed grandchildren alive in its group,
+                                    // and the next generation would adopt them (same family
+                                    // token). Reap before respawning.
+                                    if group_alive(dead_pid) {
+                                        term_group(dead_pid);
+                                        let reap_deadline = Instant::now() + Duration::from_secs(3);
+                                        while Instant::now() < reap_deadline && group_alive(dead_pid) {
+                                            std::thread::sleep(Duration::from_millis(100));
+                                        }
+                                        if group_alive(dead_pid) { kill_group(dead_pid); }
                                     }
                                     if sup_flag.load(Ordering::SeqCst) {
                                         break;

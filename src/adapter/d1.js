@@ -17,7 +17,7 @@ import {
   ENCRYPTED_FIELDS,
 } from '../crypto/crypto-local.js';
 import { vaultIsEncrypted } from '../db/open.js';
-import { assertVaultUsable, noteQueryError, sqlShape } from '../db/vault-halt.js';
+import { assertVaultUsable, noteQueryError, sqlShape, noteWriteShape } from '../db/vault-halt.js';
 
 const isWrite = (sql) => /^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sql);
 const hasReturning = (sql) => /\bRETURNING\b/i.test(sql);
@@ -164,6 +164,7 @@ export function createDb({ dbPath, userKey, systemKey, scope = 'personal', dbKey
       // params we bind are `params` itself; the SQL we prepare is the return value.
       let finalSql = sql;
       if (isWrite(sql)) {
+        noteWriteShape(sqlShape(sql)); // D-140 forensic ring — verb+table only, pre-encrypt
         finalSql = await autoEncryptParams(sql, params, scope, userKey, null, { systemKey });
       }
       const stmt = db.prepare(finalSql);

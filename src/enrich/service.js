@@ -143,15 +143,50 @@ export function createEnrichmentService(deps) {
     // know whether anything else embedded (the progress-aware attempt rule above).
     const transientRows = [];
 
-    // Embed in BOUNDED CHUNKS. A whole 50-row batch of long messages takes >60s
-    // on the CPU model, but the embed client aborts at 30s → the request fails
-    // and the WHOLE batch would be marked failed (and never retried). Chunking
-    // keeps every embedBatch call well under the timeout. Each chunk falls back
-    // to per-row embed() so one poison row — or a stub embedder without
-    // embedBatch — can't sink the rest.
-    const EMBED_CHUNK = 12;
-    for (let start = 0; start < rows.length; start += EMBED_CHUNK) {
-      const chunk = rows.slice(start, start + EMBED_CHUNK);
+    // Embed in SIZE-BUDGETED CHUNKS (D-131 root cause, QA hard evidence
+    // 2026-08-05 on the 67k vault). The old fixed 12-row slice was sized for
+    // chat messages; 12 large imported .md docs (avg 8k chars, head 21k–77k)
+    // take >120s in ONE /batch call against the 30s default client timeout —
+    // the client aborts, the per-row fallback then times out too because the
+    // single-threaded service is still grinding the ABORTED batch, 0 rows
+    // embed, and the outage guard (below) freezes the attempt counters: the
+    // same 12 rows re-select forever at 99% CPU. The service itself is fine —
+    // it windows long text internally (embed-service.py _embed_locked, ≤512-
+    // token windows, weighted mean-pool, per-text cost capped at MAX_CHARS
+    // 40k) — the defect was purely this caller's batch economics. Two rules:
+    //   • pack by CHAR BUDGET (≈ one max-size doc worth of service windows per
+    //     call) as well as row count — short chats still pack 12, one large
+    //     doc rides alone;
+    //   • give every call a SIZE-SCALED timeout (floor 30s, ~1.5ms/char +
+    //     headroom, ceiling EMBED_RESCUE_TIMEOUT_MS) so a legitimate
+    //     15s-per-doc compute is never aborted mid-flight.
+    // Each chunk still falls back to per-row embed() (same scaled budget) so
+    // one poison row — or a stub embedder without embedBatch — can't sink the
+    // rest.
+    const EMBED_CHUNK = 12;                  // max rows per call (short-message packing)
+    const EMBED_SERVICE_MAX_CHARS = 40_000;  // mirror of embed-service.py MAX_CHARS — per-text cost cap
+    const EMBED_CHUNK_CHAR_BUDGET = 20_000;  // ~2 large docs per call — sized so the worst
+                                             // chunk (20k ≈ 2×16s measured compute) sits at
+                                             // ~50% of its budget, not ~100% (round-2 review:
+                                             // 40k of dense docs at QA's own 12–16s/8k band
+                                             // could exceed the old 75s budget)
+    const embedCallBudgetMs = (chars) => Math.min(EMBED_RESCUE_TIMEOUT_MS, Math.max(30_000, 15_000 + Math.ceil(chars * 2.5)));
+    const effChars = (t) => Math.min(String(t || '').length, EMBED_SERVICE_MAX_CHARS);
+    // Greedy packer: close a chunk at EMBED_CHUNK rows OR when the next row
+    // would blow the char budget (a single over-budget row rides alone).
+    const chunks = [];
+    {
+      let cur = [], curChars = 0;
+      for (const row of rows) {
+        const c = effChars(embedTextOf(row));
+        if (cur.length > 0 && (cur.length >= EMBED_CHUNK || curChars + c > EMBED_CHUNK_CHAR_BUDGET)) {
+          chunks.push(cur); cur = []; curChars = 0;
+        }
+        cur.push(row); curChars += c;
+      }
+      if (cur.length) chunks.push(cur);
+    }
+    for (const chunk of chunks) {
       // ⚠️ EMBED THE MESSAGE *PLUS* ITS ATTACHMENT'S DERIVED TEXT, never `row.content`
       // alone (2026-07-26). On the import path a voice note's content is "File: memo.ogg"
       // and the spoken words live on `attachments.transcript`, which selectPendingEnrichment
@@ -160,11 +195,13 @@ export function createEnrichmentService(deps) {
       // per-row fallback and the rescue retry: a second copy of this rule is how the rescue
       // silently re-embeds a different string from the batch it is rescuing.
       const texts = chunk.map((r) => embedTextOf(r));
+      const chunkChars = texts.reduce((a, t) => a + effChars(t), 0);
+      const chunkBudget = { timeoutMs: embedCallBudgetMs(chunkChars) };
       let vectors;
       try {
         vectors = typeof embed.embedBatch === 'function'
-          ? await embed.embedBatch(texts, 'document')
-          : await Promise.all(texts.map((t) => embed.embed(t, 'document')));
+          ? await embed.embedBatch(texts, 'document', chunkBudget)
+          : await Promise.all(texts.map((t) => embed.embed(t, 'document', { timeoutMs: embedCallBudgetMs(effChars(t)) })));
       } catch {
         // Whole-chunk embed failed — retry per row so one bad/slow row can't sink
         // the others; a row that still fails gets a null vector → handled by the
@@ -172,7 +209,7 @@ export function createEnrichmentService(deps) {
         // provably-up service — never blind-poisoned).
         vectors = [];
         for (const t of texts) {
-          try { vectors.push(await embed.embed(t, 'document')); }
+          try { vectors.push(await embed.embed(t, 'document', { timeoutMs: embedCallBudgetMs(effChars(t)) })); }
           catch { vectors.push(null); }
         }
       }
@@ -260,11 +297,47 @@ export function createEnrichmentService(deps) {
     // must never march a marked backlog to terminal). `skipped` are empty-content
     // rows, which never exercise the embed service, so they are not candidates.
     const soleCandidate = (rows.length - skipped) <= 1;
+    // D-131 root cause, the FREEZE half (QA hard evidence 2026-08-05): when a
+    // whole pass nulls with other candidates present, the outage signature
+    // deliberately counts nothing — but with the counter frozen (observed: 4 of
+    // 5 forever), a head of genuinely-unembeddable rows re-selects every cycle
+    // for the life of the vault and the backlog can never finish. The narrow,
+    // guard-preserving unfreeze: when the service answers a POST-PASS health
+    // probe as loaded-and-ok, this was NOT an outage — judge exactly ONE row
+    // (rescue-first, so a valid-but-slow row lands via the 120s budget instead
+    // of burning an attempt). A wedged/loading/erroring/unreachable service
+    // fails the probe → nothing counted → the mass-loss guard holds untouched.
+    // ⚠️ ONCE PER CYCLE, NOT PER PASS (round-2 review BLOCKER, reproduced): the
+    // drainer runs up to 200 passes per cycle sharing ONE attemptedThisCycle
+    // Set, and a cap keeps `moved > 0` so the loop does NOT break — a per-pass
+    // bound judged a FRESH row every pass and marched 200 rows to terminal in
+    // ONE cycle against a health-ok-but-overloaded service (fast-503 shedding
+    // with /health deliberately lock-free is embed-service.py's DOCUMENTED
+    // overload posture). The sentinel in the shared Set bounds the unfreeze to
+    // ONE row per cycle — pass 2 then moves nothing, the no-progress break
+    // fires, and the D-131(b) stall backoff engages exactly as designed. Worst
+    // case is now 1 counted attempt + 1 health probe + 1 rescue per 15s cycle.
+    const IDLE_JUDGE_SENTINEL = '__idle-judged-this-cycle__';
+    let idleHealthOk = false;
+    let idleJudged = false;
+    if (embedded === 0 && !soleCandidate && transientRows.length > 0 && !cycleSet.has(IDLE_JUDGE_SENTINEL)) {
+      try {
+        const h = await embed.health();
+        // STRICT, fail-closed (round-2 review #3): this predicate retires rows,
+        // so only an explicit ok-and-loaded counts — an empty 200 (port
+        // squatter), an unknown status, or a missing `loaded` field must all
+        // read NOT-provably-up. (The drainer's own embedHealth() gate is the
+        // read-side sibling; keep both strict.)
+        idleHealthOk = Boolean(h) && h.status === 'ok' && h.loaded === true;
+      } catch { idleHealthOk = false; }
+      if (idleHealthOk) { cycleSet.add(IDLE_JUDGE_SENTINEL); idleJudged = true; }
+    }
+    const judgeCap = (embedded > 0 || soleCandidate) ? MAX_JUDGED_PER_PASS : (idleHealthOk ? 1 : 0);
     let judged = 0;
     for (const t of transientRows) {
-      const suspect = embedded > 0 || (t.prior > 0 && soleCandidate);
+      const suspect = embedded > 0 || (t.prior > 0 && soleCandidate) || idleHealthOk;
       if (!suspect || cycleSet.has(t.id)) continue;
-      if (judged >= MAX_JUDGED_PER_PASS) break;
+      if (judged >= judgeCap) break;
       judged++;
       cycleSet.add(t.id);
       // LAST-CHANCE RESCUE before the attempt is counted: one per-row embed with a
@@ -305,7 +378,7 @@ export function createEnrichmentService(deps) {
       } catch { /* counter write failed — row simply stays pending; never fatal */ }
     }
 
-    return { scanned: rows.length, embedded, failed, skipped, capped };
+    return { scanned: rows.length, embedded, failed, skipped, capped, idleJudged };
   }
 
   /**

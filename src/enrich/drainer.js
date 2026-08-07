@@ -114,6 +114,17 @@ let _categorizePaused = false;
 // embedded/points), which is exactly why the feed row must stay visible + honest.
 let _enrichDeferred = false;
 let _pauseRestored = false;           // latch: the persisted flags are read ONCE, at first cycle
+// ── D-131(b): stalled-head BACKOFF constants ─────────────────────────────────
+// After this many CONSECUTIVE no-progress cycles the drain stops hammering the
+// head: it skips exponentially more cycles (2,4,8… capped) instead of re-feeding
+// the same unembeddable head to the service every 15s forever — the zero-output
+// core burn the operator measured (59,705/67,249 for 44s+, two cores pegged).
+// BACKOFF, not row-poisoning: row state is untouched (the outage guard in
+// service.js must keep its "never march a backlog to terminal" property), so the
+// cost of a stuck head falls to a few probes per 10 minutes instead of a
+// continuous burn. Any progress, a nudge, or a resume resets it instantly.
+export const STALL_BACKOFF_AFTER = 3;        // consecutive stalled cycles before backing off
+export const STALL_BACKOFF_MAX_CYCLES = 40;  // cap ≈ 10 min at the 15s tick
 
 /** Kick the live enrichment drainer if one is running (no-op otherwise). */
 /** Live drainer liveness for the activity feed — null when no drainer is running. */
@@ -153,7 +164,16 @@ export function getEnricherHealth() {
   }
 }
 
-export function nudgeEnrichDrainer() { try { _current?.nudge(); } catch { /* best-effort */ } return Boolean(_current); }
+// DELIBERATE nudge — every caller of this export is a user action (portal
+// trigger/retry/restart buttons, the resume paths, Settings-applied), so it may
+// clear the stalled-head backoff and re-arm the once-per-episode bounce. The
+// INGEST path (enqueueEnrichment — fired on EVERY chat/import save) calls the
+// handle's nudge() directly with no options and must NEVER clear it: a stalled
+// head + routine save activity would otherwise re-arm a fresh SIGKILL of the
+// embed service per save — the kill storm the round-1 review reproduced (10
+// saves → 11 SIGKILLs). Same deliberate-vs-automated split resetPullBackoff
+// already lives by (see /enrichment/trigger's comment in portal-compat.js).
+export function nudgeEnrichDrainer() { try { _current?.nudge({ clearStallBackoff: true }); } catch { /* best-effort */ } return Boolean(_current); }
 
 /**
  * QA6 — EMBED BEFORE CATEGORIZE. Given ONE cycle's embed-loop observations, decide whether the
@@ -241,13 +261,18 @@ export function resetEnrichGiveUpCounters() { try { _current?.resetLabelAttempts
  * real sqlite fixture — the gate exercises the statement that ships, not a copy.
  */
 export async function selfHealStrandedEmbeds(db, userId) {
-  await db.rawQuery(
+  const r = await db.rawQuery(
     "UPDATE messages SET nlp_processed = 0, nlp_error = NULL WHERE user_id = ?"
     + " AND nlp_processed = -1 AND embedding_768 IS NULL"
     + " AND (nlp_error IS NULL OR nlp_error NOT LIKE 'embed-capped:%')",
     [userId],
   );
-  db.messages?.noteBacklogWrite?.(); // D-132: raw write outside the namespace — revalidate the polled caches
+  // D-132 (QA 2026-08-05): bump ONLY when rows actually changed. This runs
+  // EVERY cycle; an unconditional bump re-armed the write generation on a
+  // fully idle vault, so readiness's multi-second decrypt scan re-ran at every
+  // TTL expiry — ~45% server CPU with the window open and everything paused.
+  // A 0-change UPDATE proves the numbers cannot have moved.
+  if ((r?.meta?.changes ?? 0) > 0) db.messages?.noteBacklogWrite?.();
 }
 
 /**
@@ -260,16 +285,17 @@ export async function selfHealStrandedEmbeds(db, userId) {
  * real-statement rule as selfHealStrandedEmbeds).
  */
 export async function reclaimGaveUpRows(db, userId) {
-  await db.rawQuery(
+  const r1 = await db.rawQuery(
     "UPDATE messages SET nlp_processed = 0, nlp_error = NULL WHERE user_id = ?"
     + " AND nlp_processed = -1 AND embedding_768 IS NULL AND nlp_error LIKE 'embed-capped:%'",
     [userId],
   );
-  await db.rawQuery(
+  const r2 = await db.rawQuery(
     'UPDATE messages SET categories_processed = 0 WHERE user_id = ? AND categories_processed = -1',
     [userId],
   );
-  db.messages?.noteBacklogWrite?.(); // D-132: raw write outside the namespace — revalidate the polled caches
+  // D-132: change-gated for the same reason as selfHealStrandedEmbeds above.
+  if (((r1?.meta?.changes ?? 0) + (r2?.meta?.changes ?? 0)) > 0) db.messages?.noteBacklogWrite?.();
 }
 
 /**
@@ -281,6 +307,24 @@ export async function reclaimGaveUpRows(db, userId) {
  */
 export function resetPullBackoff() { try { _current?.resetPullBackoff?.(); } catch { /* best-effort */ } return Boolean(_current); }
 
+// ── D-131(c): the embed-service bouncer hook ─────────────────────────────────
+// The pause flag stops the DRAINER from sending more work, but it cannot stop
+// compute already running/queued inside the single-threaded Python service —
+// the operator watched `processing.paused: true` beside embed-service.py at
+// 99.3% CPU (QA live confirmation, 2026-08-04). Killing that compute belongs to
+// the embed SUPERVISOR (it owns the process); the drainer only signals. Wired by
+// server-rest (setEmbedServiceBouncer → bounceEmbedService) — the drainer never
+// imports the supervisor, same decoupling rule as onSettled/jobs.js. Fail-soft:
+// unwired (tests, verify scripts) → no-op. Fire-and-forget: a pause must never
+// block on a kill, and a bounce failure only means the service keeps its current
+// batch — the drainer still stops sending.
+let _serviceBouncer = null;
+export function setEmbedServiceBouncer(fn) { _serviceBouncer = typeof fn === 'function' ? fn : null; }
+function fireEmbedServiceBounce(why) {
+  try { const p = _serviceBouncer?.(why); if (p && typeof p.catch === 'function') p.catch(() => {}); }
+  catch { /* never let a bounce failure break a pause */ }
+}
+
 /**
  * STOP all on-box processing — the embed drain AND the L1/L2 passes (§3.9/R3).
  *
@@ -289,8 +333,13 @@ export function resetPullBackoff() { try { _current?.resetPullBackoff?.(); } cat
  * persisting is INVISIBLE divergence, while refusing to apply is a visible, reported failure.
  */
 export function pauseEnrichProcessing() {
+  // D-131(c): bounce only on the false→true EDGE — the pause routes fire per
+  // POST, and a double-clicked Pause must not SIGKILL the freshly-respawning
+  // service again (round-1 review #4).
+  const wasEmbedPaused = _embedPaused;
   _embedPaused = true;
   _categorizePaused = true;
+  if (!wasEmbedPaused) fireEmbedServiceBounce('pause'); // a pause must IDLE the CPU, not just stop new sends
   return true;
 }
 /** RESUME processing and kick a cycle immediately so progress moves at once. */
@@ -315,7 +364,7 @@ export function isEnrichProcessingPaused() { return _embedPaused || _categorizeP
 // restart is the invisible divergence D13 exists to remove. Resume nudges a cycle so the resumed
 // stage moves at once. Resumable by construction: both drains re-select their pending set every
 // cycle, so pausing loses nothing.
-export function pauseEmbed() { _embedPaused = true; return true; }
+export function pauseEmbed() { const was = _embedPaused; _embedPaused = true; if (!was) fireEmbedServiceBounce('pause'); return true; }
 export function resumeEmbed() { _embedPaused = false; nudgeEnrichDrainer(); return true; }
 export function isEmbedPaused() { return _embedPaused; }
 export function pauseCategorize() { _categorizePaused = true; return true; }
@@ -568,6 +617,12 @@ export function startEnrichDrainer({
   // "consecutive" was false — it was a lifetime counter wearing a consecutive name, and only the
   // log throttle read it so nothing noticed. It resets on progress now, which makes the name true.
   let _noProgress = 0;
+  // D-131(b): backoff state (see the module constants above). _stallBackoffCycles
+  // counts embed-drain cycles still to SKIP; _stallBounced latches the one-per-
+  // episode service bounce (the wedged service, not the rows, is often the burn).
+  let _stallBackoffCycles = 0;
+  let _stallBounced = false;
+  let _embedStallBackoff = false; // reported: this cycle skipped the drain (backoff)
   // Consecutive BATCHES that embedded nothing — the ETA's stall signal (R1/§3.9).
   //
   // ⚠️ WHY NOT REUSE `_noProgress`: it keys on `moved === 0`, and `moved = embedded + failed +
@@ -1232,8 +1287,18 @@ export function startEnrichDrainer({
       // concurrency the operator's crash quote names), or when the BULK sum/count budget is full.
       // Refusal is DEFER: skip embedding this cycle, re-select next cycle, render `waiting`.
       _embedWaitingOnCompute = false;
+      _embedStallBackoff = false;
       let embedAdm = null;
-      if (embedOk && !isEmbedPaused()) {
+      // D-131(b): a stalled head is in BACKOFF — skip the drain entirely this
+      // cycle (no admission, no selects, no service traffic). embedStalledOut
+      // stays true so the categorize deferral keeps treating embed as unable to
+      // advance (the starvation guard's contract is unchanged). NEVER SILENT:
+      // logged on entry below, and reported via status().embedStallBackoffCycles.
+      if (embedOk && !isEmbedPaused() && _stallBackoffCycles > 0) {
+        _stallBackoffCycles -= 1;
+        _embedStallBackoff = true;
+        embedStalledOut = true;
+      } else if (embedOk && !isEmbedPaused()) {
         embedAdm = admit({ lane: 'embed-drain', klass: CLASS.BULK, estimateGb: 1, timeoutMs: 0 });
         if (!embedAdm.ok) {
           _embedWaitingOnCompute = true;
@@ -1306,6 +1371,7 @@ export function startEnrichDrainer({
           _embeddedTotal += batchEmbedded;
           _lastProgressAt = Date.now();
           _noProgress = 0;                      // something embedded ⇒ not stalled (see the decl)
+          _stallBackoffCycles = 0; _stallBounced = false; // D-131(b): progress ends the backoff episode
           _barrenPasses = 0;                    // …and the rate is knowable again
           // ⚠️ AND `_embedErrs`, FOR THE SAME REASON — a batch that embedded PROVES the drain works.
           // Its own reset lives after the batch loop, so a cycle that embeds 200 rows and THEN
@@ -1365,6 +1431,21 @@ export function startEnrichDrainer({
             _noProgress++;
             if (_noProgress === 1 || _noProgress % 20 === 0) log(`[enrich] no progress on ${e?.scanned ?? 0} pending message(s) after ${stalledPasses} pass(es) `
               + `— pausing this cycle (retry in ${Math.round(intervalMs / 1000)}s). The head of the queue is not embeddable right now.`);
+            // D-131(b): the head has now failed to move for _noProgress straight
+            // cycles. Stop hammering it: back off exponentially (2,4,8… capped
+            // ≈10 min) and bounce the service ONCE per episode — a wedged
+            // single-threaded service grinding an already-timed-out queue is the
+            // usual burn, and a clean restart clears its queue while DEFER
+            // re-selects the rows. Row state untouched (outage guard preserved).
+            if (_noProgress >= STALL_BACKOFF_AFTER) {
+              _stallBackoffCycles = Math.min(2 ** (_noProgress - STALL_BACKOFF_AFTER + 1), STALL_BACKOFF_MAX_CYCLES);
+              log(`[enrich] embed head stalled for ${_noProgress} consecutive cycle(s) — backing off for ${_stallBackoffCycles} cycle(s) `
+                + '(~' + Math.round((_stallBackoffCycles * intervalMs) / 1000) + 's). Progress, Resume or Retry resets this instantly.');
+              if (!_stallBounced) {
+                _stallBounced = true;
+                fireEmbedServiceBounce('stalled-head');
+              }
+            }
             break;
           }
         } else stalledPasses = 0;
@@ -1723,7 +1804,17 @@ export function startEnrichDrainer({
     resetLabelAttempts: () => { try { svc.resetLabelAttempts?.(); } catch { /* best-effort */ } },
     labelerHealth,        // → getLabelerHealth(), the readiness `models.labeler` slice
     enricherHealth,       // → getEnricherHealth(), the readiness `models.enricher` slice
-    nudge: () => cycle(), // returns the cycle promise (callers may ignore it; the gate awaits it)
+    // D-131(b): TWO nudge grades. A DELIBERATE nudge (clearStallBackoff — the
+    // operator's Resume/Retry, routed via nudgeEnrichDrainer) clears the backoff
+    // and re-arms the once-per-episode bounce: it must not be eaten by a backoff
+    // (the honored-at-the-next-cycle bug). An INGEST nudge (default — every
+    // chat/import save via enqueueEnrichment) only kicks a cycle: it must NEVER
+    // clear the backoff or re-arm the bounce, or a stalled head + routine saves
+    // becomes a SIGKILL-per-save storm (round-1 review, reproduced).
+    nudge: ({ clearStallBackoff = false } = {}) => {
+      if (clearStallBackoff) { _stallBackoffCycles = 0; _stallBounced = false; }
+      return cycle();
+    }, // returns the cycle promise (callers may ignore it; the gate awaits it)
     // ⚠️ CLEAR THE DEFERRAL ON STOP. It is a statement about a cycle that is ABOUT TO RUN; a stopped
     // drainer has none, so leaving it latched would let a handle nobody drives keep reporting
     // "categorize is waiting on embedding" — a block with no clock behind it, which is the frozen
@@ -1752,6 +1843,13 @@ export function startEnrichDrainer({
       embeddedTotal: _embeddedTotal,   // R1: messages embedded since start — the rate's numerator
       embedActiveMs: _embedActiveMs,   // R1: ms spent draining (NOT elapsed) — the rate's denominator
       noProgress: _noProgress,         // consecutive passes where NOTHING moved (log throttle)
+      // D-131(b): the drain is in stalled-head BACKOFF — skipping cycles instead of
+      // re-hammering an unembeddable head. A SCHEDULING state (rows untouched).
+      // Exposed for consumers + the gate; the activity feed does NOT render it yet
+      // (residual, recorded in the D-131 ledger row) — the backoff is visible in
+      // the server log ("backing off for N cycle(s)") and here.
+      embedStallBackoffCycles: _stallBackoffCycles,
+      embedStallBackoff: _embedStallBackoff,
       barrenPasses: _barrenPasses,     // R1: consecutive batches that embedded NOTHING — the stall signal
       // L1 (categorize) + L2 (nlp enrich) throughput — the numerators/denominators for
       // categorizeEta / enrichEta, banked per pass in the loops above. Same contract as the

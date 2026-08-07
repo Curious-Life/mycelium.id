@@ -90,6 +90,26 @@ const plan = [
 console.log(`[install] plan:\n  - ${plan.join('\n  - ')}`);
 if (!YES) { console.log('\n[install] dry run — re-run with --yes to execute.'); process.exit(0); }
 
+// 3a. D-140 (QA11D): re-check the zero-holders invariant IMMEDIATELY before the swap.
+//     The step-1 lsof ran before the candidate probe and the --yes gate — a window of
+//     seconds-to-unbounded in which the app can (re)launch; archiving the family and
+//     deleting sidecars under a live writer is the structural-splice recipe the
+//     kill-storm harness's P2 control corrupts with. Same check, zero distance to the
+//     destructive act.
+{
+  let holders = '';
+  try { holders = execFileSync('lsof', ['-t', LIVE], { encoding: 'utf8' }).trim(); }
+  catch (e) {
+    // lsof exit 1 with no output = no holders (good). A SPAWN failure (lsof missing)
+    // must NOT read as "no holders" — that fail-open was review finding LOW-4.
+    // A real ENOENT throws with status: null (NOT undefined) — only a NUMERIC status
+    // means lsof actually ran (review round 2).
+    if (!e || typeof e.status !== 'number') die(`ABORT: could not run lsof to prove zero holders (${e?.code || e?.message}) — install lsof and re-run.`);
+    holders = String(e?.stdout || '').trim();
+  }
+  if (holders) die(`ABORT: the live vault became OPEN (pid(s) ${holders.replace(/\n/g, ', ')}) between the plan and the swap — quit the app and re-run.`);
+}
+
 // 3. Archive the outgoing generation as a UNIT (db + sidecars share the fate — split
 //    them and the leftover half becomes the exact bomb this tool exists to defuse).
 if (existsSync(LIVE)) {

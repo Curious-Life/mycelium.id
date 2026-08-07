@@ -563,6 +563,26 @@ export async function restoreVaultArchive({ buffer, dbPath, kcvPath, uploadsRoot
   const remoteEntry = zip.file('remote.json');
   const remoteBuf = remoteEntry ? await readEntryCapped(remoteEntry, MAX_ENTRY_BYTES, 'remote config') : null;
 
+  // D-140 (QA11D): REFUSE the destructive move while ANY live process holds the
+  // vault. This route is pre-boot in THIS process (isInitialized() → 409), but the
+  // :4711 sibling or an orphaned pipeline child can be live with open fds on this
+  // family — and renaming db/-wal/-shm under a live writer is a structural-splice
+  // recipe (the kill-storm harness's P2 control reproduces the exact malformed
+  // signature from it). Fail closed on "cannot tell".
+  {
+    const { vaultInUse } = await import('../db/vault-lease.js');
+    let why = '';
+    if (vaultInUse(dbPath, (m) => { why = String(m || ''); })) {
+      // Surface the "cannot tell" reason in the HTTP-visible message (review round 2):
+      // a permanent 409 with no stated cause is undiagnosable on an lsof-less box.
+      const e = new Error(why
+        ? `cannot prove the vault is closed: ${why}. Refusing the restore until it can be proven.`
+        : 'the vault is open in another process — quit the app fully (or wait for background jobs to exit) and retry the restore.');
+      e.code = 'vault_in_use';
+      throw e;
+    }
+  }
+
   const ts = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, 'Z');
   const movedAside = [];
   // Move the current vault aside first (recoverable), so a restore is reversible.

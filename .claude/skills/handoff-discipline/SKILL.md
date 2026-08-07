@@ -116,19 +116,18 @@ Per-phase or per-commit detail with:
 - What the change locks in / unlocks for next phase.
 
 ### f. Production state
-Per VPS / fleet host, what's deployed:
+What's landed in the local vault, per surface:
 ```
-| VPS | Phase 1 | Phase 2 step 1 | Notes |
+| Surface | Phase 1 | Phase 2 step 1 | Notes |
 |---|---|---|---|
-| admin | ✅ | ✅ | Live deploys 2026-05-06 |
-| 0mm | ✅ | — | Customer fleet HOLD |
-| puh | ✅ | — | Customer fleet HOLD |
-| nati | ✅ | — | Customer fleet HOLD |
+| stdio MCP | ✅ | ✅ | Verified 2026-05-06 |
+| REST + portal (:8787) | ✅ | — | HOLD on step 2 |
+| publish (:8788) | ✅ | — | HOLD on step 2 |
 ```
 
 Verification commands so a fresh session can re-confirm:
 ```
-ssh mycelium-vps "cd /home/claude/mycelium && git log -1 --format='%h'"
+git log -1 --format='%h'   # from the vault repo root
 # expected: 9789f3c
 ```
 
@@ -143,7 +142,7 @@ Each gotcha names the date so future sessions can decide whether it still applie
 ### h. Open decisions for the operator
 NOT vague gestures. Concrete options, with the recommendation if you have one. Examples:
 - "Sub-agent reply during parent's active turn: (1) accept the edge case, (2) per-turn token plumbing, (3) PID check via SO_PEERCRED. Recommendation: option 1, revisit if audit shows it firing."
-- "Customer fleet rollout for B1: wait 24h or ship symmetric now? Risk: minimal (one log statement)."
+- "Backfill embeddings now or defer to next boot? Risk: minimal (one migration pass); re-embed is slow on a large vault."
 
 ### i. Pickup protocol
 The most important section. A concrete checklist a fresh session can execute step-by-step:

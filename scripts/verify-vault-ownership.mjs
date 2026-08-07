@@ -15,7 +15,9 @@
 // reason: one was a SyntaxError that reddened 30 checks for the wrong reason, and one
 // silently never applied. RE-RUN after assertVaultOwnership was deleted, because a record
 // citing a function that no longer exists is a record of nothing:
-//   claim always returns owner ................... A2,A4,A5,A7,A8,A9,A11,A12,A13 RED (8/9)
+//   claim always returns owner ................... A2,A4,A5,A7,A8,A9,A11,A13 RED (8 rows)
+//   repairLockFile unlink instead of in-place truncate → A12 RED only (inode-stability, D-138;
+//     this line added + WATCHED 2026-08-05 against the REWRITTEN deterministic A12: 18 passed, 1 failed)
 //   probe folds UNKNOWN → FREE (the fail-open) ... A5 RED only          (16/1)
 //   getDb's claim removed ........................ A11 RED only         (16/1)
 //   the child-role branch is bypassed ............ A9 RED only          (11/1)
@@ -31,29 +33,27 @@
 //   removing the MID-CLAIM retry → 2/40 correct owner+inheritor pairs and 18/40 with BOTH
 //     siblings refused, vs 40/40 with it. That is the app's own launch path.
 //
-// ⚠️ A SECOND SURVIVOR, RECORDED. Serialising the garbage-lease repair behind an O_EXCL
-// guard is a mechanism-level fix for the double-owner race an independent review measured
-// (two owners 1/48; A12 RED ~1 run in 3 UNDER LOAD). I could not reproduce it here:
-// 0/60 double owners WITHOUT the serialisation, and 8/8 green gate runs. So the fix
-// addresses the mechanism they described, and its EFFECT is unmeasured on this machine.
-// Recorded rather than claimed, exactly like the inode re-check above — if A12 ever goes
-// RED again, this note is the starting point, not a reason to assume it cannot.
-// The one-check-each separation is the evidence that these are independent guarantees
-// and not one assertion wearing several names.
+// ── THE DOUBLE-OWNER RACE IS CLOSED (D-138), AND A12 NO LONGER SAMPLES A PROBABILITY. ────
+// The history: an independent review measured 11/40 racing claims producing TWO OWNERS of one
+// vault; an O_EXCL repair guard + a post-BEGIN inode re-check NARROWED it (better-sqlite3
+// exposes no fd, so the re-check compares two stats of the PATH, not the locked handle) but
+// provably did not close it — A12, which used to assert the OUTCOME "0 double-owners across 16
+// races", went RED 1/16 on BYTE-IDENTICAL vault-lease.js across dev-main AND public-release CI
+// (v0.1.17). A probability is not a fact about a commit; asserting one flaked the release path.
+// That is D-138.
 //
-// ⚠️ ONE MUTATION SURVIVED, AND IT IS RECORDED RATHER THAN DRESSED UP.
-//   removing the inode re-check in claimVaultOwnership → A12 still GREEN.
-// An independent review measured 11/40 racing claims producing TWO OWNERS of one vault
-// against an earlier revision. After the metadata publish became fail-the-claim, neither I
-// (0/40, 2 racers) nor a second reviewer (0/60, 3 racers) could reproduce it. So A12
-// asserts the OUTCOME — never two owners — and the outcome holds; it does NOT discriminate
-// the mechanism, and the re-check itself compares two stats of the PATH rather than the
-// handle (better-sqlite3 exposes no fd), so it narrows the window rather than closing it.
-// Kept as defence-in-depth whose value is unproven, and said so in both places, so nobody
-// later reads A12 as proof that dropping it is safe. It is not proof of that.
+// The fix removed the MECHANISM rather than narrowing the window: repairLockFile now truncates
+// the garbage lease IN PLACE (O_CREAT|O_TRUNC) instead of unlink+recreate, so the inode never
+// changes and two claimants can never lock two different inodes of one lease. So A12 now asserts
+// that MECHANISM — repair preserves the inode — which holds on EVERY run (deterministic). The
+// forced-race outcome and its rate moved to where each belongs: the dedicated deterministic gate
+// verify:vault-lease-race (R1 inode-stable, R2 held-stable, R3 "never two under a forced race")
+// and the NON-GATING stress probe scripts/probe-vault-lease-race.mjs. A release never rides on a
+// probability again. The claimVaultOwnership inode re-check is now REDUNDANT defence-in-depth
+// (the inode cannot change) — kept because it is cheap, no longer load-bearing.
 import './lib/gate-stdout.mjs';   // MUST be the first line of code — setBlocking only affects LATER writes
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -384,41 +384,29 @@ await t('A11. an orphaned child calling the PRODUCT\'s getDb writes NOTHING (not
 // both "own" the vault. Reproduced by adversarial review at 11/40 before the inode
 // re-check. A4 and A6 each pass alone; it is the COMBINATION that failed — the same
 // unhandled-combination class the marker truth table exists to prevent.
-await t('A12. racing claims on a GARBAGE lease never produce two owners (A4 ∧ A6)', async () => {
-  let owners = 0; let trials = 0; let sawRepair = false;
-  for (let i = 0; i < 16; i++) {
-    const { dir } = fixture(`a12-${i}`);
-    writeFileSync(join(dir, '.vault-ownership'), 'not a database at all');  // A6's exact fixture
-    // A START BARRIER, because without one this check does not test what it claims.
-    // The repair window is unlink→create: microseconds. Two children spawned back to back
-    // miss it almost every time, and with the inode re-check MUTATED OUT the check still
-    // passed 15/15 — a survivor, i.e. the guarantee was untested. Both children now spin
-    // until a `go` file appears, so they enter the window together.
-    const CLAIM = `
-      import { existsSync } from 'node:fs';
-      const go = process.env.MYCELIUM_DATA_DIR + '/go';
-      while (!existsSync(go)) { /* spin — a timer would deschedule us out of the window */ }
-      try { const x = L.claimVaultOwnership({ dbPath: process.env.MYCELIUM_DATA_DIR + '/mycelium.db' }); console.log('R:' + x.role); }
-      catch (e) { console.log('R:threw:' + (e.code || 'no-code')); }
-      setInterval(() => {}, 1000);
-    `;
-    const pending = [
-      runChild(CLAIM, { dataDir: dir, env: { MYCELIUM_VAULT_FAMILY: `fam-a12-${i}-one` }, waitFor: 'R:', timeoutMs: 8000 }),
-      runChild(CLAIM, { dataDir: dir, env: { MYCELIUM_VAULT_FAMILY: `fam-a12-${i}-two` }, waitFor: 'R:', timeoutMs: 8000 }),
-    ];
-    await new Promise((r) => setTimeout(r, 300));      // let both reach the spin
-    writeFileSync(join(dir, 'go'), '1');               // …and release them together
-    const [a, b] = await Promise.all(pending);
-    const n = [a.out, b.out].filter((o) => /R:owner/.test(o)).length;
-    if (n > 0) sawRepair = true;
-    if (n > 1) owners++;
-    trials++;
-    for (const c of [a.child, b.child]) { try { c.kill('SIGKILL'); } catch { /* */ } }
-    rmSync(dir, { recursive: true, force: true });
-  }
-  assert.ok(sawRepair, `precondition: at least one claim must have SUCCEEDED, or this loop proves nothing (${trials} trials)`);
-  assert.equal(owners, 0,
-    `${owners}/${trials} races produced TWO owners of one vault — the lease's central guarantee`);
+//
+// This row is now DETERMINISTIC (D-138): it asserts the mechanism that forbids two owners —
+// a garbage-lease repair PRESERVES the inode — instead of sampling 16 races and hoping. The
+// positive preconditions (the file is really garbage; the claim really repaired-and-owned it)
+// guard the "green because nothing ran" trap. The forced-race outcome + its rate live in
+// verify:vault-lease-race and probe:vault-lease-race, which is where a probability belongs.
+await t('A12. a garbage-lease repair preserves the inode — the two-owner mechanism cannot occur (D-138)', async () => {
+  const { dir } = fixture('a12');
+  const lock = join(dir, '.vault-ownership');
+  writeFileSync(lock, 'not a database at all');   // A6's exact fixture: a garbage lease
+  const inoBefore = statSync(lock).ino;
+  const owner = await runChild(`
+    const x = L.claimVaultOwnership({ dbPath: process.env.MYCELIUM_DATA_DIR + '/mycelium.db' });
+    console.log('CLAIMED:' + x.role); process.exit(0);
+  `, { dataDir: dir, env: { MYCELIUM_VAULT_FAMILY: 'fam-a12' } });
+  assert.match(owner.out, /CLAIMED:owner/,
+    `precondition: the claim must repair the garbage lease and OWN it, or nothing was exercised (got: ${owner.out.trim()}${owner.err.slice(0, 200)})`);
+  const inoAfter = statSync(lock).ino;
+  assert.equal(inoAfter, inoBefore,
+    `the repair changed the lease inode (${inoBefore} → ${inoAfter}) — the unlink+recreate mechanism that `
+    + `let two claimants lock two different inodes of one vault is back (D-138). Repair must be IN PLACE. `
+    + `The forced race + rate live in verify:vault-lease-race and probe:vault-lease-race.`);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 // ── A13. THE DATA DIR IS UNWRITABLE. Brick #4, refused honestly. ─────────────────
