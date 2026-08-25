@@ -38,6 +38,8 @@ import { createSqliteBackend } from './backend/sqlite.js';
 import { loadFromDb, ID_PREFIX, stripPrefix } from './d1-loader.js';
 import { setMindSearch } from './registry.js';
 import { renderRef } from '../core/item-ref.js';
+import { startBuildChild } from './build-child.js';
+import { SearchWarmingError } from '../tools/search-client.js';
 
 const DEFAULT_USER = 'local-user';
 
@@ -63,7 +65,7 @@ function chooseBackend({ db, embedder, userId, searchBackend }) {
 }
 
 export function createSearchHelpers(deps = {}) {
-  const { db = null, embedder = null, userId = DEFAULT_USER, getMasterKey = null, searchBackend = null } = deps;
+  const { db = null, embedder = null, userId = DEFAULT_USER, getMasterKey = null, searchBackend = null, childBuild = false } = deps;
 
   const { backend, kind: backendKind } = chooseBackend({ db, embedder, userId, searchBackend });
   let built = false;
@@ -75,20 +77,99 @@ export function createSearchHelpers(deps = {}) {
   // in-flight promise makes every concurrent caller await the SAME build.
   let buildPromise = null;
 
+  // ── Off-process build (the 2026-08-22 event-loop-starvation fix) ───────────
+  // With `childBuild` (real app launches only — threaded down from boot), the
+  // full corpus build runs in a SPAWNED CHILD (build-worker.mjs) instead of on
+  // this serving thread: in-process it starves the event loop for minutes on a
+  // large SQLCipher vault, every request times out, and the connected agent
+  // loses its vault tools. While the child runs, searches fail FAST with
+  // SearchWarmingError instead of blocking behind the build. Kill switch:
+  // MYCELIUM_SEARCH_CHILD_BUILD=0. Design: the 2026-08-22 search-build off-process note.
+  let childBuilding = false;      // true for the whole child-path build (incl. wait-on-foreign)
+  let childHandle = null;         // { promise, stop } of the live spawned worker
+  let buildProgress = null;       // { source, added, at } — counts only, never content
+  let pendingForce = false;       // set by rebuild(): skip the corpus_built short-circuit
+  const log = (m) => console.error(m); // counts/timings/reasons only (CLAUDE.md §1)
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const useChild = () => childBuild && backendKind === 'sqlite'
+    && process.env.MYCELIUM_SEARCH_CHILD_BUILD !== '0'
+    && typeof backend.getBuildState === 'function'
+    && !!(db && typeof db._dbPath === 'string');
+
+  // `build_watermark.at` is refreshed transactionally with every committed batch,
+  // so a FRESH watermark = a live builder in some process (REST vs MCP share the
+  // sidecar). Fresh → wait instead of duplicating the build; stale → the builder
+  // died, and OUR spawn resumes from that watermark.
+  const WATERMARK_FRESH_MS = 60_000;
+  function foreignBuildFresh() {
+    try {
+      const st = backend.getBuildState();
+      const wm = st && st.build_watermark ? JSON.parse(st.build_watermark) : null;
+      return !!(wm && typeof wm.at === 'number' && Date.now() - wm.at < WATERMARK_FRESH_MS);
+    } catch { return false; }
+  }
+
+  async function childBuildCorpus({ force = false } = {}) {
+    childBuilding = true;
+    try {
+      if (!force && foreignBuildFresh()) {
+        log('[search] corpus build already running in another process — waiting for it');
+        for (;;) {
+          await sleep(5000);
+          if (backend.isCorpusBuilt()) return;
+          if (!foreignBuildFresh()) break; // builder died — take over below (resume)
+        }
+      }
+      const spawned = startBuildChild({
+        dbPath: db._dbPath,
+        userId,
+        force,
+        onProgress: (p) => { buildProgress = { source: p.source, added: p.added, at: Date.now() }; },
+      });
+      if (!spawned.ok) {
+        // No pinned session keys (locked vault, verify context) or no spawn —
+        // fall back to the in-process build rather than leaving search empty.
+        log(`[search] corpus build child unavailable (${spawned.reason}) — building in-process`);
+        await loadFromDb({ backend, db, userId, getMasterKey });
+        if (typeof backend.markCorpusBuilt === 'function') backend.markCorpusBuilt();
+        return;
+      }
+      childHandle = spawned;
+      log(`[search] corpus build started off-process${force ? ' (forced rebuild)' : ''} — searches answer "warming" until it completes`);
+      const res = await spawned.promise;
+      if (res.ok) {
+        const d = res.result || {};
+        log(`[search] corpus build done: ${d.added ?? '?'} docs in ${Math.round((d.tookMs ?? 0) / 1000)}s (vectors ${d.vectorsLoaded ?? '?'} loaded, ${d.vectorsFailed ?? 0} failed)`);
+      } else {
+        log(`[search] corpus build FAILED (${res.reason}${res.message ? `: ${res.message}` : ''}) — index may be partial; the watermark resumes it next boot/Generate`);
+      }
+    } finally {
+      childBuilding = false;
+      childHandle = null;
+      buildProgress = null;
+    }
+  }
+
   // The actual corpus load. Never throws (errors are swallowed so a failed build
   // still flips `built`, matching the prior fall-through behavior — a partial/empty
   // schema must not wedge every future search retrying forever). Always sets
   // `built = true` on completion.
   async function buildCorpus() {
+    const force = pendingForce;
+    pendingForce = false;
     if (db && typeof db.rawQuery === 'function') {
       try {
         // On-disk backend persists across boots: populate ONCE (the same
         // loadFromDb path the in-RAM backend uses every boot), tracked by a
         // PERSISTED flag — NOT count()>0, which incremental writes (noteUpsert)
         // would trip before the first query, skipping the full corpus load. The
-        // in-RAM backend always (re)builds.
-        if (backendKind === 'sqlite' && typeof backend.isCorpusBuilt === 'function' && backend.isCorpusBuilt()) {
+        // in-RAM backend always (re)builds. `force` (rebuild()) skips the
+        // short-circuit — before it, rebuild() on the sqlite backend was a
+        // silent NO-OP and the post-Generate refresh never refreshed anything.
+        if (!force && backendKind === 'sqlite' && typeof backend.isCorpusBuilt === 'function' && backend.isCorpusBuilt()) {
           // already populated on disk — no rebuild
+        } else if (useChild()) {
+          await childBuildCorpus({ force });
         } else {
           await loadFromDb({ backend, db, userId, getMasterKey });
           if (backendKind === 'sqlite' && typeof backend.markCorpusBuilt === 'function') backend.markCorpusBuilt();
@@ -105,6 +186,19 @@ export function createSearchHelpers(deps = {}) {
     // `.finally` clears the latch so rebuild() can trigger a fresh build later.
     if (!buildPromise) buildPromise = buildCorpus().finally(() => { buildPromise = null; });
     await buildPromise;
+  }
+
+  // Fail-fast contract for the child-build window: a search arriving while the
+  // corpus is being built off-process gets a typed warming error (mapped to an
+  // honest "index is rebuilding" message by the tool layer) instead of silently
+  // blocking for minutes behind the build promise. In-process builds keep the
+  // blocking join — verify gates and small vaults depend on it.
+  function throwIfChildWarming() {
+    if (!childBuilding) return;
+    const p = buildProgress;
+    throw new SearchWarmingError(
+      `the search index is being rebuilt${p ? ` (${p.added} docs indexed, on ${p.source})` : ''} — retry in a minute`,
+    );
   }
 
   // Kick the corpus build in the BACKGROUND (fire-and-forget) so the first
@@ -133,27 +227,108 @@ export function createSearchHelpers(deps = {}) {
   // write paths via getMindSearch() (registry), so capture/enrich keep the
   // on-disk index fresh without a rebuild.
   const incremental = backendKind === 'sqlite';
+
+  // ── Incremental write batching (D-148) ─────────────────────────────────────
+  // One captured message used to cost ONE encrypted-WAL transaction (a full
+  // delete-then-insert through backend.add) — measured decaying to ~14 docs/min
+  // at 67k-corpus scale (spike-index-build-perf strategy A), which turned every
+  // ingest burst into HOURS of serving-thread grind (CPU-profiled live
+  // 2026-08-22: 88% self-time under add()). Upserts and enrichment vectors now
+  // coalesce for ≤25ms (or 128 entries) and commit as ONE transaction through
+  // the idempotent bulkAdd/bulkVectors — the same amortization that holds the
+  // bulk build at ~6k/s. The promise a writer gets back resolves only AFTER the
+  // batch containing its write commits, so awaited callers (capture, the SQ
+  // gates) keep read-your-write semantics; fire-and-forget callers lose nothing.
+  //
+  // DELETES ARE NEVER QUEUED. The forget cascade must evict NOW (fail-closed —
+  // verify:forget F7), and a queued upsert must never outlive a delete: a batch
+  // flushing after a forget would RESURRECT forgotten content into the index.
+  // So every delete first PURGES the pending maps, then hits the backend
+  // immediately — including `exposedBackend.delete`, because delete-cascade.js
+  // calls helpers.backend.delete directly, bypassing noteDelete.
+  const BATCH_MAX = 128;
+  const BATCH_WINDOW_MS = 25;
+  let pendingUpserts = new Map();
+  let pendingVectors = new Map();
+  let batchTimer = null;
+  let batchSettle = null; // settle handle for the currently open window
+
+  function openWindow() {
+    if (!batchSettle) {
+      let resolve;
+      const promise = new Promise((r) => { resolve = r; });
+      batchSettle = { promise, resolve };
+    }
+    if (!batchTimer) {
+      // NOT unref'd, deliberately: an unref'd timer lets a quiet process exit
+      // BEFORE the window flushes — awaited writers would hang-then-vanish and
+      // short-lived contexts (gates, scripts) would silently lose the batch.
+      // Holding the loop open for ≤25ms is the correct price.
+      batchTimer = setTimeout(() => { batchTimer = null; flushIncremental(); }, BATCH_WINDOW_MS);
+    }
+    return batchSettle.promise;
+  }
+
+  async function flushIncremental() {
+    if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
+    const settle = batchSettle; batchSettle = null;
+    const ups = pendingUpserts; pendingUpserts = new Map();
+    const vecs = pendingVectors; pendingVectors = new Map();
+    try {
+      if (ups.size) {
+        if (typeof backend.bulkAdd === 'function') await backend.bulkAdd([...ups.values()]);
+        else for (const d of ups.values()) { try { await backend.add(d); } catch { /* skip unindexable row */ } }
+      }
+      if (vecs.size) {
+        if (typeof backend.bulkVectors === 'function') backend.bulkVectors([...vecs.entries()]);
+        else for (const [vid, v] of vecs) { try { backend.noteVector?.(vid, v); } catch { /* best-effort */ } }
+      }
+    } catch { /* best-effort: never block the originating write (unchanged contract) */ }
+    settle?.resolve();
+  }
+
+  function purgePending(ids) {
+    for (const id of Array.isArray(ids) ? ids : [ids]) {
+      if (typeof id === 'string' && id) { pendingUpserts.delete(id); pendingVectors.delete(id); }
+    }
+  }
+
   async function noteUpsert(doc) {
     if (!incremental || !doc || typeof doc.id !== 'string' || !doc.id) return;
-    try {
-      await backend.add({
-        id: doc.id,
-        text: doc.text ?? doc.content ?? '',
-        embedding: doc.embedding,
-        ts: Number.isFinite(doc.ts) ? doc.ts : Math.floor(Date.now() / 1000),
-      });
-    } catch { /* best-effort: never block the write */ }
+    pendingUpserts.set(doc.id, {
+      id: doc.id,
+      text: doc.text ?? doc.content ?? '',
+      embedding: doc.embedding,
+      ts: Number.isFinite(doc.ts) ? doc.ts : Math.floor(Date.now() / 1000),
+    });
+    const settled = openWindow();
+    if (pendingUpserts.size + pendingVectors.size >= BATCH_MAX) await flushIncremental();
+    await settled;
   }
+
   async function noteDelete(ids) {
     if (!incremental) return;
-    const list = Array.isArray(ids) ? ids : [ids];
-    try { await backend.delete({ ids: list.filter((id) => typeof id === 'string' && id) }); } catch { /* best-effort */ }
+    const list = (Array.isArray(ids) ? ids : [ids]).filter((id) => typeof id === 'string' && id);
+    purgePending(list);
+    try { await backend.delete({ ids: list }); } catch { /* best-effort */ }
   }
-  // Vector-ready hook (enrichment): update only this id's vector, preserve ts/fts.
+
+  // Vector-ready hook (enrichment): update only this id's vector, preserve
+  // ts/fts. Returns the flush promise (callers today ignore it; gates may await).
   function noteVector(id, embedding) {
-    if (!incremental || typeof id !== 'string' || !id || !embedding) return;
-    try { backend.noteVector?.(id, embedding); } catch { /* best-effort */ }
+    if (!incremental || typeof id !== 'string' || !id || !embedding) return undefined;
+    pendingVectors.set(id, embedding);
+    const settled = openWindow();
+    if (pendingUpserts.size + pendingVectors.size >= BATCH_MAX) flushIncremental();
+    return settled;
   }
+
+  // The backend object handed out of this module: identical surface, except
+  // delete purges the pending batch first (the resurrection guard above).
+  const exposedBackend = {
+    ...backend,
+    delete: async (req = {}) => { purgePending(req.ids || []); return backend.delete(req); },
+  };
 
   // Index a document directly (tests / incremental updates). Marks built so a
   // later ensureBuilt() does not clobber a hand-loaded in-RAM corpus.
@@ -167,8 +342,13 @@ export function createSearchHelpers(deps = {}) {
     built = true;
   }
 
-  // Force a rebuild from the DB.
+  // Force a rebuild from the DB. `pendingForce` makes buildCorpus skip the
+  // corpus_built short-circuit — without it, rebuild() on the sqlite backend was
+  // a silent no-op and the post-Generate refresh (src/jobs.js refreshSearchIndex)
+  // never refreshed anything. On the child path the reset+rebuild runs
+  // off-process, so a post-Generate refresh can no longer freeze the app.
   async function rebuild() {
+    pendingForce = true;
     built = false;
     await ensureBuilt();
     return backend.count();
@@ -189,6 +369,7 @@ export function createSearchHelpers(deps = {}) {
 
   // Low-level ranked search (id + score) over the whole corpus.
   async function search(query, opts = {}) {
+    throwIfChildWarming();
     await ensureBuilt();
     const q = (query ?? '').toString();
     const { hits } = await safeBackendQuery({ text: q, topK: opts.limit ?? 10 });
@@ -297,6 +478,7 @@ export function createSearchHelpers(deps = {}) {
     };
     if (!query.trim()) return empty;
 
+    throwIfChildWarming();
     await ensureBuilt();
 
     // Over-fetch so each layer can fill up to `limit` after partitioning.
@@ -414,11 +596,20 @@ export function createSearchHelpers(deps = {}) {
     warm,
     isBuilt,
     isWarming,
+    // status surface for /processing-status: state + progress counts only.
+    buildStatus: () => ({
+      state: built ? 'built' : (buildPromise ? 'building' : 'idle'),
+      backend: backendKind,
+      ...(buildProgress ? { progress: { source: buildProgress.source, added: buildProgress.added } } : {}),
+    }),
+    // shutdown hook: SIGTERM the live build child (watermark makes it resumable).
+    stopBuild: () => { try { childHandle?.stop?.(); } catch { /* already gone */ } },
     indexDocument,
     noteUpsert,
     noteDelete,
     noteVector,
-    backend,
+    flushIncremental,
+    backend: exposedBackend,
     backendKind,
     // expose isScoped for parity with the canonical searchHelpers shape
     isScoped: () => false,

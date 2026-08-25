@@ -45,6 +45,10 @@
     {
       "site": "src/db/vault-copy-worker.mjs",
       "why": "D-130 off-loop copy child: VACUUM INTO from a READONLY src handle (both its opens — src, and the readonly verify handle on the produced .tmp). Read-only is safe HERE, unlike the sync twin in snapshot-on-boot.js, because this child has exactly one launch context: awaited from initVaultStorage while the parent holds the cross-process init lock, so no family sibling is mid-migration during the copy (the settled-vault context snapshot-worker.mjs already relies on). verify:at-rest-migration N=4 held GREEN across 5 consecutive runs with this read-only open (2026-08-04). Reduce further by folding into snapshot-worker.mjs if their protocols ever converge."
+    },
+    {
+      "site": "src/search/build-worker.mjs",
+      "why": "search-corpus build child: reads messages/profiles from a READONLY vault handle to build the regenerable sidecar index off the serving process (the 2026-08-22 event-loop-starvation fix); cannot write the vault — the sidecar write goes through openSidecar"
     }
   ],
   "writeCapable": [

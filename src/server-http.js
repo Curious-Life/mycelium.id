@@ -29,6 +29,17 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 
 import { boot } from './index.js';
+
+// Real launches (no injected keys) build the search corpus in a spawned child so
+// the build can never starve this serving thread (the 2026-08-22 outage class);
+// injected-key verify runs keep their lazy in-process build. Per-session /mcp
+// boots share the flag — the cross-process watermark lease in src/search keeps
+// N sessions from spawning N builders.
+const withChildBuild = (bootOpts = {}) => (
+  bootOpts.userHex === undefined && bootOpts.systemHex === undefined
+    ? { ...bootOpts, searchChildBuild: true }
+    : bootOpts
+);
 import { createAuth, migrateAuth, ensureOperatorUser, ensurePasskeyLastUsedColumn } from './auth.js';
 import { uploadAttachment } from './ingest/upload.js';
 import { createEnqueueEnrichment } from './ingest/enqueue.js';
@@ -513,7 +524,7 @@ export async function createHttpApp(opts = {}) {
   // Shared vault handle for the authenticated ingestion routes (one per app,
   // not per request — unlike /mcp which isolates per session). Reuses the SAME
   // captureMessage/importMessages handlers as the stdio + REST surfaces.
-  const ingest = await boot(opts.bootOpts);
+  const ingest = await boot(withChildBuild(opts.bootOpts));
   // Enrichment nudge for upload-created messages (same best-effort seam as MCP).
   ingest.enqueueEnrichment = createEnqueueEnrichment({ userId: ingest.userId });
 
@@ -641,7 +652,7 @@ export async function createHttpApp(opts = {}) {
       if (req.method === 'POST' && isInitializeRequest(req.body)) {
         // Fresh server + db per session for isolation; reuses the SAME
         // tools/handlers assembly as the stdio path via boot().
-        const { server, close } = await boot(opts.bootOpts);
+        const { server, close } = await boot(withChildBuild(opts.bootOpts));
 
         let registered = false;
         const transport = new StreamableHTTPServerTransport({

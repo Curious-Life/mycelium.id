@@ -52,7 +52,9 @@ export function stripPrefix(id) {
 // only — used in structure(), not here.) A SELECT of a column absent on its
 // table would throw SQLITE_ERROR, which the per-source try/catch swallows,
 // silently dropping that whole layer — so every column below is confirmed.
-const SOURCES = [
+// Exported for gates (verify-search-build-worker asserts the messages pageSql
+// query PLAN stays on the id index — the quadratic-plan guard). Not public API.
+export const SOURCES = [
   // content IS NOT NULL/'' — a content-NULL message can never be a useful search
   // hit (empty doc) and must not enter the pipeline (PIPELINE-INTEGRITY design
   // §P1.3); excludes the quarantined/dead rows that otherwise bloat the index.
@@ -95,16 +97,24 @@ const SOURCES = [
   // message row). So the transcript is keyword-searchable immediately; it becomes
   // SEMANTICALLY searchable only once that message is re-embedded. RRF fusion still
   // surfaces the BM25 hit. Re-embed-on-transcript is the follow-on, not this change.
+  // ⚠️ THE `+m.user_id` IS A PLANNER HINT, NOT A TYPO (2026-08-22, gate B6). On a
+  // single-user vault `user_id = ?` matches EVERY row, yet SQLite still picked
+  // idx_messages_user_agent for it — turning each keyset page into a full-table
+  // scan + TEMP B-TREE sort: O(n) per page, O(n²) per build. Live cost: the
+  // ~12-minute 100%-CPU boot builds on the operator's 67k vault. The unary `+`
+  // makes that predicate non-indexable, forcing the id-PK walk that satisfies
+  // `id > ? ORDER BY id LIMIT ?` directly. verify-search-build-worker B6 pins
+  // the plan (SEARCH m USING ... sqlite_autoindex_messages_1, no TEMP B-TREE).
   { table: 'messages', sql: "SELECT m.id AS id, m.content AS content, a.transcript AS transcript, a.description AS description, m.created_at AS created_at, m.embedding_768 AS embedding_768 FROM messages m LEFT JOIN attachments a ON a.id = m.attachment_id AND a.user_id = m.user_id WHERE m.user_id = ? AND m.forgotten_at IS NULL AND ((m.content IS NOT NULL AND m.content != '') OR (a.transcript IS NOT NULL AND a.transcript != '') OR (a.description IS NOT NULL AND a.description != ''))", kind: 'message', prefix: '',
     paginate: true,
     textFrom: (r) => [r.content, r.transcript, r.description].filter(Boolean).join(' '),
-    pageSql: "SELECT m.id AS id, m.content AS content, a.transcript AS transcript, a.description AS description, m.created_at AS created_at, m.embedding_768 AS embedding_768 FROM messages m LEFT JOIN attachments a ON a.id = m.attachment_id AND a.user_id = m.user_id WHERE m.user_id = ? AND m.forgotten_at IS NULL AND ((m.content IS NOT NULL AND m.content != '') OR (a.transcript IS NOT NULL AND a.transcript != '') OR (a.description IS NOT NULL AND a.description != '')) AND m.id > ? ORDER BY m.id LIMIT ?",
+    pageSql: "SELECT m.id AS id, m.content AS content, a.transcript AS transcript, a.description AS description, m.created_at AS created_at, m.embedding_768 AS embedding_768 FROM messages m LEFT JOIN attachments a ON a.id = m.attachment_id AND a.user_id = m.user_id WHERE +m.user_id = ? AND m.forgotten_at IS NULL AND ((m.content IS NOT NULL AND m.content != '') OR (a.transcript IS NOT NULL AND a.transcript != '') OR (a.description IS NOT NULL AND a.description != '')) AND m.id > ? ORDER BY m.id LIMIT ?",
     // The pre-join query, verbatim. Used ONLY if the JOIN above fails on its first read (no
     // `attachments` table / no `attachment_id` column) — messages stay searchable without
     // their derived text instead of vanishing from the corpus. See the loop in loadFromDb.
     fallback: {
       sql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != ''",
-      pageSql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != '' AND id > ? ORDER BY id LIMIT ?",
+      pageSql: "SELECT id, content AS text, created_at, embedding_768 FROM messages WHERE +user_id = ? AND forgotten_at IS NULL AND content IS NOT NULL AND content != '' AND id > ? ORDER BY id LIMIT ?",
       textFrom: null,
     } },
   // name + essence are ENCRYPTED columns on all three topology tables
@@ -158,9 +168,15 @@ function tsFromRow(row) {
  * @param {{ add: Function }} deps.backend
  * @param {object} deps.db        assembled db namespace (needs rawQuery)
  * @param {string} deps.userId
+ * @param {boolean} [deps.resume]  continue a crashed/killed build from its
+ *   persisted watermark instead of resetting the index to zero (needs a backend
+ *   with getBuildState/setBuildState — the sqlite sidecar). Default false: the
+ *   from-scratch reset behavior every existing caller expects.
+ * @param {Function} [deps.onProgress]  called with { source, added, byKind }
+ *   per committed batch/source — counts only, never content (CLAUDE.md §1).
  * @returns {Promise<{ added:number, byKind:Record<string,number> }>}
  */
-export async function loadFromDb({ backend, db, userId = 'local-user', getMasterKey = null }) {
+export async function loadFromDb({ backend, db, userId = 'local-user', getMasterKey = null, resume = false, onProgress = null }) {
   if (!backend || typeof backend.add !== 'function') {
     throw new TypeError('loadFromDb: backend with add() required');
   }
@@ -199,10 +215,27 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
   // old per-row add (unchanged behavior). The embedding decrypt stays per-row.
   const useBulk = typeof backend.bulkAdd === 'function';
   const BATCH = 2000;
+  // Resume (the restart trap fix): a build killed mid-way — app quit, crash,
+  // SIGTERM — left `build_src:<table>`='done' rows and a `build_watermark`
+  // (lastId of the last COMMITTED batch, persisted atomically with it). With
+  // `resume`, skip finished sources and continue messages from the watermark
+  // instead of starting over; bulkAdd is idempotent by id, so re-processing the
+  // boundary overlap cannot double-index. Without usable state this degrades to
+  // a normal from-scratch build.
+  const canResume = resume
+    && typeof backend.getBuildState === 'function'
+    && typeof backend.setBuildState === 'function';
+  let buildState = {};
+  if (canResume) { try { buildState = backend.getBuildState() || {}; } catch { buildState = {}; } }
+  const resuming = canResume && Object.keys(buildState).length > 0;
+  const markSourceDone = (table) => {
+    if (canResume) { try { backend.setBuildState(`build_src:${table}`, 'done'); } catch { /* best-effort */ } }
+  };
   // resetIndex gives a full rebuild a clean slate (no dup inserts; evicts rows
   // deleted from the source since the last build). Both backends implement it;
-  // guard for any third-party backend that does not.
-  if (typeof backend.resetIndex === 'function') {
+  // guard for any third-party backend that does not. A RESUMED build must NOT
+  // reset — the rows already committed are the point of resuming.
+  if (!resuming && typeof backend.resetIndex === 'function') {
     try { backend.resetIndex(); } catch { /* non-fatal: a partial reset still rebuilds */ }
   }
 
@@ -213,10 +246,15 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
   // (PIPELINE-INTEGRITY design §P2.1.) For the per-row fallback we yield on the
   // same cadence by flushing the batch through add() one at a time.
   let batch = [];
-  async function flush() {
+  let lastYield = Date.now();
+  async function flush(watermark = null) {
     if (batch.length === 0) return;
     if (useBulk) {
-      try { added += backend.bulkAdd(batch); } catch { /* skip unindexable batch */ }
+      // `await` is load-bearing twice over: the local backend's bulkAdd is async
+      // (a bare `added +=` made `added` NaN), and the sqlite backend's is sync
+      // (await on a number is the number). The watermark commits atomically with
+      // this batch (sqlite backend) — resume can never point past committed rows.
+      try { added += await backend.bulkAdd(batch, watermark ? { watermark } : undefined); } catch { /* skip unindexable batch */ }
     } else {
       for (const d of batch) {
         try { await backend.add(d); added++; } catch { /* skip unindexable row */ }
@@ -224,6 +262,7 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
     }
     batch = [];
     await new Promise((r) => setImmediate(r)); // yield between batches
+    lastYield = Date.now();
   }
 
   // Decrypt one row's stored vector, build its index req, append to the batch,
@@ -246,6 +285,13 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
     batch.push({ id, text, embedding, ts: tsFromRow(row), skipEmbed: src.skipEmbed === true });
     byKind[src.kind] = (byKind[src.kind] || 0) + 1;
     if (batch.length >= BATCH) await flush();
+    // Time-boxed macrotask yield: the per-row decrypt loop between commits must
+    // not starve the event loop on the in-process path (an unbroken await chain
+    // only yields microtasks). Cheap no-op when flushes already yield often.
+    else if (Date.now() - lastYield > 150) {
+      await new Promise((r) => setImmediate(r));
+      lastYield = Date.now();
+    }
   }
 
   // Suspend WAL auto-checkpoint for the build (one checkpoint at the end instead
@@ -263,6 +309,9 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
       // richer query fails on its FIRST read, we fall back and index messages WITHOUT derived
       // text rather than indexing nothing. Losing the transcript is a degradation; losing
       // every message is an outage.
+      // A source finished by the build this one resumes is skipped whole; its
+      // rows are already committed (that is what `build_src:*`='done' asserts).
+      if (resuming && buildState[`build_src:${src.table}`] === 'done') continue;
       let eff = src;
       const demote = () => {
         if (!src.fallback || eff !== src) return false;
@@ -274,7 +323,15 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
         // then flush + yield so the event loop is serviced — vs one ~300s block
         // that freezes the app for the whole one-time build of a large vault.
         const PAGE = 1000;
+        // Resume from the last committed page's watermark. `at` doubles as the
+        // cross-process liveness heartbeat (see backend.getBuildState).
         let lastId = '';
+        if (resuming && buildState.build_watermark) {
+          try {
+            const wm = JSON.parse(buildState.build_watermark);
+            if (wm && wm.source === src.table && typeof wm.lastId === 'string') lastId = wm.lastId;
+          } catch { /* unreadable watermark → from the start; idempotent upserts absorb it */ }
+        }
         for (;;) {
           let rows;
           try {
@@ -289,9 +346,13 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
           if (rows.length === 0) break;
           lastId = String(rows[rows.length - 1].id);
           for (const row of rows) await processRow(eff, row);
-          await flush(); // flush each bounded page + yield
+          // Pages are ≤PAGE < BATCH, so this page's rows are exactly the pending
+          // batch — the watermark below commits with them, or not at all.
+          await flush(canResume ? { source: src.table, lastId, at: Date.now() } : null);
+          try { onProgress?.({ source: src.table, added, byKind }); } catch { /* observer only */ }
           if (rows.length < PAGE) break; // final (short) page
         }
+        markSourceDone(src.table);
       } else {
         let rows;
         try {
@@ -306,6 +367,10 @@ export async function loadFromDb({ backend, db, userId = 'local-user', getMaster
         }
         for (const row of rows) await processRow(eff, row);
         await flush(); // flush at source boundary (keeps batches kind-homogeneous)
+        // Non-paginated sources are small and all-or-nothing: a crash mid-source
+        // redoes the whole source on resume (idempotent), so no watermark needed.
+        markSourceDone(src.table);
+        try { onProgress?.({ source: src.table, added, byKind }); } catch { /* observer only */ }
       }
     }
     // Compact FTS5 segments once after the full load → faster BM25 queries (no-op

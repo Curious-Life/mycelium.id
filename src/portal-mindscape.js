@@ -4,6 +4,7 @@ import { startClusteringJob, startMeasurementJob, startBackfillJob, getJob, canc
   startChronicleNarrationJob, startClusterNamingJob } from './jobs.js';
 import { makeNarrationRunner } from './agent/narration-runner.js';
 import { getEmbedderHealth } from './embed/supervisor.js';
+import { getMindSearch } from './search/registry.js';
 import { createReadiness } from './readiness.js';
 import { getMindscapeCached, getMindscapePointsCached, bustMindscapePoints } from './mindscape-cache.js';
 import { isTrustedLoopback } from './http/loopback.js';
@@ -613,6 +614,11 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
     // "Processing 0/N" spinner. Health is best-effort; never let it 500 the count.
     let embedder = { status: 'unknown', message: '', detail: null };
     try { embedder = getEmbedderHealth(); } catch { /* supervisor not running */ }
+    // Search-corpus build state (built|building|idle + progress counts). Before
+    // this field the multi-minute rebuild was invisible — the app just looked
+    // dead. Additive; older clients ignore it. Registry-sourced: no plumbing.
+    let searchIndex = null;
+    try { searchIndex = getMindSearch()?.buildStatus?.() || null; } catch { /* helpers absent */ }
     try {
       // Delegates to the ONE readiness model. Cached slice — this endpoint is POLLED, and
       // the pure scan is a multi-second SQLCipher decrypt (the /generate preflight below is
@@ -627,11 +633,11 @@ export function portalMindscapeRouter({ db, userId, dbPath, readiness: injected 
       // A counting error now reports `unknown: true` with the counts OMITTED: a client
       // cannot read a zero that was never measured.
       const { data, canGenerate } = await readiness.get({ slices: ['data'] });
-      if (canGenerate.reason === 'unknown') return res.json({ unknown: true, embedder });
+      if (canGenerate.reason === 'unknown') return res.json({ unknown: true, embedder, ...(searchIndex ? { searchIndex } : {}) });
       // `unprocessable`: content-bearing rows neither embedded nor queued (blank-skip /
       // awaiting-L2). A COUNT only — a per-message failure reason is not progress data.
-      res.json({ embedded: data.embedded, total: data.total, pending: data.pending, unprocessable: data.unprocessable, embedder });
-    } catch { res.json({ unknown: true, embedder }); }
+      res.json({ embedded: data.embedded, total: data.total, pending: data.pending, unprocessable: data.unprocessable, embedder, ...(searchIndex ? { searchIndex } : {}) });
+    } catch { res.json({ unknown: true, embedder, ...(searchIndex ? { searchIndex } : {}) }); }
   });
 
   // GET /mycelium/map-status → { embedded, mapped, drift, driftPct, stale, basis, built }

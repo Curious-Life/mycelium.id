@@ -314,6 +314,10 @@ export function getDb({ dbPath, userKey, systemKey, scope = 'personal', federati
     try {
       const side = openSidecar({ dbPath, dbKeyHex });
       db._sqliteSearch = side.raw;
+      // The off-process corpus build (search/build-child.js) spawns a worker on
+      // this same vault file; the path is not otherwise reachable from the db
+      // namespace. Sidecar-gated: fixtures without the sidecar never spawn one.
+      db._dbPath = dbPath;
       closeSidecar = () => { try { side.raw.close(); } catch { /* */ } };
     } catch (e) {
       console.error(`[mycelium] search sidecar unavailable (${e?.message || e}) — search degrades to the in-RAM backend`);

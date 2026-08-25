@@ -56,6 +56,11 @@ export async function boot({
   systemHex,
   userId = process.env.MYCELIUM_USER_ID || 'local-user',
   onPhase = null, // D-130: boot-phase reporter ('snapshot'|'migrating') for /account/status honesty
+  // Real-app launches set this so the full corpus build runs in a spawned child
+  // (search/build-child.js) instead of starving this serving thread for minutes
+  // on a large vault. Verify scripts leave it off and keep the lazy in-process
+  // build against their deterministic fixtures.
+  searchChildBuild = false,
   // embedder: the query-time mind-search embedder ({ embed, health }). Defaults
   // to the embed-service client (:8091) via resolveDefaultEmbedder() so semantic
   // search is live out of the box; the backend fail-softs to BM25 per-query when
@@ -286,7 +291,7 @@ export async function boot({
     startSnapshotSchedule({ dbPath, dbKeyHex, isCanonical: true, log: (m) => console.error(m) });
     armVaultCopy({ dbPath, dbKeyHex }); // D-130: lets jobs.js take off-loop consistent copies without key plumbing
   }
-  const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity });
+  const { domains, deferred, searchHelpers, isTopologyReady } = buildDomains({ db, userId, embedder, identity, childBuild: searchChildBuild });
   // Cold-start gating (Phase 4): Tier-2 readers return a uniform "not ready"
   // message until the topology pipeline has run, instead of honest-empty.
   const { tools, handlers } = collectTools(domains, {
@@ -306,7 +311,7 @@ export async function boot({
 }
 
 async function startStdio() {
-  const { server, tools, deferred, close } = await boot();
+  const { server, tools, deferred, close } = await boot({ searchChildBuild: true });
   // A stdio MCP server's lifetime IS its stdin. Nothing was listening: observed on a real
   // machine, a Claude-Code-spawned `node src/index.js` had been holding a vault open
   // read/write for 2 h 54 m with its session long gone. 171 worktrees × 12 worktree vaults

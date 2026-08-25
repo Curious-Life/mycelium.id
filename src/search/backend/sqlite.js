@@ -103,6 +103,8 @@ export function createSqliteBackend(deps = {}) {
     shortlist: raw.prepare('SELECT id FROM vec_docs_256 WHERE embedding MATCH ? ORDER BY distance LIMIT ?'),
     stateGet: raw.prepare('SELECT value FROM search_state WHERE key = ?'),
     stateSet: raw.prepare('INSERT INTO search_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
+    stateAllBuild: raw.prepare("SELECT key, value FROM search_state WHERE key LIKE 'build\\_%' ESCAPE '\\'"),
+    stateDelBuild: raw.prepare("DELETE FROM search_state WHERE key LIKE 'build\\_%' ESCAPE '\\'"),
   };
   let _lastQueryAt = null;
 
@@ -201,39 +203,46 @@ export function createSqliteBackend(deps = {}) {
   }
 
   // ── Bulk initial build (Phase 1 perf fix) ──────────────────────────────────
-  // The per-doc add() above wraps ONE encrypted-WAL transaction per document and
-  // does a delete-then-insert. For the FIRST full-corpus build that is fatal: on
-  // SQLCipher, 69k separate commits + FTS5 delete-marker/segment churn whose cost
-  // GROWS with corpus size decays throughput from ~900/s to ~14/min (spike
-  // scripts/spike-index-build-perf.mjs: strategy A). Batching the build into one
-  // transaction per ~2k docs, INSERT-ONLY (the index is empty — nothing to
-  // delete), holds a FLAT ~6k/s → the full 69k build runs in ~12s. add() keeps
-  // its delete-then-insert for incremental upserts (noteUpsert) where idempotency
-  // matters; bulkAdd is for the cleared-index initial load only.
+  // The per-doc add() above wraps ONE encrypted-WAL transaction per document. For
+  // the FIRST full-corpus build that is fatal: on SQLCipher, 69k separate commits
+  // + FTS5 delete-marker/segment churn whose cost GROWS with corpus size decays
+  // throughput from ~900/s to ~14/min (spike scripts/spike-index-build-perf.mjs:
+  // strategy A). Batching the build into one transaction per ~2k docs holds a
+  // FLAT ~6k/s → the full 69k build runs in ~12s. bulkAdd is delete-then-insert
+  // per doc (indexed misses on a fresh index — measured noise vs the insert
+  // cost): a RESUMED build re-processing the boundary batch, or a concurrent
+  // noteUpsert racing the builder, must not double-index a doc.
 
-  // Clear the index to empty so bulkAdd can INSERT-only with no dup risk. Called
-  // by loadFromDb at the start of every full (re)build — also evicts rows that
-  // were deleted from the source since the last build. Idempotent.
+  // Clear the index to empty. Called by loadFromDb at the start of every full
+  // FROM-SCRATCH build (a resumed build skips it) — also evicts rows deleted
+  // from the source since the last build, and drops any stale resume watermark
+  // so a later crash cannot resume into a cleared index. Idempotent.
   function resetIndex() {
     raw.transaction(() => {
       raw.exec('DELETE FROM fts_docs; DELETE FROM vec_docs_768; DELETE FROM vec_docs_256; DELETE FROM doc_meta;');
       stmts.stateSet.run('corpus_built', '0');
+      stmts.stateDelBuild.run();
     })();
   }
 
-  // Insert a batch of docs in ONE transaction (insert-only — assumes the id is
-  // not already present, guaranteed by resetIndex()). Uses ONLY precomputed
-  // embeddings: bulk build never calls the embed service (no per-doc :8091 round
-  // trip at cold start) — a doc with no/invalid vector is indexed BM25-only and
-  // enrichment's noteVector backfills its vector later. Returns the count added.
-  function bulkAdd(docs) {
+  // Insert a batch of docs in ONE transaction, idempotent by id. Uses ONLY
+  // precomputed embeddings: bulk build never calls the embed service (no per-doc
+  // :8091 round trip at cold start) — a doc with no/invalid vector is indexed
+  // BM25-only and enrichment's noteVector backfills its vector later.
+  // `watermark` (resume support) commits atomically WITH its batch: a crash can
+  // lose at most the in-flight transaction, so the persisted watermark never
+  // points past rows that aren't in the index. Returns the count added.
+  function bulkAdd(docs, { watermark = null } = {}) {
     if (!Array.isArray(docs) || docs.length === 0) return 0;
     let n = 0;
     raw.transaction(() => {
       for (const d of docs) {
         if (!d || typeof d.id !== 'string' || !d.id || !Number.isFinite(d.ts)) continue;
         stmts.metaUpsert.run(d.id, Math.floor(d.ts));
+        stmts.ftsDel.run(d.id);
         if (typeof d.text === 'string' && d.text.length > 0) stmts.ftsIns.run(d.id, d.text);
+        stmts.vec768Del.run(d.id);
+        stmts.vec256Del.run(d.id);
         const vec = toF32(d.embedding);
         const norm = vec ? normalize(vec) : null;
         if (norm && norm.length === VEC_DIM) {
@@ -243,8 +252,25 @@ export function createSqliteBackend(deps = {}) {
         }
         n++;
       }
+      if (watermark) stmts.stateSet.run('build_watermark', JSON.stringify(watermark));
     })();
     return n;
+  }
+
+  // ── Build progress state (resume + cross-process warming signal) ───────────
+  // All keys prefixed `build_` in search_state. `build_watermark` doubles as the
+  // cross-process build lease: its embedded `at` timestamp is refreshed
+  // transactionally with every batch, so a second process (REST vs MCP) reads
+  // "fresh → a build is live elsewhere, treat as warming" vs "stale → the
+  // builder died, resume from here". Values are JSON/flags only — never content.
+  function getBuildState() {
+    const out = {};
+    for (const r of stmts.stateAllBuild.all()) out[r.key] = r.value;
+    return out;
+  }
+  function setBuildState(key, value) {
+    if (!/^build_/.test(key)) throw new TypeError('setBuildState: key must be build_-prefixed');
+    stmts.stateSet.run(key, String(value));
   }
 
   // Merge FTS5 segments into one after a bulk load → faster BM25 queries. Cheap
@@ -310,11 +336,35 @@ export function createSqliteBackend(deps = {}) {
         if (norm256) stmts.vec256Ins.run(id, f32buf(norm256));
       })();
     },
+    // Batch twin of noteVector (D-148): the enrichment drain hands vectors per
+    // embedded row, and each own-transaction commit pays the encrypted-WAL cost
+    // — one transaction per BATCH amortizes it. Same per-id shape, same
+    // ts/fts-untouched contract. Entries: [id, embedding] pairs.
+    bulkVectors(entries) {
+      if (!Array.isArray(entries) || entries.length === 0) return 0;
+      let n = 0;
+      raw.transaction(() => {
+        for (const [id, embedding] of entries) {
+          if (typeof id !== 'string' || !id) continue;
+          const norm = embedding ? normalize(toF32(embedding)) : null;
+          if (!norm || norm.length !== VEC_DIM) continue;
+          const norm256 = prefix256(norm);
+          stmts.vec768Del.run(id);
+          stmts.vec256Del.run(id);
+          stmts.vec768Ins.run(id, f32buf(norm));
+          if (norm256) stmts.vec256Ins.run(id, f32buf(norm256));
+          n++;
+        }
+      })();
+      return n;
+    },
     // Persisted "the whole corpus was loaded once" flag — robust against the
     // count()>0 heuristic breaking once incremental writes (noteUpsert) add rows
     // before the first query. ensureBuilt uses this to decide loadFromDb.
     isCorpusBuilt() { return stmts.stateGet.get('corpus_built')?.value === '1'; },
     markCorpusBuilt() { stmts.stateSet.run('corpus_built', '1'); },
+    getBuildState,
+    setBuildState,
     async health() {
       const embedHealthy = embedder ? await embedder.health().catch(() => false) : false;
       const indexLoaded = stmts.metaCount.get().c > 0;

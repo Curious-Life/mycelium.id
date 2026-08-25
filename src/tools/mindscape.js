@@ -137,14 +137,22 @@ export function createMindscapeDomain(deps) {
       const text = proactive ? args.relatedTo : (args.query || '');
       if (!text.trim()) return 'Provide either query or relatedTo to search.';
 
-      const result = await searchHelpers.bulkSearch({
-        query: text,
-        limit: args.limit || 5,
-        agent: args.agent || null,
-        scope,
-        includeTopology: !!args.includeTopology,
-        excludeSensitive: proactive,
-      });
+      let result;
+      try {
+        result = await searchHelpers.bulkSearch({
+          query: text,
+          limit: args.limit || 5,
+          agent: args.agent || null,
+          scope,
+          includeTopology: !!args.includeTopology,
+          excludeSensitive: proactive,
+        });
+      } catch (e) {
+        // Off-process corpus rebuild window: answer honestly instead of an
+        // opaque tool error — every other tool works normally throughout.
+        if (e && e.name === 'SearchWarmingError') return `${e.message}. Other tools work normally while it rebuilds.`;
+        throw e;
+      }
 
       const sections = [];
 

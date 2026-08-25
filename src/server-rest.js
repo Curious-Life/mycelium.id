@@ -619,6 +619,11 @@ export async function startRestServer({
       const opts = { ...bootOpts, ...extraKeys };
       delete opts.reason;
       opts.onPhase = (p) => { bootPhase = p; }; // D-130: surfaced via getBootPhase
+      // Real launches build the search corpus in a spawned child so the build
+      // can never starve this serving thread (the 2026-08-22 outage: ~12 min at
+      // 100% CPU, every tool call timing out). Injected-key (verify) runs keep
+      // the in-process build their assertions pin.
+      opts.searchChildBuild = !keysInjectedAtStart;
       // Resolve keys up front so we NEVER create an empty vault when there are
       // none (resolveKeys throws KeySourceError → caller stays in setup mode).
       if (opts.userHex === undefined || opts.systemHex === undefined) {
@@ -918,6 +923,7 @@ export async function startRestServer({
           try { channelSup?.stop(); } catch { /* */ }
           try { transcribeSup?.stop(); } catch { /* */ }
           try { hwOllamaDaemon.stop(); } catch { /* */ }
+          try { searchHelpers?.stopBuild?.(); } catch { /* */ } // resumable via its watermark
           try { close(); } catch { /* */ }
         };
       }

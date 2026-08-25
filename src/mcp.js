@@ -65,6 +65,7 @@ export function buildDomains({
   agentRoot = mindAgentRoot(),
   embedder = null,
   identity = null,
+  childBuild = false, // real-app launches: corpus build runs off-process
 }) {
   // Mind-files subsystem (Wave 2). createMindFiles binds fs/path + an
   // AGENT_ROOT + agent identity; its read/write helpers encrypt at rest with
@@ -80,7 +81,7 @@ export function buildDomains({
   // temporal) plus topology reads. It is the dep createMindscapeDomain needs.
   // The embedder is injected (real one wraps embed-service :8091, sibling R2);
   // when absent the backend runs BM25-only and still returns ranked results.
-  const searchHelpers = createSearchHelpers({ db, embedder, userId, getMasterKey });
+  const searchHelpers = createSearchHelpers({ db, embedder, userId, getMasterKey, childBuild });
 
   // topologyHelpers (Wave-2): resolver + fetchers over the db.topology
   // namespace. Honest-empty against an empty vault — see src/topology/helpers.js.
